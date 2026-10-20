@@ -65,6 +65,30 @@ pub(crate) enum RenameTarget {
     Layer(usize),
 }
 
+/// What a click on a page tab or layer row does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowClick {
+    /// Make the page or layer active.
+    Activate,
+    /// Start renaming it.
+    Rename,
+    /// Nothing: the click landed in the row's own open rename field, where
+    /// it places the caret or selects text.
+    Ignore,
+}
+
+/// Decides what a click on a tab or row does, given whether that tab or row
+/// is being renamed and the click count.
+pub(crate) fn row_click(renaming: bool, click_count: usize) -> RowClick {
+    if renaming {
+        RowClick::Ignore
+    } else if click_count >= 2 {
+        RowClick::Rename
+    } else {
+        RowClick::Activate
+    }
+}
+
 /// An inline rename in progress.
 struct Rename {
     target: RenameTarget,
@@ -447,7 +471,18 @@ impl Render for EditorWindow {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
-    use super::{format_grid_size, letter_spaced, panel_group_id, parse_grid_size};
+    use super::{
+        format_grid_size, letter_spaced, panel_group_id, parse_grid_size, row_click, RowClick,
+    };
+
+    #[test]
+    fn row_clicks_activate_rename_or_leave_an_open_rename_alone() {
+        assert_eq!(row_click(false, 1), RowClick::Activate);
+        assert_eq!(row_click(false, 2), RowClick::Rename);
+        assert_eq!(row_click(false, 3), RowClick::Rename);
+        assert_eq!(row_click(true, 1), RowClick::Ignore);
+        assert_eq!(row_click(true, 2), RowClick::Ignore);
+    }
 
     #[test]
     fn grid_size_parses_trimmed_numbers() {

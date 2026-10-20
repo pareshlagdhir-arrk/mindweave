@@ -5,7 +5,7 @@ use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{section_label, EditorWindow, RenameTarget, SMALL_TEXT_SIZE};
+use super::{row_click, section_label, EditorWindow, RenameTarget, RowClick, SMALL_TEXT_SIZE};
 
 const HEADER_HEIGHT: f32 = 30.;
 const ROW_HEIGHT: f32 = 26.;
@@ -118,10 +118,11 @@ fn row(
                 })),
         )
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-            if event.click_count() >= 2 {
-                this.begin_rename(RenameTarget::Layer(ix), window, cx);
-            } else {
-                this.update_session(|s| s.set_active_layer(ix), cx);
+            let renaming = this.rename_input(RenameTarget::Layer(ix)).is_some();
+            match row_click(renaming, event.click_count()) {
+                RowClick::Activate => this.update_session(|s| s.set_active_layer(ix), cx),
+                RowClick::Rename => this.begin_rename(RenameTarget::Layer(ix), window, cx),
+                RowClick::Ignore => {}
             }
         }))
 }

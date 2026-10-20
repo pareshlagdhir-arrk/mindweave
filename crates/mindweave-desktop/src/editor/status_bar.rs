@@ -60,12 +60,7 @@ fn page_label(active: usize, count: usize) -> String {
 
 /// "x {X} · y {Y}" in whole canvas units, or nothing off the canvas.
 fn cursor_label(cursor: Option<(f32, f32)>) -> Option<String> {
-    cursor.map(|(x, y)| format!("x {} · y {}", round(x), round(y)))
-}
-
-/// Rounds to a whole number, never showing "-0".
-fn round(v: f32) -> i64 {
-    v.round() as i64
+    cursor.map(|(x, y)| format!("x {} · y {}", x.round() as i64, y.round() as i64))
 }
 
 fn zoom_label(percent: u32) -> String {

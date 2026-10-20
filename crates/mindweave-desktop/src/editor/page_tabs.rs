@@ -5,7 +5,7 @@ use gpui_kit::component::{h_flex, ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{EditorWindow, RenameTarget, SMALL_TEXT_SIZE};
+use super::{row_click, EditorWindow, RenameTarget, RowClick, SMALL_TEXT_SIZE};
 
 const TABS_HEIGHT: f32 = 28.;
 const TAB_HEIGHT: f32 = 24.;
@@ -81,10 +81,11 @@ fn tab(
         })
         .child(content)
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-            if event.click_count() >= 2 {
-                this.begin_rename(RenameTarget::Page(ix), window, cx);
-            } else {
-                this.activate_page(ix, cx);
+            let renaming = this.rename_input(RenameTarget::Page(ix)).is_some();
+            match row_click(renaming, event.click_count()) {
+                RowClick::Activate => this.activate_page(ix, cx),
+                RowClick::Rename => this.begin_rename(RenameTarget::Page(ix), window, cx),
+                RowClick::Ignore => {}
             }
         }))
 }
