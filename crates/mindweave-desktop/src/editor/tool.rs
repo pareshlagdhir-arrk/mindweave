@@ -85,8 +85,6 @@ impl ToolState {
 
     /// Called after a shape is placed: back to Pointer unless locked. The
     /// tab stays.
-    // Shape placement calls this; it is not built yet.
-    #[allow(dead_code)]
     pub fn after_place(&mut self) {
         if !self.locked {
             self.tool = Tool::Pointer;

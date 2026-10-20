@@ -3741,6 +3741,7 @@ dependencies = [
  "rfd",
  "serde_json",
  "trash",
+ "uuid",
 ]
 
 [[package]]

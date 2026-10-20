@@ -2,9 +2,11 @@
 //! tabs, Properties panel and status bar.
 
 mod canvas;
+mod interaction;
 mod layers_panel;
 mod page_tabs;
 mod properties_panel;
+mod shape_paint;
 mod status_bar;
 pub mod tool;
 mod toolbar;
@@ -24,7 +26,10 @@ use crate::actions::{
 };
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
+use interaction::Gesture;
+use shape_paint::GeometryCache;
 use tool::{Tool, ToolState, BASIC_SHAPES};
+use uuid::Uuid;
 
 const TEXT_SIZE: f32 = 13.;
 const SMALL_TEXT_SIZE: f32 = 12.;
@@ -123,6 +128,12 @@ pub struct EditorWindow {
     rename: Option<Rename>,
     /// The active tool and the toolbar tab being shown.
     pub tools: ToolState,
+    /// The pointer gesture in progress on the canvas.
+    pub gesture: Gesture,
+    /// Selected shapes, all on the active layer.
+    pub selection: Vec<Uuid>,
+    /// Canvas outlines of the shapes painted last frame.
+    geometry_cache: GeometryCache,
     properties: properties_panel::PropertyFields,
     /// The title last given to the window.
     window_title: String,
@@ -158,6 +169,9 @@ impl EditorWindow {
             pan_drag: None,
             rename: None,
             tools: ToolState::default(),
+            gesture: Gesture::Idle,
+            selection: Vec::new(),
+            geometry_cache: GeometryCache::default(),
             properties,
             window_title,
             _subscriptions,
@@ -169,10 +183,38 @@ impl EditorWindow {
     }
 
     /// Applies `f` to the session, redraws, and refreshes the window title
-    /// (on the next render).
+    /// (on the next render). The selection is cleared when the active page
+    /// or layer changes, and otherwise loses shapes no longer there.
     pub fn update_session(&mut self, f: impl FnOnce(&mut DocumentSession), cx: &mut Context<Self>) {
+        let scope = self.selection_scope();
         f(&mut self.session);
+        if self.selection_scope() != scope {
+            self.selection.clear();
+        }
+        self.prune_selection();
         cx.notify();
+    }
+
+    /// The active page and layer, which the selection belongs to.
+    fn selection_scope(&self) -> (Uuid, Uuid) {
+        let page = self.session.page();
+        let layer = page
+            .layers
+            .get(page.active_layer)
+            .map_or(Uuid::nil(), |l| l.id);
+        (page.id, layer)
+    }
+
+    /// Drops selected shapes that are not on the active layer (after an
+    /// undo, say), and the whole selection when that layer is hidden.
+    fn prune_selection(&mut self) {
+        if !self.session.active_layer_selectable() {
+            self.selection.clear();
+            return;
+        }
+        let session = &self.session;
+        self.selection
+            .retain(|id| session.find_shape(*id).is_some());
     }
 
     /// Sets the pointer position shown in the status bar, in canvas
@@ -412,6 +454,7 @@ impl EditorWindow {
 
     /// Escape: back to the Pointer tool, unlocked.
     fn on_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_gesture(cx);
         self.tools.cancel();
         cx.notify();
     }
@@ -425,6 +468,16 @@ impl EditorWindow {
             self.space_held = true;
             cx.notify();
         }
+    }
+
+    /// Shift and Alt change the shape being placed without a pointer move.
+    fn on_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_placing(None, event.modifiers, cx);
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -570,6 +623,7 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_cancel))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .text_size(px(TEXT_SIZE))

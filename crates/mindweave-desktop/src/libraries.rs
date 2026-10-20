@@ -2,7 +2,7 @@
 //! folder, loaded once at startup.
 
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use gpui_kit::{App, Global, SharedString};
 use mindweave_core::{builtin_libraries, user_libraries_dir, LibraryRegistry};
@@ -10,8 +10,9 @@ use mindweave_core::{builtin_libraries, user_libraries_dir, LibraryRegistry};
 /// The icon shown for a Lucide name that is not bundled.
 pub const FALLBACK_ICON: &str = "shapes";
 
-/// The installed libraries, in toolbar order.
-pub struct Libraries(pub LibraryRegistry);
+/// The installed libraries, in toolbar order. Shared, so painting can hold
+/// them while it borrows the app mutably.
+pub struct Libraries(pub Arc<LibraryRegistry>);
 
 impl Global for Libraries {}
 
@@ -20,7 +21,7 @@ impl Global for Libraries {}
 pub fn init(cx: &mut App) -> Vec<String> {
     let user_dir = user_libraries_dir();
     let (registry, notices) = LibraryRegistry::new(builtin_libraries(), Some(&user_dir));
-    cx.set_global(Libraries(registry));
+    cx.set_global(Libraries(Arc::new(registry)));
     notices
 }
 
