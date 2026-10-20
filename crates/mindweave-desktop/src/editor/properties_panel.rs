@@ -13,6 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use mindweave_core::{BackgroundPattern, CanvasSettings, DocumentSession};
 
+use super::shape_properties::{self, ShapeFields};
 use super::{hex_to_hsla, hsla_to_hex, parse_number, section_label, EditorWindow, SMALL_TEXT_SIZE};
 
 const PATTERNS: [(BackgroundPattern, &str); 3] = [
@@ -20,13 +21,13 @@ const PATTERNS: [(BackgroundPattern, &str); 3] = [
     (BackgroundPattern::Dots, "Dots"),
     (BackgroundPattern::None, "None"),
 ];
-const NUMBER_INPUT_WIDTH: f32 = 72.;
-const FIELD_GAP: f32 = 6.;
-const ROW_HEIGHT: f32 = 28.;
-const SWATCH_SIZE: f32 = 14.;
+pub(super) const NUMBER_INPUT_WIDTH: f32 = 72.;
+pub(super) const FIELD_GAP: f32 = 6.;
+pub(super) const ROW_HEIGHT: f32 = 28.;
+pub(super) const SWATCH_SIZE: f32 = 14.;
 /// Room kept for the colour reset button, so the hex text does not move
 /// when it appears.
-const RESET_WIDTH: f32 = 20.;
+pub(super) const RESET_WIDTH: f32 = 20.;
 
 /// The pattern dropdown's items.
 type PatternItems = Vec<&'static str>;
@@ -185,11 +186,13 @@ struct ColorField {
     shows: Option<Hsla>,
 }
 
-/// The Properties panel's controls, kept in step with the active page.
+/// The Properties panel's controls, kept in step with the active page
+/// and the selection.
 pub(super) struct PropertyFields {
     pattern: Entity<SelectState<PatternItems>>,
     numbers: Vec<NumberField>,
     colors: Vec<ColorField>,
+    pub(super) shape: ShapeFields,
 }
 
 impl PropertyFields {
@@ -263,11 +266,13 @@ impl PropertyFields {
             })
             .collect();
 
+        let shape = ShapeFields::new(window, cx);
         (
             Self {
                 pattern,
                 numbers,
                 colors,
+                shape,
             },
             subscriptions,
         )
@@ -380,10 +385,16 @@ impl EditorWindow {
                 field.shows = Some(color);
             }
         }
+
+        self.sync_shape_properties(window, cx);
     }
 }
 
-pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoElement {
+/// The shape panel while shapes are selected, else the canvas settings.
+pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> AnyElement {
+    if !editor.selection.is_empty() {
+        return shape_properties::render(editor, cx).into_any_element();
+    }
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let canvas = &editor.session().page().canvas;
@@ -419,12 +430,20 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
         .children(rows)
         .child(section_label("Selection", cx).mt(px(16.)))
         .child(div().text_color(muted).child("Nothing selected"))
+        .into_any_element()
 }
 
 /// A label on the left and a control on the right.
-fn field_row(label: &'static str, tooltip: Option<&'static str>, control: impl IntoElement) -> Div {
+pub(super) fn field_row(
+    label: impl Into<SharedString>,
+    tooltip: Option<&'static str>,
+    control: impl IntoElement,
+) -> Div {
+    let label: SharedString = label.into();
     let label = div()
-        .id(label)
+        .id(ElementId::Name(label.clone()))
+        .min_w_0()
+        .truncate()
         .child(label)
         .when_some(tooltip, |label, text| {
             label.tooltip(move |window, cx| Tooltip::new(text).build(window, cx))

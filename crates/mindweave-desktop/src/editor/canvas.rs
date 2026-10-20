@@ -209,6 +209,10 @@ fn register_input(
                 return;
             }
             editor.update(cx, |editor, cx| {
+                // A shape value being typed or picked belongs to the
+                // selection the press may be about to change.
+                editor.commit_focused_shape_number(window, cx);
+                editor.finish_color_edit(cx);
                 editor.focus_handle.focus(window, cx);
                 let pans = match event.button {
                     MouseButton::Middle => true,

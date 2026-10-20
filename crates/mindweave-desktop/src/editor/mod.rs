@@ -7,6 +7,7 @@ mod layers_panel;
 mod page_tabs;
 mod properties_panel;
 mod shape_paint;
+mod shape_properties;
 mod status_bar;
 pub mod tool;
 mod toolbar;
@@ -289,8 +290,9 @@ impl EditorWindow {
     }
 
     /// Applies edits that otherwise wait for Enter or blur: an open rename
-    /// and a Properties number being typed. Save, Close and Quit call this first so
-    /// keyboard shortcuts do not skip them.
+    /// and a Properties number being typed; also ends a colour picker's
+    /// undo step. Save, Close and Quit call this first so keyboard
+    /// shortcuts do not skip them.
     pub fn commit_pending_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.rename.is_some() {
             self.finish_rename(true, cx);
@@ -298,6 +300,8 @@ impl EditorWindow {
             self.focus_handle.focus(window, cx);
         }
         self.commit_focused_number(window, cx);
+        self.commit_focused_shape_number(window, cx);
+        self.finish_color_edit(cx);
     }
 
     /// Starts an inline rename of `target` with its current name selected.
