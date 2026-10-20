@@ -11,6 +11,7 @@ pub mod session;
 pub mod settings;
 pub mod shape;
 pub mod svg;
+pub mod transform;
 pub mod viewport;
 
 pub use color::{format_hex_color, normalize_hex_color, parse_hex_color};
@@ -27,6 +28,11 @@ pub use settings::{
     load_settings, save_settings, settings_path, AppSettings, RecentFile, WindowSize, MAX_RECENT,
 };
 pub use shape::{Shape, Style};
+pub use transform::{
+    drag_create, frame_aabb, handle_positions, marquee_selects, resize, rotate,
+    rotate_handle_position, selection_bounds, translate, Handle, CLICK_DRAG_THRESHOLD,
+    DUPLICATE_OFFSET, MIN_SIZE,
+};
 pub use viewport::{
     dot_stride, grid_lines, is_major_line, pinch_zoom_factor, scroll_zoom_factor, stride_offset,
     GridLines, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP,
