@@ -21,7 +21,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: mindweave-unsigned-${{ runner.os }}-${{ runner.arch }}
-          path: |
-            target/release/mindweave
-            target/release/mindweave.exe
+          path: target/release/mindweave
           if-no-files-found: error
