@@ -94,6 +94,17 @@ impl NumberSetting {
     }
 }
 
+/// The value to apply from `text` typed into `setting`'s field, which
+/// showed `shows`: `None` when it is not a number or is still the text
+/// shown.
+fn typed_value(setting: NumberSetting, text: &str, shows: Option<f32>) -> Option<f32> {
+    let text = text.trim();
+    if shows.is_some_and(|v| setting.text(v) == text) {
+        return None;
+    }
+    parse_number(text)
+}
+
 /// A typed major-line count as a whole, non-negative number (saturating).
 fn major_every_from(value: f32) -> u32 {
     value.round().max(0.) as u32
@@ -193,6 +204,9 @@ pub(super) struct PropertyFields {
     numbers: Vec<NumberField>,
     colors: Vec<ColorField>,
     pub(super) shape: ShapeFields,
+    /// A colour picker (canvas or shape) is being dragged: its changes are
+    /// one undo step, ended when the picker closes.
+    color_edit: bool,
 }
 
 impl PropertyFields {
@@ -249,10 +263,11 @@ impl PropertyFields {
                 subscriptions.push(cx.subscribe_in(
                     &state,
                     window,
-                    move |this, _, event: &ColorPickerEvent, _, cx| {
+                    move |this, state, event: &ColorPickerEvent, _, cx| {
                         // The picker never clears a colour itself; the reset
                         // button does that.
                         if let ColorPickerEvent::Change(Some(color)) = event {
+                            this.begin_color_edit(state.read(cx).is_open());
                             let hex = hsla_to_hex(*color);
                             this.update_session(|s| setting.apply(s, Some(&hex)), cx);
                         }
@@ -273,6 +288,7 @@ impl PropertyFields {
                 numbers,
                 colors,
                 shape,
+                color_edit: false,
             },
             subscriptions,
         )
@@ -294,22 +310,50 @@ impl PropertyFields {
 }
 
 impl EditorWindow {
-    /// Applies a number field on Enter or blur; whatever happens, the field
-    /// then shows the page's value.
+    /// Starts one undo step for a colour picker drag when a picker that is
+    /// `open` changes a colour; it ends when every picker has closed (see
+    /// [`Self::finish_color_edit`]). A change from a closed picker is a
+    /// step of its own.
+    pub(super) fn begin_color_edit(&mut self, open: bool) {
+        if open && !self.properties.color_edit {
+            self.session.begin_gesture();
+            self.properties.color_edit = true;
+        }
+    }
+
+    /// Ends the undo step of a colour picker drag, if one is open.
+    pub(super) fn finish_color_edit(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.properties.color_edit) {
+            self.update_session(|s| s.end_gesture(), cx);
+        }
+    }
+
+    /// Ends a colour picker drag's undo step once every picker has closed.
+    fn finish_closed_color_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.properties.color_edit {
+            return;
+        }
+        let canvas_open = self
+            .properties
+            .colors
+            .iter()
+            .any(|f| f.state.read(cx).is_open());
+        if !canvas_open && !self.shape_picker_open(cx) {
+            self.finish_color_edit(cx);
+        }
+    }
+
+    /// Applies a number field on Enter or blur, unless its text is
+    /// unchanged; whatever happens, the field then shows the page's value.
     fn commit_number(
         &mut self,
         setting: NumberSetting,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = self
-            .properties
-            .number(setting)
-            .input
-            .read(cx)
-            .value()
-            .to_string();
-        if let Some(value) = parse_number(&text) {
+        let field = self.properties.number(setting);
+        let text = field.input.read(cx).value();
+        if let Some(value) = typed_value(setting, &text, field.shows) {
             self.update_session(|s| setting.apply(s, value), cx);
         }
         self.show_number(setting, window, cx);
@@ -387,6 +431,7 @@ impl EditorWindow {
         }
 
         self.sync_shape_properties(window, cx);
+        self.finish_closed_color_edit(cx);
     }
 }
 
@@ -532,7 +577,9 @@ fn pattern_index(pattern: BackgroundPattern) -> usize {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
-    use super::{major_every_from, pattern_index, pattern_rows, NumberSetting, Row, PATTERNS};
+    use super::{
+        major_every_from, pattern_index, pattern_rows, typed_value, NumberSetting, Row, PATTERNS,
+    };
     use super::{ColorSetting as C, NumberSetting as N};
     use mindweave_core::BackgroundPattern;
 
@@ -576,6 +623,19 @@ mod tests {
         assert_eq!(NumberSetting::MajorEvery.text(5.0), "5");
         assert_eq!(NumberSetting::DotSize.text(1.5), "1.5");
         assert_eq!(NumberSetting::DotSize.text(2.0), "2");
+    }
+
+    #[test]
+    fn only_a_changed_number_is_applied() {
+        let grid = NumberSetting::GridSize;
+        assert_eq!(typed_value(grid, "30", Some(20.0)), Some(30.0));
+        assert_eq!(typed_value(grid, " 30 ", None), Some(30.0));
+        assert_eq!(typed_value(grid, "abc", Some(20.0)), None);
+        // The text shown for the stored value is not written back: it may
+        // be rounded, or belong to the page that was active when shown.
+        assert_eq!(typed_value(grid, "20", Some(20.0)), None);
+        assert_eq!(typed_value(grid, "13", Some(12.6)), None);
+        assert_eq!(typed_value(NumberSetting::DotSize, "1.5", Some(1.5)), None);
     }
 
     #[test]

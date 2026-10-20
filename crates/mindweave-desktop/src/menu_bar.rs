@@ -9,8 +9,9 @@ use gpui_kit::component::{h_flex, ActiveTheme as _, Sizable as _, TitleBar};
 use gpui_kit::*;
 
 use crate::actions::{
-    CloseWindow, NewFile, NotImplemented, OpenFile, Quit, Save, ShowDashboard, ToggleLayers,
-    ToggleProperties, ToggleThemePicker, ZoomIn, ZoomOut, ZoomReset,
+    self, CloseWindow, Cut, Delete, Duplicate, NewFile, NotImplemented, OpenFile, Paste, Quit,
+    Redo, Save, SelectAll, ShowDashboard, ToggleLayers, ToggleProperties, ToggleThemePicker, Undo,
+    ZoomIn, ZoomOut, ZoomReset,
 };
 use crate::app_state::AppState;
 
@@ -119,15 +120,20 @@ pub(crate) fn menus(kind: WindowKind, panels: PanelState, include_quit: bool) ->
         },
         MenuSpec {
             name: "Edit",
+            // Undo and Redo stay enabled whatever the history holds: the
+            // native menu cannot update an item's state while it is open,
+            // so with nothing to undo they do nothing.
             entries: vec![
-                later("Undo"),
-                later("Redo"),
+                item("Undo", Undo, editor),
+                item("Redo", Redo, editor),
                 Separator,
-                later("Cut"),
-                later("Copy"),
-                later("Paste"),
+                item("Cut", Cut, editor),
+                item("Copy", actions::Copy, editor),
+                item("Paste", Paste, editor),
+                item("Duplicate", Duplicate, editor),
+                item("Delete", Delete, editor),
                 Separator,
-                later("Select All"),
+                item("Select All", SelectAll, editor),
             ],
         },
         MenuSpec {
@@ -333,7 +339,7 @@ mod tests {
         for kind in [WindowKind::Dashboard, WindowKind::Editor] {
             let unbuilt: Vec<_> = items(kind, true)
                 .into_iter()
-                .filter(|(menu, ..)| ["Edit", "Arrange", "Help"].contains(menu))
+                .filter(|(menu, ..)| ["Arrange", "Help"].contains(menu))
                 .collect();
             assert!(!unbuilt.is_empty());
             assert!(
@@ -341,6 +347,75 @@ mod tests {
                 "{unbuilt:?}"
             );
         }
+    }
+
+    /// The Edit menu's rows, `None` for a separator.
+    fn edit_rows(kind: WindowKind) -> Vec<Option<(&'static str, bool)>> {
+        menus(kind, PANELS, true)
+            .into_iter()
+            .find(|m| m.name == "Edit")
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| match entry {
+                MenuEntry::Item { label, enabled, .. } => Some((label, enabled)),
+                MenuEntry::Separator => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn edit_menu_works_in_the_editor_only() {
+        let labels = [
+            Some("Undo"),
+            Some("Redo"),
+            None,
+            Some("Cut"),
+            Some("Copy"),
+            Some("Paste"),
+            Some("Duplicate"),
+            Some("Delete"),
+            None,
+            Some("Select All"),
+        ];
+        for (kind, enabled) in [(WindowKind::Editor, true), (WindowKind::Dashboard, false)] {
+            let rows = edit_rows(kind);
+            let shown: Vec<_> = rows.iter().map(|r| r.map(|(l, _)| l)).collect();
+            assert_eq!(shown, labels);
+            assert!(
+                rows.iter().flatten().all(|(_, e)| *e == enabled),
+                "{kind:?}: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_items_dispatch_the_edit_actions() {
+        let edit = menus(WindowKind::Editor, PANELS, true)
+            .into_iter()
+            .find(|m| m.name == "Edit")
+            .unwrap();
+        let actions: Vec<_> = edit
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                MenuEntry::Item { action, .. } => Some(action.name()),
+                MenuEntry::Separator => None,
+            })
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                "mindweave::Undo",
+                "mindweave::Redo",
+                "mindweave::Cut",
+                "mindweave::Copy",
+                "mindweave::Paste",
+                "mindweave::Duplicate",
+                "mindweave::Delete",
+                "mindweave::SelectAll",
+            ]
+        );
     }
 
     #[test]

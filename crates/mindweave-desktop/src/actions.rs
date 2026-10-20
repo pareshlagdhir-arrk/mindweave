@@ -35,6 +35,17 @@ actions!(
         NudgeRightFar,
         NudgeUpFar,
         NudgeDownFar,
+        /// The Edit menu. In the editor these act on the shapes; text
+        /// fields keep their own keys for them.
+        Undo,
+        Redo,
+        Cut,
+        Copy,
+        Paste,
+        /// Copies the selection, offset by `DUPLICATE_OFFSET`.
+        Duplicate,
+        Delete,
+        SelectAll,
         /// Stands in for menu items that are not built yet. Nothing handles
         /// it, so the native menu always shows such items disabled.
         NotImplemented,
@@ -49,7 +60,7 @@ pub const EDITOR_CONTEXT: &str = "Editor";
 const EDITOR_NOT_TYPING: &str = "Editor && !Input";
 
 /// The default keymap. Most bindings have no key context, so they apply in
-/// every window; the tool keys apply only in the editor.
+/// every window; the tool and edit keys apply only in the editor.
 pub fn key_bindings() -> Vec<KeyBinding> {
     let editor = Some(EDITOR_NOT_TYPING);
     vec![
@@ -79,6 +90,15 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-right", NudgeRightFar, editor),
         KeyBinding::new("shift-up", NudgeUpFar, editor),
         KeyBinding::new("shift-down", NudgeDownFar, editor),
+        KeyBinding::new("cmd-z", Undo, editor),
+        KeyBinding::new("cmd-shift-z", Redo, editor),
+        KeyBinding::new("cmd-x", Cut, editor),
+        KeyBinding::new("cmd-c", Copy, editor),
+        KeyBinding::new("cmd-v", Paste, editor),
+        KeyBinding::new("cmd-d", Duplicate, editor),
+        KeyBinding::new("backspace", Delete, editor),
+        KeyBinding::new("delete", Delete, editor),
+        KeyBinding::new("cmd-a", SelectAll, editor),
     ]
 }
 
@@ -129,12 +149,35 @@ mod tests {
             ("shift-right", "mindweave::NudgeRightFar"),
             ("shift-up", "mindweave::NudgeUpFar"),
             ("shift-down", "mindweave::NudgeDownFar"),
+            ("cmd-z", "mindweave::Undo"),
+            ("cmd-shift-z", "mindweave::Redo"),
+            ("cmd-x", "mindweave::Cut"),
+            ("cmd-c", "mindweave::Copy"),
+            ("cmd-v", "mindweave::Paste"),
+            ("cmd-d", "mindweave::Duplicate"),
+            ("backspace", "mindweave::Delete"),
+            ("delete", "mindweave::Delete"),
+            ("cmd-a", "mindweave::SelectAll"),
         ];
         let expected: Vec<(String, &str)> =
             expected.iter().map(|(k, a)| (k.to_string(), *a)).collect();
         assert_eq!(bindings, expected);
         assert_eq!(ShowDashboard.name(), "mindweave::ShowDashboard");
     }
+
+    /// Actions bound only in the editor, outside text fields, which keep
+    /// their own copy, paste, undo and select-all keys.
+    const EDIT_ACTIONS: [&str; 9] = [
+        "::Cancel",
+        "::Undo",
+        "::Redo",
+        "::Cut",
+        "::Copy",
+        "::Paste",
+        "::Duplicate",
+        "::Delete",
+        "::SelectAll",
+    ];
 
     #[test]
     fn editor_keys_apply_in_the_editor_but_not_in_text_fields() {
@@ -149,10 +192,12 @@ mod tests {
             .into_iter()
             .filter(|b| {
                 let name = b.action().name();
-                name.contains("Tool") || name.ends_with("Cancel") || name.contains("Nudge")
+                name.contains("Tool")
+                    || name.contains("Nudge")
+                    || EDIT_ACTIONS.iter().any(|a| name.ends_with(a))
             })
             .collect();
-        assert_eq!(tool_bindings.len(), 15);
+        assert_eq!(tool_bindings.len(), 15 + 9);
         for binding in &tool_bindings {
             let predicate = binding.predicate().expect("tool keys have a context");
             assert!(predicate.eval(&context(&["Root", EDITOR_CONTEXT])));

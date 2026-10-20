@@ -24,14 +24,7 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
                 .small()
                 .icon(IconName::Plus)
                 .tooltip("Add Layer")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.update_session(
-                        |s| {
-                            s.add_layer();
-                        },
-                        cx,
-                    )
-                })),
+                .on_click(cx.listener(|this, _, window, cx| this.add_layer(window, cx))),
         );
 
     let page = editor.session().page();
@@ -120,7 +113,7 @@ fn row(
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
             let renaming = this.rename_input(RenameTarget::Layer(ix)).is_some();
             match row_click(renaming, event.click_count()) {
-                RowClick::Activate => this.update_session(|s| s.set_active_layer(ix), cx),
+                RowClick::Activate => this.activate_layer(ix, window, cx),
                 RowClick::Rename => this.begin_rename(RenameTarget::Layer(ix), window, cx),
                 RowClick::Ignore => {}
             }

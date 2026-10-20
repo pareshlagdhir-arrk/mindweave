@@ -5,6 +5,7 @@
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
+use mindweave_core::geometry::Rect;
 use mindweave_core::{
     dot_stride, grid_lines, is_major_line, pinch_zoom_factor, scroll_zoom_factor, stride_offset,
     BackgroundPattern, CanvasSettings, Page, Viewport, ZOOM_STEP,
@@ -25,6 +26,18 @@ const MAJOR_LINE_WIDTH: f32 = 2.;
 /// Most dots painted in one frame; denser patterns skip lines (see
 /// [`dot_stride`]).
 const MAX_DOTS: usize = 40_000;
+
+/// The canvas area a canvas of `size` pixels shows through `viewport`, in
+/// canvas units.
+pub(super) fn visible_rect(viewport: &Viewport, size: (f32, f32)) -> Rect {
+    let (x, y) = viewport.screen_to_canvas((0., 0.));
+    Rect {
+        x,
+        y,
+        w: size.0 / viewport.zoom,
+        h: size.1 / viewport.zoom,
+    }
+}
 
 /// The canvas element for `page`, filling its bounds.
 pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
@@ -211,8 +224,10 @@ fn register_input(
             editor.update(cx, |editor, cx| {
                 // A shape value being typed or picked belongs to the
                 // selection the press may be about to change.
-                editor.commit_focused_shape_number(window, cx);
+                // The colour drag ends first, so the typed value is a step
+                // of its own.
                 editor.finish_color_edit(cx);
+                editor.commit_focused_shape_number(window, cx);
                 editor.focus_handle.focus(window, cx);
                 let pans = match event.button {
                     MouseButton::Middle => true,
@@ -395,6 +410,16 @@ impl EditorWindow {
         self.set_cursor(cursor, cx);
     }
 
+    /// The canvas area in view, in canvas units; empty at the viewport's
+    /// corner before the canvas has been painted.
+    pub(super) fn visible_canvas(&self) -> Rect {
+        let size = self
+            .canvas_bounds
+            .map(|b| (f32::from(b.size.width), f32::from(b.size.height)))
+            .unwrap_or_default();
+        visible_rect(&self.session.page().viewport, size)
+    }
+
     /// The centre of the canvas, relative to its origin; the origin itself
     /// before the canvas has been painted.
     fn canvas_centre(&self) -> (f32, f32) {
@@ -421,5 +446,47 @@ impl EditorWindow {
     pub(super) fn on_zoom_reset(&mut self, _: &ZoomReset, _: &mut Window, cx: &mut Context<Self>) {
         let anchor = self.canvas_centre();
         self.change_viewport(|vp| vp.zoom_to(1., anchor), cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: the gpui glob import would shadow `#[test]`.
+    use super::visible_rect;
+    use mindweave_core::geometry::Rect;
+    use mindweave_core::Viewport;
+
+    #[test]
+    fn the_visible_area_is_the_canvas_size_in_canvas_units() {
+        let at_rest = Viewport {
+            x: 0.0,
+            y: 0.0,
+            zoom: 1.0,
+        };
+        assert_eq!(
+            visible_rect(&at_rest, (800.0, 600.0)),
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 800.0,
+                h: 600.0
+            }
+        );
+        let zoomed = Viewport {
+            x: -100.0,
+            y: 50.0,
+            zoom: 2.0,
+        };
+        assert_eq!(
+            visible_rect(&zoomed, (800.0, 600.0)),
+            Rect {
+                x: -100.0,
+                y: 50.0,
+                w: 400.0,
+                h: 300.0
+            }
+        );
+        // Before the first paint: the viewport's corner, empty.
+        assert_eq!(visible_rect(&zoomed, (0.0, 0.0)).w, 0.0);
     }
 }

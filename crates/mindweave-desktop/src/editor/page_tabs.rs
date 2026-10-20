@@ -43,7 +43,7 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
                     .small()
                     .icon(IconName::Plus)
                     .tooltip("Add Page")
-                    .on_click(cx.listener(|this, _, _, cx| this.add_page(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.add_page(window, cx))),
             ),
         )
 }
@@ -83,7 +83,7 @@ fn tab(
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
             let renaming = this.rename_input(RenameTarget::Page(ix)).is_some();
             match row_click(renaming, event.click_count()) {
-                RowClick::Activate => this.activate_page(ix, cx),
+                RowClick::Activate => this.activate_page(ix, window, cx),
                 RowClick::Rename => this.begin_rename(RenameTarget::Page(ix), window, cx),
                 RowClick::Ignore => {}
             }

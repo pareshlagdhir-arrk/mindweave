@@ -201,6 +201,14 @@ impl DocumentSession {
         }
     }
 
+    /// A number naming the current content: it changes with every content
+    /// edit, undo and redo, never with view changes, and equal numbers
+    /// mean equal content. Cheap to read, so callers can skip work when
+    /// nothing changed.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// The document. Edits go through the session so they are recorded
     /// for undo and dirty tracking.
     pub fn doc(&self) -> &Document {
@@ -1274,6 +1282,33 @@ mod tests {
         assert!(s.is_dirty());
         assert!(s.redo());
         assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn revision_names_the_content() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let start = s.revision();
+        s.set_viewport(Viewport {
+            x: 5.0,
+            y: 5.0,
+            zoom: 2.0,
+        });
+        s.add_page();
+        let one_page_more = s.revision();
+        assert_ne!(one_page_more, start);
+        // View changes keep it.
+        s.set_active_page(0);
+        assert_eq!(s.revision(), one_page_more);
+        assert!(s.undo());
+        assert_eq!(s.revision(), start);
+        assert!(s.redo());
+        assert_eq!(s.revision(), one_page_more);
+        // A gesture that changes nothing leaves it as it was.
+        s.begin_gesture();
+        s.toggle_layer_visibility(0);
+        s.toggle_layer_visibility(0);
+        s.end_gesture();
+        assert_eq!(s.revision(), one_page_more);
     }
 
     #[test]

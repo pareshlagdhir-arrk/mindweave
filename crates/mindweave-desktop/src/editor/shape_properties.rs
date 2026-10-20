@@ -2,6 +2,7 @@
 //! Shape properties sections.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
@@ -34,6 +35,15 @@ pub(super) enum Value<T> {
     Mixed,
 }
 
+impl<T> Value<T> {
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> Value<U> {
+        match self {
+            Value::Same(v) => Value::Same(f(v)),
+            Value::Mixed => Value::Mixed,
+        }
+    }
+}
+
 /// The value all of `values` share; `None` when there are none.
 pub(super) fn common<T: PartialEq>(values: impl IntoIterator<Item = T>) -> Option<Value<T>> {
     let mut values = values.into_iter();
@@ -43,6 +53,31 @@ pub(super) fn common<T: PartialEq>(values: impl IntoIterator<Item = T>) -> Optio
     } else {
         Value::Mixed
     })
+}
+
+/// The number all of `values` share as the panel shows them (`shown`
+/// turns a value into the unit its field shows, then [`format_number`]
+/// rounds it), so float noise below the shown precision is not "Mixed".
+/// The first value stands for them all. `None` when there are none.
+pub(super) fn common_number(
+    values: impl IntoIterator<Item = f32>,
+    shown: fn(f32) -> f32,
+) -> Option<Value<f32>> {
+    let mut values = values.into_iter();
+    let first = values.next()?;
+    let key = shown_hundredths(shown(first));
+    Some(if values.all(|v| shown_hundredths(shown(v)) == key) {
+        Value::Same(first)
+    } else {
+        Value::Mixed
+    })
+}
+
+/// `value` in whole hundredths: two values format alike (see
+/// [`format_number`]) exactly when these are equal, without building the
+/// strings.
+fn shown_hundredths(value: f32) -> f32 {
+    (value * 100.0).round()
 }
 
 /// An opacity (0–1) as the percentage the panel shows.
@@ -68,7 +103,7 @@ pub(super) fn snap(value: f32, min: f32, max: f32, step: f32) -> f32 {
 
 /// A number as a field shows it: at most two decimals, no trailing zeros.
 pub(super) fn format_number(value: f32) -> String {
-    let rounded = (value * 100.0).round() / 100.0;
+    let rounded = shown_hundredths(value) / 100.0;
     // `+ 0.0` turns -0 into 0.
     format!("{}", rounded + 0.0)
 }
@@ -177,23 +212,57 @@ pub(super) fn summarize(shapes: &[&Shape], libs: &LibraryRegistry) -> Option<Sum
             .iter()
             .filter_map(|p| {
                 let values = shapes.iter().map(|s| s.param(&p.key).unwrap_or(p.default));
-                Some((p.clone(), common(values)?))
+                Some((p.clone(), common_number(values, same)?))
             })
             .collect(),
         None => Vec::new(),
     };
-    let style = |f: fn(&Shape) -> f32| common(shapes.iter().map(|s| f(s)));
+    // Colours are compared borrowed and copied once.
+    let color = |f: fn(&Shape) -> Option<&str>| {
+        common(shapes.iter().map(|s| f(s))).map(|v| v.map(|c| c.map(str::to_owned)))
+    };
     Some(Summary {
         count: shapes.len(),
         title,
         bounds: shown_bounds(&frames)?,
-        rotation: common(frames.iter().map(|f| f.rotation))?,
-        fill: common(shapes.iter().map(|s| s.style.fill.clone()))?,
-        stroke: common(shapes.iter().map(|s| s.style.stroke.clone()))?,
-        stroke_width: style(|s| s.style.stroke_width)?,
-        opacity: style(|s| s.style.opacity)?,
+        rotation: common_number(frames.iter().map(|f| f.rotation), same)?,
+        fill: color(|s| s.style.fill.as_deref())?,
+        stroke: color(|s| s.style.stroke.as_deref())?,
+        stroke_width: common_number(shapes.iter().map(|s| s.style.stroke_width), same)?,
+        opacity: common_number(shapes.iter().map(|s| s.style.opacity), opacity_percent)?,
         params,
     })
+}
+
+/// A number shown as it is stored.
+fn same(value: f32) -> f32 {
+    value
+}
+
+/// What the shape panel was last synced from: the content revision and
+/// the selection (its ids hashed, so comparing is cheap). Equal keys mean
+/// nothing the panel shows has changed, up to a 64-bit hash collision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SyncKey {
+    revision: u64,
+    selection: u64,
+}
+
+impl SyncKey {
+    pub(super) fn new(revision: u64, selection: &[Uuid]) -> Self {
+        let mut hasher = DefaultHasher::new();
+        selection.hash(&mut hasher);
+        Self {
+            revision,
+            selection: hasher.finish(),
+        }
+    }
+
+    /// Whether the panel synced at `last` (`None`: never, or a field was
+    /// left alone then) needs syncing for this key.
+    pub(super) fn needs_sync(self, last: Option<Self>) -> bool {
+        last != Some(self)
+    }
 }
 
 /// A numeric field of the panel.
@@ -365,9 +434,8 @@ pub(super) struct ShapeFields {
     colors: Vec<ColorField>,
     /// The selection as last synced.
     summary: Option<Summary>,
-    /// A colour picker is being dragged: its changes are one undo step,
-    /// ended when the picker closes.
-    color_edit: bool,
+    /// What the fields were last synced from; `None` forces a sync.
+    synced: Option<SyncKey>,
 }
 
 impl ShapeFields {
@@ -387,10 +455,7 @@ impl ShapeFields {
                         // The picker never clears a colour itself; the
                         // remove button does that.
                         if let ColorPickerEvent::Change(Some(color)) = event {
-                            if state.read(cx).is_open() && !this.properties.shape.color_edit {
-                                this.session.begin_gesture();
-                                this.properties.shape.color_edit = true;
-                            }
+                            this.begin_color_edit(state.read(cx).is_open());
                             this.set_style_color(which, Some(hsla_to_hex(*color)), cx);
                         }
                     },
@@ -407,7 +472,7 @@ impl ShapeFields {
             numbers,
             colors,
             summary: None,
-            color_edit: false,
+            synced: None,
         }
     }
 
@@ -458,7 +523,7 @@ fn show_text(field: &mut NumberField, text: Option<String>, window: &mut Window,
 
 impl EditorWindow {
     /// The shapes of the active layer with one of `ids`, back to front.
-    fn shapes_among(&self, ids: &[Uuid]) -> Vec<&Shape> {
+    pub(super) fn shapes_among(&self, ids: &[Uuid]) -> Vec<&Shape> {
         if ids.is_empty() {
             return Vec::new();
         }
@@ -476,13 +541,22 @@ impl EditorWindow {
 
     /// Brings the shape panel's controls up to date with the selection,
     /// leaving alone a field being typed in and an open colour picker.
+    /// Runs every frame, so it does nothing unless the content or the
+    /// selection changed since the last full sync.
     pub(super) fn sync_shape_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = SyncKey::new(self.session.revision(), &self.selection);
+        if !key.needs_sync(self.properties.shape.synced) {
+            return;
+        }
         let summary = self.summarize_shapes(&self.selection, cx);
         self.sync_param_fields(summary.as_ref(), window, cx);
         let fields = &mut self.properties.shape;
+        // A field left alone now is synced on a later frame.
+        let mut left_alone = false;
         if summary.is_some() {
             for field in &mut fields.numbers {
                 if field.input.read(cx).focus_handle(cx).is_focused(window) {
+                    left_alone = true;
                     continue;
                 }
                 let text = shown_text(summary.as_ref(), &field.kind);
@@ -499,7 +573,9 @@ impl EditorWindow {
                     _ => None,
                 };
                 // An open picker owns its colour until it closes.
-                if field.shows != Some(color) && !field.state.read(cx).is_open() {
+                if field.state.read(cx).is_open() {
+                    left_alone = true;
+                } else if field.shows != Some(color) {
                     field.state.update(cx, |state, cx| match color {
                         Some(color) => state.set_value(color, window, cx),
                         None => state.clear_value(window, cx),
@@ -508,12 +584,17 @@ impl EditorWindow {
                 }
             }
         }
-        let picker_open = fields.colors.iter().any(|f| f.state.read(cx).is_open());
-        if fields.color_edit && !picker_open {
-            fields.color_edit = false;
-            self.session.end_gesture();
-        }
         fields.summary = summary;
+        fields.synced = (!left_alone).then_some(key);
+    }
+
+    /// Whether one of the shape panel's colour pickers is open.
+    pub(super) fn shape_picker_open(&self, cx: &App) -> bool {
+        self.properties
+            .shape
+            .colors
+            .iter()
+            .any(|f| f.state.read(cx).is_open())
     }
 
     /// Gives the panel one field per parameter of the selected shape.
@@ -591,13 +672,6 @@ impl EditorWindow {
             .map(|f| f.kind.clone());
         if let Some(kind) = focused {
             self.commit_shape_number(&kind, window, cx);
-        }
-    }
-
-    /// Ends the undo step of a colour picker drag, if one is open.
-    pub(super) fn finish_color_edit(&mut self, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.properties.shape.color_edit) {
-            self.update_session(|s| s.end_gesture(), cx);
         }
     }
 
@@ -793,11 +867,13 @@ fn color_row(
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        apply_number, common, edit_bounds, format_number, opacity_from_percent, opacity_percent,
-        shown_bounds, shown_text, snap, summarize, BoundsField, NumberKind, Value,
+        apply_number, common, common_number, edit_bounds, format_number, opacity_from_percent,
+        opacity_percent, shown_bounds, shown_text, snap, summarize, BoundsField, NumberKind,
+        SyncKey, Value,
     };
     use mindweave_core::geometry::{Frame, Rect};
     use mindweave_core::{builtin_libraries, DocumentSession, LibraryRegistry, Shape};
+    use uuid::Uuid;
 
     fn frame(x: f32, y: f32, w: f32, h: f32) -> Frame {
         Frame {
@@ -825,6 +901,58 @@ mod tests {
         assert_eq!(common([2.0, 3.0, 2.0]), Some(Value::Mixed));
         assert_eq!(common([None, None::<&str>]), Some(Value::Same(None)));
         assert_eq!(common([Some("#FF0000"), None]), Some(Value::Mixed));
+    }
+
+    #[test]
+    fn numbers_that_show_alike_are_not_mixed() {
+        let same = |a: f32, b: f32| common_number([a, b], |v| v) == Some(Value::Same(a));
+        // Float noise below what the field shows.
+        assert!(same(10.0, 10.000_001));
+        assert!(same(0.1 + 0.2, 0.3));
+        assert!(same(-0.001, 0.0));
+        assert!(!same(10.0, 10.01));
+        assert!(!same(1.0, 2.0));
+        // Agrees with the shown text.
+        for (a, b) in [(1.004, 1.0), (1.006, 1.0), (2.345, 2.35), (-0.004, 0.0)] {
+            assert_eq!(same(a, b), format_number(a) == format_number(b), "{a} {b}");
+        }
+        assert_eq!(common_number([], |v| v), None);
+        // Compared as shown: opacities as percentages.
+        assert_eq!(
+            common_number([0.5, 0.504], opacity_percent),
+            Some(Value::Mixed)
+        );
+        assert_eq!(
+            common_number([0.5, 0.500_000_1], opacity_percent),
+            Some(Value::Same(0.5))
+        );
+    }
+
+    #[test]
+    fn summaries_ignore_float_noise() {
+        let libs = libs();
+        let a = shape(&libs, "rectangle", frame(0.0, 0.0, 10.0, 10.0));
+        let mut b = a.clone();
+        b.frame.rotation = 0.000_01;
+        b.style.opacity = 1.0 - 1e-7;
+        b.style.stroke_width = a.style.stroke_width + 1e-6;
+        let both = summarize(&[&a, &b], &libs).unwrap();
+        assert_eq!(both.rotation, Value::Same(0.0));
+        assert_eq!(both.opacity, Value::Same(a.style.opacity));
+        assert_eq!(both.stroke_width, Value::Same(a.style.stroke_width));
+    }
+
+    #[test]
+    fn the_panel_resyncs_only_when_content_or_selection_change() {
+        let [a, b] = [(); 2].map(|_| Uuid::new_v4());
+        let key = SyncKey::new(7, &[a, b]);
+        assert!(key.needs_sync(None));
+        assert!(!key.needs_sync(Some(key)));
+        assert!(!SyncKey::new(7, &[a, b]).needs_sync(Some(key)));
+        assert!(SyncKey::new(8, &[a, b]).needs_sync(Some(key)));
+        assert!(SyncKey::new(7, &[a]).needs_sync(Some(key)));
+        assert!(SyncKey::new(7, &[b, a]).needs_sync(Some(key)));
+        assert!(SyncKey::new(7, &[]).needs_sync(Some(key)));
     }
 
     #[test]

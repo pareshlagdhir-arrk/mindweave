@@ -20,12 +20,17 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::*;
-use mindweave_core::{format_hex_color, parse_hex_color, DocumentSession, Shape, Viewport};
+use mindweave_core::{
+    duplicate, format_hex_color, from_clipboard, parse_hex_color, prepare_paste, to_clipboard,
+    DocumentSession, Shape, Viewport,
+};
 
+// `Copy` is used by path: importing it would hide the derivable trait.
 use crate::actions::{
-    Cancel, CloseWindow, NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight,
-    NudgeRightFar, NudgeUp, NudgeUpFar, Save, ToggleLayers, ToggleProperties, ToolArrow,
-    ToolEllipse, ToolHand, ToolLine, ToolPointer, ToolRectangle, EDITOR_CONTEXT,
+    self, Cancel, CloseWindow, Cut, Delete, Duplicate, NudgeDown, NudgeDownFar, NudgeLeft,
+    NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp, NudgeUpFar, Paste, Redo, Save, SelectAll,
+    ToggleLayers, ToggleProperties, ToolArrow, ToolEllipse, ToolHand, ToolLine, ToolPointer,
+    ToolRectangle, Undo, EDITOR_CONTEXT,
 };
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
@@ -289,11 +294,13 @@ impl EditorWindow {
         .detach();
     }
 
-    /// Applies edits that otherwise wait for Enter or blur: an open rename
-    /// and a Properties number being typed; also ends a colour picker's
-    /// undo step. Save, Close and Quit call this first so keyboard
-    /// shortcuts do not skip them.
+    /// Ends a colour picker's undo step, then applies edits that otherwise
+    /// wait for Enter or blur: an open rename and a Properties number being
+    /// typed (each its own undo step). Undo, Redo, Save, Close, Quit, the
+    /// edit actions and page and layer switches call this first, so
+    /// keyboard shortcuts and clicks do not skip or misplace them.
     pub fn commit_pending_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_color_edit(cx);
         if self.rename.is_some() {
             self.finish_rename(true, cx);
             // The rename field is gone; keep keyboard shortcuts working.
@@ -301,7 +308,6 @@ impl EditorWindow {
         }
         self.commit_focused_number(window, cx);
         self.commit_focused_shape_number(window, cx);
-        self.finish_color_edit(cx);
     }
 
     /// Starts an inline rename of `target` with its current name selected.
@@ -386,17 +392,49 @@ impl EditorWindow {
             .child(Input::new(input).small())
     }
 
-    /// Switches pages, committing any rename in progress first.
-    pub(crate) fn activate_page(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.finish_rename(true, cx);
+    /// Applies pending edits to the page and layer they were made on, and
+    /// takes focus from the field they were typed in, which would
+    /// otherwise keep showing the old page's value.
+    fn commit_before_switching(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_pending_edits(window, cx);
+        self.focus_handle.focus(window, cx);
+    }
+
+    /// Switches pages, applying pending edits first.
+    pub(crate) fn activate_page(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_before_switching(window, cx);
         self.update_session(|s| s.set_active_page(ix), cx);
         // The new page has its own viewport.
         self.refresh_cursor(cx);
     }
 
-    /// Adds a page, committing any rename in progress first.
-    pub(crate) fn add_page(&mut self, cx: &mut Context<Self>) {
-        self.finish_rename(true, cx);
+    /// Makes layer `ix` of the active page active, applying pending edits
+    /// first.
+    pub(crate) fn activate_layer(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_before_switching(window, cx);
+        self.update_session(|s| s.set_active_layer(ix), cx);
+    }
+
+    /// Adds a layer above the others and makes it active, applying pending
+    /// edits first.
+    pub(crate) fn add_layer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_before_switching(window, cx);
+        self.update_session(
+            |s| {
+                s.add_layer();
+            },
+            cx,
+        );
+    }
+
+    /// Adds a page, applying pending edits first.
+    pub(crate) fn add_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_before_switching(window, cx);
         self.update_session(
             |s| {
                 s.add_page();
@@ -479,6 +517,134 @@ impl EditorWindow {
         cx.notify();
     }
 
+    /// Readies the editor for an edit action: applies pending edits and
+    /// abandons a pointer gesture in progress (putting moved shapes back).
+    fn begin_edit_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_pending_edits(window, cx);
+        self.cancel_gesture(cx);
+    }
+
+    /// Undo and Redo. With nothing to undo or redo they do nothing (the
+    /// menu items stay enabled). Selection pruning runs through
+    /// `update_session`: shapes that are gone drop out, and a change of
+    /// active page or layer clears it.
+    fn step_history(&mut self, undo: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_action(window, cx);
+        self.update_session(
+            |s| {
+                if undo {
+                    s.undo();
+                } else {
+                    s.redo();
+                }
+            },
+            cx,
+        );
+        // Undoing an added page can move to another page and viewport.
+        self.refresh_cursor(cx);
+    }
+
+    fn on_undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_history(true, window, cx);
+    }
+
+    fn on_redo(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_history(false, window, cx);
+    }
+
+    /// The selected shapes, back to front.
+    fn selected_shapes(&self) -> Vec<Shape> {
+        self.shapes_among(&self.selection)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Puts the selected shapes on the clipboard; returns whether there
+    /// were any (with none the clipboard is left alone).
+    fn copy_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let shapes = self.selected_shapes();
+        if shapes.is_empty() {
+            return false;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(to_clipboard(&shapes)));
+        true
+    }
+
+    /// Removes the selected shapes as one undo step.
+    fn delete_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let ids = self.selection.clone();
+        self.update_session(
+            |s| {
+                s.remove_shapes(&ids);
+            },
+            cx,
+        );
+    }
+
+    /// Adds `shapes` to the active layer as one undo step and selects them.
+    fn add_and_select(&mut self, shapes: Vec<Shape>, cx: &mut Context<Self>) {
+        let selection = selectable_in_order(&shapes, self.session.active_layer_selectable());
+        self.update_session(|s| s.add_shapes(shapes), cx);
+        self.selection = selection;
+        cx.notify();
+    }
+
+    fn on_copy(&mut self, _: &actions::Copy, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_action(window, cx);
+        self.copy_selection(cx);
+    }
+
+    fn on_cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_action(window, cx);
+        if self.copy_selection(cx) {
+            self.delete_selection(cx);
+        }
+    }
+
+    /// Pastes shapes copied from any Mindweave window onto the active
+    /// layer: in place when that is in view, else centred in view.
+    /// Clipboard text that is not a shapes payload is ignored.
+    fn on_paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_action(window, cx);
+        let Some(shapes) = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .and_then(|text| from_clipboard(&text))
+        else {
+            return;
+        };
+        let shapes = prepare_paste(shapes, &self.visible_canvas());
+        self.add_and_select(shapes, cx);
+    }
+
+    fn on_duplicate(&mut self, _: &Duplicate, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_action(window, cx);
+        let copies = duplicate(&self.selected_shapes());
+        if !copies.is_empty() {
+            self.add_and_select(copies, cx);
+        }
+    }
+
+    fn on_delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_action(window, cx);
+        self.delete_selection(cx);
+    }
+
+    /// Selects every unlocked shape of the active layer (none when it is
+    /// hidden).
+    fn on_select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_action(window, cx);
+        self.selection = selectable_in_order(
+            self.session.shapes_on_active_layer(),
+            self.session.active_layer_selectable(),
+        );
+        cx.notify();
+    }
+
     /// Space held over a focused editor turns left drags into pans.
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if is_plain_space(&event.keystroke)
@@ -539,6 +705,15 @@ fn pruned(
     }
     selection.retain(|id| active.contains(id));
     selection
+}
+
+/// Ids of the unlocked shapes in `shapes`, in order; none when their
+/// layer is not visible. What Select All, Paste and Duplicate select.
+fn selectable_in_order(shapes: &[Shape], layer_visible: bool) -> Vec<Uuid> {
+    if !layer_visible {
+        return Vec::new();
+    }
+    shapes.iter().filter(|s| !s.locked).map(|s| s.id).collect()
 }
 
 /// Ids of the shapes in `shapes` that can stay selected: the unlocked
@@ -666,6 +841,14 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_tool_line))
             .on_action(cx.listener(Self::on_tool_arrow))
             .on_action(cx.listener(Self::on_cancel))
+            .on_action(cx.listener(Self::on_undo))
+            .on_action(cx.listener(Self::on_redo))
+            .on_action(cx.listener(Self::on_cut))
+            .on_action(cx.listener(Self::on_copy))
+            .on_action(cx.listener(Self::on_paste))
+            .on_action(cx.listener(Self::on_duplicate))
+            .on_action(cx.listener(Self::on_delete))
+            .on_action(cx.listener(Self::on_select_all))
             .on_action(cx.listener(|this, _: &NudgeLeft, _, cx| this.nudge(-NUDGE_STEP, 0., cx)))
             .on_action(cx.listener(|this, _: &NudgeRight, _, cx| this.nudge(NUDGE_STEP, 0., cx)))
             .on_action(cx.listener(|this, _: &NudgeUp, _, cx| this.nudge(0., -NUDGE_STEP, cx)))
@@ -704,7 +887,7 @@ mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
         hex_to_hsla, hsla_to_hex, is_plain_space, letter_spaced, panel_group_id, parse_number,
-        pruned, row_click, selectable_ids, RowClick,
+        pruned, row_click, selectable_ids, selectable_in_order, RowClick,
     };
     use gpui_kit::Keystroke;
     use mindweave_core::geometry::Frame;
@@ -743,6 +926,18 @@ mod tests {
             pruned(vec![locked.id, free.id], scope, scope, &ids, true),
             vec![free.id]
         );
+    }
+
+    #[test]
+    fn select_all_and_paste_select_unlocked_shapes_on_a_visible_layer() {
+        let libs = LibraryRegistry::new(builtin_libraries(), None).0;
+        let def = libs.shape("basic-shapes", "rectangle").unwrap();
+        let [a, mut locked, b] = [(); 3].map(|_| Shape::new(def, "basic-shapes", Frame::default()));
+        locked.locked = true;
+        let shapes = [a.clone(), locked, b.clone()];
+        assert_eq!(selectable_in_order(&shapes, true), vec![a.id, b.id]);
+        assert!(selectable_in_order(&shapes, false).is_empty());
+        assert!(selectable_in_order(&[], true).is_empty());
     }
 
     #[test]
