@@ -1,0 +1,13 @@
+[package]
+name = "mindweave-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mindweave"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit.workspace = true
+mindweave-core = { path = "../mindweave-core" }

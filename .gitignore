@@ -1,6 +1,5 @@
 /target/
 /dist/
-*.mindweave
 .DS_Store
 
 .superpowers/
