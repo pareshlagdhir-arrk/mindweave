@@ -3711,6 +3711,7 @@ version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "mindweave-core",
+ "serde_json",
 ]
 
 [[package]]

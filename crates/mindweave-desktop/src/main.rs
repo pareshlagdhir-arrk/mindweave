@@ -1,6 +1,11 @@
 use gpui_kit::component::{ActiveTheme as _, Root};
 use gpui_kit::*;
 
+// Opened by the `ToggleThemePicker` action, which Task 7 adds.
+#[allow(dead_code)]
+mod theme_picker;
+mod themes;
+
 struct MindweaveView;
 
 impl Render for MindweaveView {
@@ -14,6 +19,8 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(|cx| {
             gpui_kit::init(cx);
+            themes::init_themes(cx);
+            themes::apply_theme(themes::DEFAULT_THEME, cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
