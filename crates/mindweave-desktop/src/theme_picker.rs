@@ -26,8 +26,9 @@ const MAX_VISIBLE_ROWS: usize = 12;
 /// `on_confirm` runs with the chosen theme name when the user presses Enter
 /// or clicks a row; the theme itself is already applied by then.
 pub fn open_theme_picker(on_confirm: OnConfirm, window: &mut Window, cx: &mut App) {
-    let original = cx.theme().theme_name().clone();
     let picker = cx.new(|cx| ThemePicker::new(on_confirm, window, cx));
+    // The same name drives the check mark and the Escape restore.
+    let original = picker.read(cx).original(cx);
     let focus = picker.focus_handle(cx);
     let initial_focus = Cell::new(true);
 
@@ -67,6 +68,11 @@ impl ThemePicker {
             state
         });
         Self { list }
+    }
+
+    /// The theme that was active when the picker opened.
+    pub fn original(&self, cx: &App) -> SharedString {
+        self.list.read(cx).delegate().original.clone()
     }
 }
 

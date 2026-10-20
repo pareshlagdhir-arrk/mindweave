@@ -1,5 +1,7 @@
 //! Bundled Mindweave themes and helpers to load and apply them.
 
+use std::collections::HashMap;
+
 use gpui_kit::component::{Theme, ThemeRegistry};
 use gpui_kit::{App, SharedString};
 
@@ -16,11 +18,25 @@ pub fn init_themes(cx: &mut App) {
         .expect("bundled themes are valid");
 }
 
-/// Names of all registered themes, sorted case-insensitively.
+/// The bundled theme names, in the order they appear in [`THEMES_JSON`].
+pub const BUNDLED_THEMES: [&str; 3] = [
+    "Mindweave One Dark",
+    "Mindweave Graphite",
+    "Mindweave Light",
+];
+
+/// The bundled themes that are registered, in bundled order. Themes the
+/// registry seeds on its own (gpui-component's defaults) are left out.
 pub fn theme_names(cx: &App) -> Vec<SharedString> {
-    let mut names: Vec<SharedString> = ThemeRegistry::global(cx).themes().keys().cloned().collect();
-    names.sort_by_key(|name| name.to_lowercase());
-    names
+    bundled_names_in(ThemeRegistry::global(cx).themes())
+}
+
+fn bundled_names_in<V>(registered: &HashMap<SharedString, V>) -> Vec<SharedString> {
+    BUNDLED_THEMES
+        .iter()
+        .map(|name| SharedString::from(*name))
+        .filter(|name| registered.contains_key(name))
+        .collect()
 }
 
 /// Makes the named theme active, falling back to [`DEFAULT_THEME`] when the
@@ -56,6 +72,7 @@ mod tests {
                 "Mindweave Light"
             ]
         );
+        assert_eq!(names, BUNDLED_THEMES, "BUNDLED_THEMES matches THEMES_JSON");
         let light: Vec<&str> = set
             .themes
             .iter()
@@ -72,5 +89,36 @@ mod tests {
             assert_eq!(theme.font_size, Some(13.0), "{}", theme.name);
             assert_eq!(theme.radius, Some(4), "{}", theme.name);
         }
+    }
+
+    #[test]
+    fn theme_names_lists_only_bundled_themes_in_bundled_order() {
+        // The registry also holds gpui-component's own defaults.
+        let registered: HashMap<SharedString, ()> = [
+            "Default Light",
+            "Mindweave Light",
+            "Default Dark",
+            "Mindweave Graphite",
+            "Mindweave One Dark",
+        ]
+        .into_iter()
+        .map(|name| (SharedString::from(name), ()))
+        .collect();
+        assert_eq!(
+            bundled_names_in(&registered),
+            [
+                "Mindweave One Dark",
+                "Mindweave Graphite",
+                "Mindweave Light"
+            ]
+        );
+    }
+
+    #[test]
+    fn theme_names_skips_bundled_themes_that_are_not_registered() {
+        let registered: HashMap<SharedString, ()> = [(SharedString::from("Mindweave Light"), ())]
+            .into_iter()
+            .collect();
+        assert_eq!(bundled_names_in(&registered), ["Mindweave Light"]);
     }
 }
