@@ -1,0 +1,95 @@
+[[shape]]
+id = "rectangle"
+name = "Rectangle"
+icon = "square"
+default_size = [120, 80]
+primitive = "rect"
+style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "corner_radius"
+label = "Corner radius"
+min = 0
+max = 1000
+step = 1
+default = 0
+
+[[shape]]
+id = "ellipse"
+name = "Ellipse"
+icon = "circle"
+default_size = [120, 80]
+primitive = "ellipse"
+style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "line"
+name = "Line"
+icon = "minus"
+default_size = [120, 60]
+primitive = "line"
+style = { fill = "none", stroke = "#7F8EA3", stroke_width = 2, opacity = 1.0 }
+
+[[shape]]
+id = "arrow"
+name = "Arrow"
+icon = "arrow-up-right"
+default_size = [120, 60]
+primitive = "arrow"
+style = { fill = "none", stroke = "#7F8EA3", stroke_width = 2, opacity = 1.0 }
+
+[[shape.param]]
+key = "head_size"
+label = "Head size"
+min = 4
+max = 100
+step = 1
+default = 12
+
+[[shape]]
+id = "triangle"
+name = "Triangle"
+icon = "triangle"
+default_size = [120, 80]
+primitive = "polygon"
+style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "sides"
+label = "Sides"
+min = 3
+max = 12
+step = 1
+default = 3
+
+[[shape]]
+id = "diamond"
+name = "Diamond"
+icon = "diamond"
+default_size = [120, 80]
+svg = "shapes/diamond.svg"
+style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "star"
+name = "Star"
+icon = "star"
+default_size = [120, 80]
+primitive = "star"
+style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "points"
+label = "Points"
+min = 3
+max = 20
+step = 1
+default = 5
+
+[[shape.param]]
+key = "inner_ratio"
+label = "Inner ratio"
+min = 0.1
+max = 0.9
+step = 0.05
+default = 0.5

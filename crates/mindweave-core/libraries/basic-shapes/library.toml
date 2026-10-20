@@ -1,0 +1,8 @@
+format = 1
+id = "basic-shapes"
+name = "Basic Shapes"
+version = "1.0.0"
+author = "Mindweave"
+description = "Rectangles, ellipses, lines, arrows and other simple shapes."
+icon = "shapes"
+order = 0

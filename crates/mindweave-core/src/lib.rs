@@ -5,6 +5,7 @@ pub mod document;
 pub mod files;
 pub mod format;
 pub mod geometry;
+pub mod library;
 pub mod session;
 pub mod settings;
 pub mod svg;
@@ -14,6 +15,11 @@ pub use color::{format_hex_color, normalize_hex_color, parse_hex_color};
 pub use document::{BackgroundPattern, CanvasSettings, Document, Layer, Page, Viewport};
 pub use files::{rename_document, validate_new_stem, RenameError, MAX_STEM_LEN};
 pub use format::{load, save, FormatError, FORMAT_VERSION};
+pub use library::{
+    builtin_libraries, load_library, user_libraries_dir, DirFiles, EmbeddedFiles, Icon, Library,
+    LibraryError, LibraryFiles, LibraryRegistry, ParamDef, ShapeDef, ShapeSource, StyleDefaults,
+    LIBRARY_FORMAT, MAX_FILE_BYTES, MAX_SHAPES,
+};
 pub use session::DocumentSession;
 pub use settings::{
     load_settings, save_settings, settings_path, AppSettings, RecentFile, WindowSize, MAX_RECENT,
