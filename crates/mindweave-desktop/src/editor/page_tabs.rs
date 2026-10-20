@@ -12,7 +12,7 @@ const TAB_HEIGHT: f32 = 24.;
 const RENAME_WIDTH: f32 = 140.;
 
 pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoElement {
-    let doc = &editor.session().doc;
+    let doc = &editor.session().doc();
     let tabs: Vec<AnyElement> = doc
         .pages
         .iter()

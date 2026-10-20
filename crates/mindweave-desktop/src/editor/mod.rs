@@ -244,7 +244,7 @@ impl EditorWindow {
         cx: &mut Context<Self>,
     ) {
         let name = match target {
-            RenameTarget::Page(ix) => self.session.doc.pages.get(ix).map(|p| p.name.clone()),
+            RenameTarget::Page(ix) => self.session.doc().pages.get(ix).map(|p| p.name.clone()),
             RenameTarget::Layer(ix) => self.session.page().layers.get(ix).map(|l| l.name.clone()),
         };
         let Some(name) = name else {

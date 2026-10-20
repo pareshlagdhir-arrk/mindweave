@@ -13,7 +13,7 @@ const ITEM_GAP: f32 = 16.;
 pub(super) fn render(editor: &EditorWindow, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let foreground = theme.foreground;
-    let doc = &editor.session().doc;
+    let doc = &editor.session().doc();
     let page = editor.session().page();
     let layer_name = page
         .layers

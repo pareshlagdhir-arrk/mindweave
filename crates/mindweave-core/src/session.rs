@@ -1,5 +1,6 @@
 //! An open document: edit operations, undo history and dirty tracking.
 
+use std::cell::Cell;
 use std::path::PathBuf;
 
 use uuid::Uuid;
@@ -30,15 +31,26 @@ const DEFAULT_GRID: f32 = 20.0;
 /// View state (each page's viewport and active layer, and the document's
 /// active page) is saved with the file but is neither in the undo history
 /// nor counted as an unsaved change.
+///
+/// Each content state carries a revision number so `is_dirty` is cheap:
+/// the revision at the last save means clean without comparing pages.
 #[derive(Debug)]
 pub struct DocumentSession {
-    pub doc: Document,
+    doc: Document,
     pub path: PathBuf,
     /// Page content at the last save or open.
     saved: Vec<Page>,
-    history: History<Vec<Page>>,
-    /// Page content when the open gesture began.
-    gesture: Option<Vec<Page>>,
+    /// Revision of the current content; undo and redo restore it.
+    revision: u64,
+    /// Revision of the content at the last save or open.
+    saved_revision: u64,
+    /// Last revision handed out; new content never reuses a number.
+    last_revision: u64,
+    /// `(revision, dirty)` from the last page comparison.
+    dirty_cache: Cell<Option<(u64, bool)>>,
+    history: History<(u64, Vec<Page>)>,
+    /// Revision and page content when the open gesture began.
+    gesture: Option<(u64, Vec<Page>)>,
 }
 
 /// Whether `a` and `b` have the same content, ignoring view state.
@@ -139,6 +151,10 @@ impl DocumentSession {
             saved: doc.pages.clone(),
             doc,
             path,
+            revision: 0,
+            saved_revision: 0,
+            last_revision: 0,
+            dirty_cache: Cell::new(None),
             history: History::new(HISTORY_CAP),
             gesture: None,
         }
@@ -147,12 +163,27 @@ impl DocumentSession {
     pub fn save(&mut self) -> Result<(), FormatError> {
         format::save(&self.doc, &self.path)?;
         self.saved = self.doc.pages.clone();
+        self.saved_revision = self.revision;
+        self.dirty_cache.set(None);
         Ok(())
     }
 
     /// Whether the content differs from the last save, ignoring view state.
+    ///
+    /// Free at the saved revision; otherwise the pages are compared at
+    /// most once per revision (an edit can restore the saved content).
     pub fn is_dirty(&self) -> bool {
-        !content_eq(&self.doc.pages, &self.saved)
+        if self.revision == self.saved_revision {
+            return false;
+        }
+        if let Some((rev, dirty)) = self.dirty_cache.get() {
+            if rev == self.revision {
+                return dirty;
+            }
+        }
+        let dirty = !content_eq(&self.doc.pages, &self.saved);
+        self.dirty_cache.set(Some((self.revision, dirty)));
+        dirty
     }
 
     /// File stem, followed by `" •"` when there are unsaved changes.
@@ -169,6 +200,12 @@ impl DocumentSession {
         }
     }
 
+    /// The document. Edits go through the session so they are recorded
+    /// for undo and dirty tracking.
+    pub fn doc(&self) -> &Document {
+        &self.doc
+    }
+
     /// The active page.
     pub fn page(&self) -> &Page {
         &self.doc.pages[self.doc.active_page]
@@ -180,29 +217,34 @@ impl DocumentSession {
 
     // Undo history.
 
-    /// Records the current content as an undo step before a content edit.
-    /// Callers check first that the edit changes something. Inside a
-    /// gesture nothing is recorded until `end_gesture`.
+    /// Records the current content as an undo step before a content edit
+    /// and gives the edited content a new revision. Callers check first
+    /// that the edit changes something. Inside a gesture nothing is
+    /// recorded until `end_gesture`.
     fn checkpoint(&mut self) {
         if self.gesture.is_none() {
-            self.history.record(self.doc.pages.clone());
+            self.history.record((self.revision, self.doc.pages.clone()));
         }
+        self.last_revision += 1;
+        self.revision = self.last_revision;
     }
 
     /// Starts grouping content edits into one undo step. A nested begin is
     /// a no-op.
     pub fn begin_gesture(&mut self) {
         if self.gesture.is_none() {
-            self.gesture = Some(self.doc.pages.clone());
+            self.gesture = Some((self.revision, self.doc.pages.clone()));
         }
     }
 
     /// Ends the open gesture, recording one undo step if the content
     /// changed. Without an open gesture this does nothing.
     pub fn end_gesture(&mut self) {
-        if let Some(before) = self.gesture.take() {
-            if !content_eq(&before, &self.doc.pages) {
-                self.history.record(before);
+        if let Some((rev, before)) = self.gesture.take() {
+            if content_eq(&before, &self.doc.pages) {
+                self.revision = rev;
+            } else {
+                self.history.record((rev, before));
             }
         }
     }
@@ -214,9 +256,10 @@ impl DocumentSession {
         if !self.history.can_undo() {
             return false;
         }
-        let current = self.doc.pages.clone();
+        let current = (self.revision, self.doc.pages.clone());
         match self.history.undo(current) {
-            Some(pages) => {
+            Some((rev, pages)) => {
+                self.revision = rev;
                 self.restore(pages);
                 true
             }
@@ -231,9 +274,10 @@ impl DocumentSession {
         if !self.history.can_redo() {
             return false;
         }
-        let current = self.doc.pages.clone();
+        let current = (self.revision, self.doc.pages.clone());
         match self.history.redo(current) {
-            Some(pages) => {
+            Some((rev, pages)) => {
+                self.revision = rev;
                 self.restore(pages);
                 true
             }
@@ -252,18 +296,24 @@ impl DocumentSession {
     fn gesture_changed(&self) -> bool {
         self.gesture
             .as_ref()
-            .is_some_and(|before| !content_eq(before, &self.doc.pages))
+            .is_some_and(|(_, before)| !content_eq(before, &self.doc.pages))
     }
 
     /// Replaces the page content with `pages`, keeping the current view
-    /// state of pages that still exist (matched by id) and clamping the
-    /// active page and layers.
+    /// state of pages that still exist (matched by id): the viewport, and
+    /// the active layer if it still exists (else its index, clamped). The
+    /// active page is kept by id too, else its index is clamped.
     fn restore(&mut self, mut pages: Vec<Page>) {
         let active_id = self.page().id;
         for page in &mut pages {
             if let Some(cur) = self.doc.pages.iter().find(|p| p.id == page.id) {
                 page.viewport = cur.viewport;
-                page.active_layer = cur.active_layer;
+                let layer_id = cur.layers.get(cur.active_layer).map(|l| l.id);
+                page.active_layer = page
+                    .layers
+                    .iter()
+                    .position(|l| Some(l.id) == layer_id)
+                    .unwrap_or(cur.active_layer);
             }
             page.active_layer = page.active_layer.min(page.layers.len().saturating_sub(1));
         }
@@ -411,11 +461,12 @@ impl DocumentSession {
         self.active_layer().visible
     }
 
-    /// Appends `shapes` to the top of the active layer.
-    pub fn add_shapes(&mut self, shapes: Vec<Shape>) {
+    /// Appends `shapes`, normalised, to the top of the active layer.
+    pub fn add_shapes(&mut self, mut shapes: Vec<Shape>) {
         if shapes.is_empty() {
             return;
         }
+        shapes.iter_mut().for_each(Shape::normalize);
         self.checkpoint();
         self.active_layer_mut().objects.extend(shapes);
     }
@@ -444,8 +495,8 @@ impl DocumentSession {
         removed
     }
 
-    /// Applies `f` to each shape with one of `ids` on the active layer,
-    /// recording a step only if some shape changed.
+    /// Applies `f` to each shape with one of `ids` on the active layer and
+    /// normalises the result, recording a step only if some shape changed.
     pub fn update_shapes(&mut self, ids: &[Uuid], mut f: impl FnMut(&mut Shape)) {
         let changed: Vec<(usize, Shape)> = self
             .shapes_on_active_layer()
@@ -455,6 +506,7 @@ impl DocumentSession {
             .filter_map(|(i, s)| {
                 let mut new = s.clone();
                 f(&mut new);
+                new.normalize();
                 (new != *s).then_some((i, new))
             })
             .collect();
@@ -1090,6 +1142,93 @@ mod tests {
         assert_eq!(s.find_shape(id).unwrap().frame.x, 7.0);
         s.update_shapes(&[id], |sh| sh.frame.x = 0.0);
         assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn undo_keeps_active_layer_by_id() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.add_layer();
+        let (a, b) = (s.page().layers[0].id, s.page().layers[1].id);
+        s.add_layer(); // [N, A, B]
+        s.set_active_layer(1);
+        assert_eq!(s.page().layers[1].id, a);
+        assert!(s.undo()); // [A, B]
+        assert_eq!(s.page().layers.len(), 2);
+        assert_eq!(s.page().layers[s.page().active_layer].id, a);
+        assert!(s.redo()); // [N, A, B]: A stays active
+        assert_eq!(s.page().layers[s.page().active_layer].id, a);
+        // A missing layer falls back to the clamped index.
+        s.set_active_layer(0);
+        assert!(s.undo());
+        assert_eq!(s.page().active_layer, 0);
+        assert!(s.undo()); // [B]
+        assert_eq!(s.page().layers[s.page().active_layer].id, b);
+    }
+
+    #[test]
+    fn edit_after_undo_gets_new_revision() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.save().unwrap();
+        s.rename_page(0, "One");
+        assert!(s.is_dirty());
+        assert!(s.undo());
+        assert!(!s.is_dirty());
+        s.rename_page(0, "Two");
+        assert!(s.is_dirty());
+        assert!(s.undo());
+        assert!(!s.is_dirty());
+        assert!(s.redo());
+        assert!(s.is_dirty());
+        assert_eq!(s.page().name, "Two");
+        // Saving after an undo: redo is dirty, undoing back is clean.
+        assert!(s.undo());
+        s.rename_page(0, "Three");
+        s.save().unwrap();
+        assert!(s.undo());
+        assert!(s.is_dirty());
+        assert!(s.redo());
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn gesture_dirty_tracks_content() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.begin_gesture();
+        s.toggle_layer_visibility(0);
+        assert!(s.is_dirty());
+        s.toggle_layer_visibility(0);
+        s.end_gesture();
+        assert!(!s.is_dirty());
+        assert!(!s.can_undo());
+    }
+
+    #[test]
+    fn update_with_nan_is_normalised() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let mut shape = rect(3.0);
+        shape.frame.y = f32::NAN;
+        shape.style.opacity = 9.0;
+        let id = shape.id;
+        s.add_shapes(vec![shape]);
+        let added = s.find_shape(id).unwrap();
+        assert_eq!((added.frame.y, added.style.opacity), (0.0, 1.0));
+        s.update_shapes(&[id], |sh| sh.frame.x = f32::NAN);
+        assert!(s.find_shape(id).unwrap().frame.x.is_finite());
+        s.save().unwrap();
+        s.update_shapes(&[id], |sh| sh.frame.x = f32::NAN);
+        assert!(!s.is_dirty());
+        assert!(s.undo()); // the first update
+        assert_eq!(s.find_shape(id).unwrap().frame.x, 3.0);
+        assert!(s.undo()); // the add
+        assert!(!s.can_undo());
+    }
+
+    #[test]
+    fn doc_accessor_reads_document() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.add_page();
+        assert_eq!(s.doc().pages.len(), 2);
+        assert_eq!(s.doc().active_page, 1);
     }
 
     #[test]
