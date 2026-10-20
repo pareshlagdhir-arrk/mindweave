@@ -63,6 +63,9 @@ pub struct AppState {
     /// Set once quitting is confirmed, so closing windows does not reopen
     /// the dashboard.
     quitting: bool,
+    /// Set while Quit is asking about unsaved changes, so a second Quit
+    /// does not start a second round of prompts.
+    quit_prompting: bool,
 }
 
 impl Global for AppState {}
@@ -80,6 +83,7 @@ impl AppState {
             editors: HashMap::new(),
             dashboard: None,
             quitting: false,
+            quit_prompting: false,
         });
 
         actions::bind_keys(cx);
@@ -301,68 +305,89 @@ impl AppState {
     }
 
     /// Asks about each editor with unsaved changes (Save / Don't Save /
-    /// Cancel), then quits. Cancel, or a failed save, stops the quit.
+    /// Cancel), then quits. Cancel, or a failed save, stops the quit. A Quit
+    /// while the prompts are showing is ignored.
     pub fn quit(cx: &mut App) {
-        let editors: Vec<_> = cx.global::<AppState>().editors.values().cloned().collect();
+        let state = cx.global_mut::<AppState>();
+        if state.quit_prompting {
+            return;
+        }
+        state.quit_prompting = true;
+        let editors: Vec<_> = state.editors.values().cloned().collect();
         cx.spawn(async move |cx| {
-            for editor in &editors {
-                let Some(view) = editor.view.upgrade() else {
-                    continue;
-                };
-                let asked = editor.handle.update(cx, |_, window, cx| {
-                    let (dirty, name) = {
-                        let editor = view.read(cx);
-                        (editor.session().is_dirty(), editor.file_name())
-                    };
-                    dirty.then(|| {
-                        window.activate_window();
-                        prompt_to_save(&name, window, cx)
-                    })
-                });
-                let Ok(Some(choice)) = asked else {
-                    continue;
-                };
-                match choice.await {
-                    SaveChoice::Save => {
-                        let saved = editor
-                            .handle
-                            .update(cx, |_, window, cx| {
-                                view.update(cx, |editor, cx| editor.save(window, cx))
-                            })
-                            .unwrap_or(false);
-                        if !saved {
-                            return;
-                        }
-                    }
-                    SaveChoice::DontSave => {}
-                    SaveChoice::Cancel => return,
-                }
-            }
+            let confirmed = Self::confirm_quit(&editors, cx).await;
             cx.update(|cx| {
-                let state = cx.global::<AppState>();
-                let open: Vec<_> = state
-                    .dashboard
-                    .iter()
-                    .map(|d| (WindowKind::Dashboard, d.handle))
-                    .chain(
-                        state
-                            .editors
-                            .values()
-                            .map(|e| (WindowKind::Editor, e.handle)),
-                    )
-                    .collect();
-                for (kind, handle) in open {
-                    handle
-                        .update(cx, |_, window, cx| {
-                            Self::remember_window_size(kind, window, cx)
-                        })
-                        .ok();
+                cx.global_mut::<AppState>().quit_prompting = false;
+                if confirmed {
+                    Self::quit_now(cx);
                 }
-                cx.global_mut::<AppState>().quitting = true;
-                cx.quit();
             });
         })
         .detach();
+    }
+
+    /// Asks about each editor with unsaved changes, saving where asked.
+    /// Returns `false` on Cancel or a failed save.
+    async fn confirm_quit(editors: &[AppWindow<EditorWindow>], cx: &mut AsyncApp) -> bool {
+        for editor in editors {
+            let Some(view) = editor.view.upgrade() else {
+                continue;
+            };
+            let asked = editor.handle.update(cx, |_, window, cx| {
+                let (dirty, name) = view.update(cx, |editor, cx| {
+                    editor.commit_pending_edits(window, cx);
+                    (editor.session().is_dirty(), editor.file_name())
+                });
+                dirty.then(|| {
+                    window.activate_window();
+                    prompt_to_save(&name, window, cx)
+                })
+            });
+            let Ok(Some(choice)) = asked else {
+                continue;
+            };
+            match choice.await {
+                SaveChoice::Save => {
+                    let saved = editor
+                        .handle
+                        .update(cx, |_, window, cx| {
+                            view.update(cx, |editor, cx| editor.save(window, cx))
+                        })
+                        .unwrap_or(false);
+                    if !saved {
+                        return false;
+                    }
+                }
+                SaveChoice::DontSave => {}
+                SaveChoice::Cancel => return false,
+            }
+        }
+        true
+    }
+
+    /// Remembers the window sizes and quits.
+    fn quit_now(cx: &mut App) {
+        let state = cx.global::<AppState>();
+        let open: Vec<_> = state
+            .dashboard
+            .iter()
+            .map(|d| (WindowKind::Dashboard, d.handle))
+            .chain(
+                state
+                    .editors
+                    .values()
+                    .map(|e| (WindowKind::Editor, e.handle)),
+            )
+            .collect();
+        for (kind, handle) in open {
+            handle
+                .update(cx, |_, window, cx| {
+                    Self::remember_window_size(kind, window, cx)
+                })
+                .ok();
+        }
+        cx.global_mut::<AppState>().quitting = true;
+        cx.quit();
     }
 }
 
@@ -414,6 +439,10 @@ fn toggle_theme_picker(cx: &mut App) {
     handle
         .update(cx, |_, window, cx| {
             if window.has_active_dialog(cx) {
+                // Closing this way skips the picker's cancel handler, so put
+                // back the saved theme in place of any preview.
+                let saved = cx.global::<AppState>().settings.theme.clone();
+                apply_theme(&saved, cx);
                 window.close_dialog(cx);
                 return;
             }

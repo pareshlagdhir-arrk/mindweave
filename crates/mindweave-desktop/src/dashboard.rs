@@ -69,7 +69,7 @@ impl Render for Dashboard {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .text_size(px(TEXT_SIZE))
-            .child(menu_bar(WindowKind::Dashboard, cx))
+            .child(menu_bar(WindowKind::Dashboard, None, cx))
             .child(
                 h_flex()
                     .flex_1()
@@ -121,7 +121,10 @@ fn file_grid(cx: &App) -> impl IntoElement {
         .settings
         .recent_existing()
         .into_iter()
-        .map(|r| (r.path.clone(), r.opened_at))
+        .map(|r| {
+            let modified = std::fs::metadata(&r.path).and_then(|m| m.modified()).ok();
+            (r.path.clone(), last_edited(modified, r.opened_at))
+        })
         .collect();
     let now = unix_now();
 
@@ -146,7 +149,7 @@ fn file_grid(cx: &App) -> impl IntoElement {
             recent
                 .into_iter()
                 .enumerate()
-                .map(|(ix, (path, opened_at))| file_tile(ix, path, opened_at, now, cx)),
+                .map(|(ix, (path, edited_at))| file_tile(ix, path, edited_at, now, cx)),
         );
     }
 
@@ -180,7 +183,7 @@ fn new_file_tile(cx: &App) -> impl IntoElement {
         .on_click(|_, _, cx| AppState::new_file(cx))
 }
 
-fn file_tile(ix: usize, path: PathBuf, opened_at: u64, now: u64, cx: &App) -> impl IntoElement {
+fn file_tile(ix: usize, path: PathBuf, edited_at: u64, now: u64, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let tooltip: SharedString = path.display().to_string().into();
     v_flex()
@@ -215,7 +218,7 @@ fn file_tile(ix: usize, path: PathBuf, opened_at: u64, now: u64, cx: &App) -> im
                     div()
                         .text_size(px(SMALL_TEXT_SIZE))
                         .text_color(theme.muted_foreground)
-                        .child(format_relative(opened_at, now)),
+                        .child(format_relative(edited_at, now)),
                 ),
         )
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
@@ -289,6 +292,14 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// When a recent file was last edited (Unix seconds): its modification
+/// time, or `opened_at` when that is unknown.
+fn last_edited(modified: Option<SystemTime>, opened_at: u64) -> u64 {
+    modified
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(opened_at, |d| d.as_secs())
+}
+
 const MINUTE: u64 = 60;
 const HOUR: u64 = 60 * MINUTE;
 const DAY: u64 = 24 * HOUR;
@@ -296,12 +307,12 @@ const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-/// How long ago `opened_at` was, relative to `now` (both Unix seconds):
+/// How long ago `time` was, relative to `now` (both Unix seconds):
 /// "Just now", "N min ago", "N h ago", "Yesterday", "N days ago" (2–6
 /// days), then the UTC date as "D Mon YYYY". Times in the future count as
 /// "Just now".
-pub fn format_relative(opened_at: u64, now: u64) -> String {
-    let elapsed = now.saturating_sub(opened_at);
+pub fn format_relative(time: u64, now: u64) -> String {
+    let elapsed = now.saturating_sub(time);
     if elapsed < MINUTE {
         "Just now".to_string()
     } else if elapsed < HOUR {
@@ -313,7 +324,7 @@ pub fn format_relative(opened_at: u64, now: u64) -> String {
     } else if elapsed < 7 * DAY {
         format!("{} days ago", elapsed / DAY)
     } else {
-        let (year, month, day) = civil_from_days(opened_at / DAY);
+        let (year, month, day) = civil_from_days(time / DAY);
         format!("{day} {} {year}", MONTHS[(month - 1) as usize])
     }
 }
@@ -336,8 +347,9 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
-    use super::{civil_from_days, file_stem, format_relative};
+    use super::{civil_from_days, file_stem, format_relative, last_edited};
     use std::path::Path;
+    use std::time::{Duration, UNIX_EPOCH};
 
     const NOW: u64 = 1_790_000_000;
 
@@ -392,5 +404,14 @@ mod tests {
             "Q4 roadmap"
         );
         assert_eq!(file_stem(Path::new("/tmp/notes")), "notes");
+    }
+
+    #[test]
+    fn tiles_show_the_modified_time_else_the_opened_time() {
+        let modified = UNIX_EPOCH + Duration::from_secs(NOW - 300);
+        assert_eq!(last_edited(Some(modified), NOW - 9_000), NOW - 300);
+        assert_eq!(last_edited(None, NOW - 9_000), NOW - 9_000);
+        let before_epoch = UNIX_EPOCH - Duration::from_secs(1);
+        assert_eq!(last_edited(Some(before_epoch), NOW - 9_000), NOW - 9_000);
     }
 }

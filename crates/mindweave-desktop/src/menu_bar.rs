@@ -19,6 +19,8 @@ use crate::app_state::AppState;
 pub const MENU_BAR_HEIGHT: f32 = 30.;
 const MENU_LABEL_SIZE: f32 = 12.;
 const MENU_MIN_WIDTH: f32 = 200.;
+/// The left padding `TitleBar` keeps for the traffic lights on macOS.
+const TRAFFIC_LIGHTS_WIDTH: f32 = 80.;
 
 /// Which kind of window a menu bar is drawn in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,20 +209,41 @@ fn native_menus_for(panels: PanelState) -> Vec<Menu> {
 }
 
 /// The compact in-window menu bar. It is also the window's title bar: it
-/// leaves room for the traffic lights and drags the window.
-pub fn menu_bar(window_kind: WindowKind, cx: &App) -> impl IntoElement {
+/// leaves room for the traffic lights, drags the window, and shows `title`
+/// (when given) centred in the window.
+pub fn menu_bar(
+    window_kind: WindowKind,
+    title: Option<SharedString>,
+    cx: &App,
+) -> impl IntoElement {
     let theme = cx.theme();
+    let menus = h_flex().h_full().items_center().gap(px(2.)).children(
+        menus(window_kind, PanelState::current(cx), true)
+            .into_iter()
+            .map(menu_button),
+    );
+    // Equal flexible sides keep the title centred; the right side also
+    // matches the traffic-light padding so the centre is the window's. When
+    // the menus need more room the title moves right instead of overlapping.
+    let row = h_flex()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .child(h_flex().flex_1().h_full().child(menus))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(MENU_LABEL_SIZE))
+                .text_color(theme.muted_foreground)
+                .children(title),
+        )
+        .child(div().flex_1().pr(px(TRAFFIC_LIGHTS_WIDTH)));
     TitleBar::new()
         .h(px(MENU_BAR_HEIGHT))
         .bg(theme.title_bar)
         .border_color(theme.title_bar_border)
-        .child(
-            h_flex().h_full().items_center().gap(px(2.)).children(
-                menus(window_kind, PanelState::current(cx), true)
-                    .into_iter()
-                    .map(menu_button),
-            ),
-        )
+        .child(row)
 }
 
 fn menu_button(spec: MenuSpec) -> impl IntoElement {

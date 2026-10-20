@@ -194,6 +194,7 @@ impl EditorWindow {
     /// Saves the document. On failure shows a notification and returns
     /// `false`.
     pub fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.commit_pending_edits(window, cx);
         let saved = match self.session.save() {
             Ok(()) => true,
             Err(err) => {
@@ -209,6 +210,7 @@ impl EditorWindow {
     /// Closes the window, first asking to save when there are unsaved
     /// changes. Used by Close Window and the window's close button.
     pub fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_pending_edits(window, cx);
         if !self.session.is_dirty() {
             close(window, cx);
             return;
@@ -227,6 +229,23 @@ impl EditorWindow {
             }
         })
         .detach();
+    }
+
+    /// Applies edits that otherwise wait for Enter or blur: an open rename
+    /// and a grid size being typed. Save, Close and Quit call this first so
+    /// keyboard shortcuts do not skip them.
+    pub fn commit_pending_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename.is_some() {
+            self.finish_rename(true, cx);
+            // The rename field is gone; keep keyboard shortcuts working.
+            self.focus_handle.focus(window, cx);
+        }
+        // Only a focused grid-size input can hold an unapplied value; an
+        // unfocused one shows the page's size rounded, which must not be
+        // written back.
+        if self.grid_input.read(cx).focus_handle(cx).is_focused(window) {
+            self.commit_grid_size(window, cx);
+        }
     }
 
     /// Starts an inline rename of `target` with its current name selected.
@@ -328,6 +347,8 @@ impl EditorWindow {
             },
             cx,
         );
+        // The new page has its own viewport.
+        self.refresh_cursor(cx);
     }
 
     /// Applies the grid-size input on Enter or blur; whatever happens, the
@@ -349,10 +370,13 @@ impl EditorWindow {
         self.grid_input_shows = Some(size);
     }
 
+    /// Gives the window the document's title, and shows the unsaved-changes
+    /// dot in its close button while the document is dirty.
     fn sync_window_title(&mut self, window: &mut Window) {
         let title = self.session.title();
         if title != self.window_title {
             window.set_window_title(&title);
+            window.set_window_edited(self.session.is_dirty());
             self.window_title = title;
         }
     }
@@ -524,7 +548,11 @@ impl Render for EditorWindow {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .text_size(px(TEXT_SIZE))
-            .child(menu_bar(WindowKind::Editor, cx))
+            .child(menu_bar(
+                WindowKind::Editor,
+                Some(self.window_title.clone().into()),
+                cx,
+            ))
             .child(div().flex_1().min_h_0().child(panels))
             .child(status_bar::render(self, cx))
     }
