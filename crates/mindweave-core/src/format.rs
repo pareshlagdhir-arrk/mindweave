@@ -1,0 +1,163 @@
+//! `.mindweave` file format: pretty-printed JSON with a top-level `version`.
+
+use std::path::Path;
+
+use thiserror::Error;
+
+use crate::document::Document;
+
+pub const FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Error)]
+pub enum FormatError {
+    #[error("Could not read or write the file: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("This file is not a valid Mindweave document: {0}")]
+    Parse(#[from] serde_json::Error),
+    #[error("This file was made by a newer version of Mindweave (format {0}).")]
+    UnsupportedVersion(u32),
+    #[error("This file contains no pages or a page without layers.")]
+    Empty,
+}
+
+pub fn load(path: &Path) -> Result<Document, FormatError> {
+    let text = std::fs::read_to_string(path)?;
+    let value: serde_json::Value = serde_json::from_str(&text)?;
+    // Check the version before the full parse so newer formats report clearly.
+    if let Some(v) = value.get("version").and_then(|v| v.as_u64()) {
+        if v > u64::from(FORMAT_VERSION) {
+            return Err(FormatError::UnsupportedVersion(
+                u32::try_from(v).unwrap_or(u32::MAX),
+            ));
+        }
+    }
+    let mut doc: Document = serde_json::from_value(value)?;
+    if doc.pages.is_empty() || doc.pages.iter().any(|p| p.layers.is_empty()) {
+        return Err(FormatError::Empty);
+    }
+    if doc.active_page >= doc.pages.len() {
+        doc.active_page = 0;
+    }
+    for page in &mut doc.pages {
+        if page.active_layer >= page.layers.len() {
+            page.active_layer = 0;
+        }
+    }
+    Ok(doc)
+}
+
+pub fn save(doc: &Document, path: &Path) -> Result<(), FormatError> {
+    let json = serde_json::to_string_pretty(doc)?;
+    let tmp = path.with_extension("mindweave.tmp");
+    std::fs::write(&tmp, json)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::*;
+    use std::fs;
+
+    #[test]
+    fn new_document_has_one_page_one_layer() {
+        let d = Document::new();
+        assert_eq!(d.version, 1);
+        assert_eq!(d.pages.len(), 1);
+        assert_eq!(d.pages[0].name, "Page 1");
+        assert_eq!(d.pages[0].layers[0].name, "Layer 1");
+        assert_eq!(d.pages[0].canvas.pattern, BackgroundPattern::Dots);
+        assert_eq!(d.pages[0].canvas.grid_size, 20.0);
+    }
+
+    #[test]
+    fn round_trip_save_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mindweave");
+        let mut d = Document::new();
+        let mut p2 = d.pages[0].clone();
+        p2.id = uuid::Uuid::new_v4();
+        p2.name = "Page 2".into();
+        p2.canvas.pattern = BackgroundPattern::Lines;
+        p2.viewport = Viewport {
+            x: 5.0,
+            y: -3.0,
+            zoom: 2.0,
+        };
+        d.pages.push(p2);
+        d.active_page = 1;
+        save(&d, &path).unwrap();
+        assert!(!dir.path().join("a.mindweave.tmp").exists());
+        assert_eq!(load(&path).unwrap(), d);
+    }
+
+    #[test]
+    fn saved_json_is_pretty_and_lowercase_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mindweave");
+        save(&Document::new(), &path).unwrap();
+        let s = fs::read_to_string(&path).unwrap();
+        assert!(s.contains("\n  "));
+        assert!(s.contains("\"pattern\": \"dots\""));
+        assert!(s.contains("\"version\": 1"));
+    }
+
+    #[test]
+    fn load_rejects_newer_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mindweave");
+        fs::write(&path, r#"{"version":2,"pages":[],"active_page":0}"#).unwrap();
+        assert!(matches!(
+            load(&path),
+            Err(FormatError::UnsupportedVersion(2))
+        ));
+    }
+
+    #[test]
+    fn load_rejects_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mindweave");
+        fs::write(&path, "not json").unwrap();
+        assert!(matches!(load(&path), Err(FormatError::Parse(_))));
+    }
+
+    #[test]
+    fn load_rejects_empty_pages_and_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mindweave");
+        let mut d = Document::new();
+        d.pages.clear();
+        fs::write(&path, serde_json::to_string(&d).unwrap()).unwrap();
+        assert!(matches!(load(&path), Err(FormatError::Empty)));
+        let mut d = Document::new();
+        d.pages[0].layers.clear();
+        fs::write(&path, serde_json::to_string(&d).unwrap()).unwrap();
+        assert!(matches!(load(&path), Err(FormatError::Empty)));
+    }
+
+    #[test]
+    fn load_missing_file_is_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            load(&dir.path().join("nope.mindweave")),
+            Err(FormatError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn load_clamps_bad_active_indices() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mindweave");
+        let mut d = Document::new();
+        d.active_page = 9;
+        d.pages[0].active_layer = 7;
+        fs::write(&path, serde_json::to_string(&d).unwrap()).unwrap();
+        let l = load(&path).unwrap();
+        assert_eq!(l.active_page, 0);
+        assert_eq!(l.pages[0].active_layer, 0);
+    }
+}
