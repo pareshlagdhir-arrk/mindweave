@@ -80,7 +80,26 @@ impl Primitive {
             Primitive::Ellipse | Primitive::Line => &[],
         }
     }
+
+    /// The values parameter `key` can usefully take; the outline clamps
+    /// anything outside. `None` when the primitive has no such parameter.
+    pub fn param_range(self, key: &str) -> Option<(f32, f32)> {
+        match (self, key) {
+            (Primitive::Rect, "corner_radius") | (Primitive::Arrow, "head_size") => {
+                Some((0.0, f32::MAX))
+            }
+            (Primitive::Polygon, "sides") => Some(SIDES_RANGE),
+            (Primitive::Star, "points") => Some(POINTS_RANGE),
+            (Primitive::Star, "inner_ratio") => Some(INNER_RATIO_RANGE),
+            _ => None,
+        }
+    }
 }
+
+/// Polygon `sides`, star `points` and star `inner_ratio` limits.
+const SIDES_RANGE: (f32, f32) = (3.0, 12.0);
+const POINTS_RANGE: (f32, f32) = (3.0, 20.0);
+const INNER_RATIO_RANGE: (f32, f32) = (0.1, 0.9);
 
 /// Default arrowhead length.
 const DEFAULT_HEAD_SIZE: f32 = 12.0;
@@ -150,15 +169,23 @@ pub fn primitive_geometry(
             }
         }
         Primitive::Polygon => {
-            let sides = param("sides").unwrap_or(3.0).round().clamp(3.0, 12.0) as usize;
+            let sides = param("sides")
+                .unwrap_or(3.0)
+                .round()
+                .clamp(SIDES_RANGE.0, SIDES_RANGE.1) as usize;
             let (rx, ry) = (w / 2.0, h / 2.0);
             Geometry {
                 paths: vec![radial_polygon(w, h, sides, |_| (rx, ry))],
             }
         }
         Primitive::Star => {
-            let points = param("points").unwrap_or(5.0).round().clamp(3.0, 20.0) as usize;
-            let ratio = param("inner_ratio").unwrap_or(0.5).clamp(0.1, 0.9);
+            let points = param("points")
+                .unwrap_or(5.0)
+                .round()
+                .clamp(POINTS_RANGE.0, POINTS_RANGE.1) as usize;
+            let ratio = param("inner_ratio")
+                .unwrap_or(0.5)
+                .clamp(INNER_RATIO_RANGE.0, INNER_RATIO_RANGE.1);
             let (rx, ry) = (w / 2.0, h / 2.0);
             Geometry {
                 paths: vec![radial_polygon(w, h, points * 2, |i| {
@@ -906,5 +933,20 @@ mod tests {
         assert_eq!(Primitive::from_name("hexagon"), None);
         assert_eq!(Primitive::Star.param_keys(), &["points", "inner_ratio"]);
         assert!(Primitive::Line.param_keys().is_empty());
+        for kind in [
+            Primitive::Rect,
+            Primitive::Ellipse,
+            Primitive::Line,
+            Primitive::Arrow,
+            Primitive::Polygon,
+            Primitive::Star,
+        ] {
+            for key in kind.param_keys() {
+                assert!(kind.param_range(key).is_some(), "{kind:?} {key}");
+            }
+        }
+        assert_eq!(Primitive::Star.param_range("points"), Some((3.0, 20.0)));
+        assert_eq!(Primitive::Polygon.param_range("sides"), Some((3.0, 12.0)));
+        assert_eq!(Primitive::Star.param_range("sides"), None);
     }
 }

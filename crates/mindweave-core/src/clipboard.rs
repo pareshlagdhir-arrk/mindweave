@@ -20,7 +20,10 @@ pub const CLIPBOARD_VERSION: u64 = 1;
 /// Most shapes accepted from one payload.
 pub const MAX_CLIPBOARD_SHAPES: usize = 10_000;
 /// Longest clipboard text parsed, in bytes.
-pub const MAX_CLIPBOARD_BYTES: usize = 50 * 1024 * 1024;
+pub const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
+/// The `"mindweave"` key must start within this many bytes of the opening
+/// brace, so other JSON is rejected without being parsed.
+const MARKER_WINDOW: usize = 64;
 
 /// `shapes` as clipboard text.
 ///
@@ -55,7 +58,7 @@ pub fn to_clipboard(shapes: &[Shape]) -> String {
 /// not a version 1 shapes payload, is too large, holds more than
 /// [`MAX_CLIPBOARD_SHAPES`] shapes, or a shape does not parse.
 pub fn from_clipboard(text: &str) -> Option<Vec<Shape>> {
-    if text.len() > MAX_CLIPBOARD_BYTES {
+    if text.len() > MAX_CLIPBOARD_BYTES || !looks_like_payload(text) {
         return None;
     }
     // serde_json limits nesting depth, so hostile input cannot overflow
@@ -81,8 +84,17 @@ pub fn from_clipboard(text: &str) -> Option<Vec<Shape>> {
         .collect()
 }
 
+/// Whether `text` starts like a shapes payload: a JSON object with the
+/// `"mindweave"` key near its start. Cheap, so foreign text is not parsed.
+fn looks_like_payload(text: &str) -> bool {
+    const KEY: &[u8] = b"\"mindweave\"";
+    let text = text.trim_start().as_bytes();
+    let start = &text[..text.len().min(MARKER_WINDOW + KEY.len())];
+    text.first() == Some(&b'{') && start.windows(KEY.len()).any(|w| w == KEY)
+}
+
 /// `shapes` ready to paste into `view` (the visible canvas area): fresh
-/// ids, kept in place if their bounds intersect `view`, otherwise moved
+/// ids, unlocked (nothing can unlock a shape yet), kept in place if their bounds intersect `view`, otherwise moved
 /// so their bounds are centred in `view`.
 pub fn prepare_paste(mut shapes: Vec<Shape>, view: &Rect) -> Vec<Shape> {
     let frames: Vec<Frame> = shapes.iter().map(|s| s.frame).collect();
@@ -96,6 +108,7 @@ pub fn prepare_paste(mut shapes: Vec<Shape>, view: &Rect) -> Vec<Shape> {
     };
     for s in &mut shapes {
         s.id = Uuid::new_v4();
+        s.locked = false;
         s.frame.x += dx;
         s.frame.y += dy;
     }
@@ -206,6 +219,27 @@ mod tests {
         let mut huge = to_clipboard(&[]);
         huge.push_str(&" ".repeat(MAX_CLIPBOARD_BYTES));
         assert_eq!(from_clipboard(&huge), None);
+        assert_eq!(MAX_CLIPBOARD_BYTES, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn from_clipboard_checks_the_start_before_parsing() {
+        // Whitespace around a payload is fine; the marker may follow a
+        // little later than in our own payloads.
+        let good = to_clipboard(&[shape(0.0, 0.0, 10.0, 10.0)]);
+        assert!(from_clipboard(&format!("\n  {good}  \n")).is_some());
+        let reordered = good.replacen(
+            r#"{"mindweave":"shapes","version":1,"#,
+            r#"{"version":1,"mindweave":"shapes","#,
+            1,
+        );
+        assert_ne!(reordered, good);
+        assert!(from_clipboard(&reordered).is_some());
+        // Large JSON that does not start like a payload is never parsed:
+        // here it would be accepted if it were.
+        let late = format!(r#"{{"padding":"{}",{}"#, "x".repeat(64), &good[1..]);
+        assert_eq!(from_clipboard(&late), None);
+        assert_eq!(from_clipboard(&format!("[{good}]")), None);
     }
 
     #[test]
@@ -267,6 +301,16 @@ mod tests {
         let mut p = pasted[0].clone();
         p.id = shapes[0].id;
         assert_eq!(p, shapes[0]);
+    }
+
+    #[test]
+    fn pasted_shapes_are_unlocked() {
+        // There is no way to unlock a shape yet, so a pasted locked shape
+        // could never be selected.
+        let mut a = shape(0.0, 0.0, 10.0, 10.0);
+        a.locked = true;
+        let pasted = prepare_paste(vec![a], &view());
+        assert!(!pasted[0].locked);
     }
 
     #[test]

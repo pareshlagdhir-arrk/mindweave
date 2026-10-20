@@ -3,13 +3,16 @@
 //! The format is documented for contributors in `docs/libraries.md`.
 //!
 //! Library files are untrusted. Every file is limited to
-//! [`MAX_FILE_BYTES`], a library to [`MAX_SHAPES`] shapes, paths must stay
-//! inside the library folder, and SVG files are read for geometry only.
+//! [`MAX_FILE_BYTES`], a library to [`MAX_SHAPES`] shapes and
+//! [`MAX_LIBRARY_BYTES`] read in all, the user folder to
+//! [`MAX_USER_LIBRARIES`] libraries, paths must stay inside the library
+//! folder, and SVG files are read for geometry only (each once). Values
+//! echoed in messages are shortened.
 //! Problems never panic: they skip the library ([`LibraryError`]), skip
 //! one shape or field (a warning), or fall back to a default (a warning).
 //! Everything is parsed once at load; drawing never reads files.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -28,6 +31,18 @@ pub const MAX_FILE_BYTES: usize = 1_048_576;
 
 /// Most shapes one library may declare.
 pub const MAX_SHAPES: usize = 500;
+
+/// Most bytes read from the files of one library, in all.
+pub const MAX_LIBRARY_BYTES: usize = 16 * MAX_FILE_BYTES;
+
+/// Most user library folders loaded.
+pub const MAX_USER_LIBRARIES: usize = 100;
+
+/// Longest value from a library file echoed in a message, in characters.
+const MAX_QUOTED_CHARS: usize = 60;
+
+/// Longest notice or log line, in characters (before the `…`).
+const MAX_NOTICE_CHARS: usize = 600;
 
 /// Longest library or shape id, in bytes.
 const MAX_ID_LEN: usize = 64;
@@ -201,6 +216,8 @@ pub enum LibraryError {
     NewerFormat(u32),
     #[error("has {0} shapes; a library may have at most {max}", max = MAX_SHAPES)]
     TooManyShapes(usize),
+    #[error("its files add up to more than 16 MB")]
+    TooMuchData,
     #[error("{0}")]
     Invalid(String),
 }
@@ -218,11 +235,12 @@ pub struct DirFiles(pub PathBuf);
 impl LibraryFiles for DirFiles {
     fn read(&self, rel: &str) -> Result<String, LibraryError> {
         check_relative_path(rel)?;
+        let shown = quote(rel);
         let unreadable = |e: std::io::Error| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                LibraryError::Missing(rel.into())
+                LibraryError::Missing(shown.clone())
             } else {
-                LibraryError::Invalid(format!("`{rel}` could not be read: {e}"))
+                LibraryError::Invalid(format!("`{shown}` could not be read: {e}"))
             }
         };
         let root = self.0.canonicalize().map_err(|e| {
@@ -234,10 +252,10 @@ impl LibraryFiles for DirFiles {
         }
         let meta = std::fs::metadata(&path).map_err(unreadable)?;
         if !meta.is_file() {
-            return Err(LibraryError::Invalid(format!("`{rel}` is not a file")));
+            return Err(LibraryError::Invalid(format!("`{shown}` is not a file")));
         }
         if meta.len() > MAX_FILE_BYTES as u64 {
-            return Err(LibraryError::TooLarge(rel.into()));
+            return Err(LibraryError::TooLarge(shown));
         }
         // The file may grow between the size check and the read.
         let mut bytes = Vec::new();
@@ -245,10 +263,10 @@ impl LibraryFiles for DirFiles {
             .and_then(|f| f.take(MAX_FILE_BYTES as u64 + 1).read_to_end(&mut bytes))
             .map_err(unreadable)?;
         if bytes.len() > MAX_FILE_BYTES {
-            return Err(LibraryError::TooLarge(rel.into()));
+            return Err(LibraryError::TooLarge(shown));
         }
         String::from_utf8(bytes)
-            .map_err(|_| LibraryError::Invalid(format!("`{rel}` is not UTF-8 text")))
+            .map_err(|_| LibraryError::Invalid(format!("`{shown}` is not UTF-8 text")))
     }
 }
 
@@ -262,12 +280,92 @@ impl LibraryFiles for EmbeddedFiles {
             .iter()
             .find(|(path, _)| *path == rel)
             .map(|(_, text)| (*text).to_owned())
-            .ok_or_else(|| LibraryError::Missing(rel.into()))
+            .ok_or_else(|| LibraryError::Missing(quote(rel)))
     }
 }
 
 fn outside_folder(rel: &str) -> LibraryError {
-    LibraryError::Invalid(format!("`{rel}` is not a path inside the library folder"))
+    LibraryError::Invalid(format!(
+        "`{}` is not a path inside the library folder",
+        quote(rel)
+    ))
+}
+
+/// `text`, cut to `max` characters with `…` added when it is longer.
+fn shortened(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_owned(),
+    }
+}
+
+/// A value from a library file, shortened for a message.
+fn quote(value: &str) -> String {
+    shortened(value, MAX_QUOTED_CHARS)
+}
+
+/// Messages from loading libraries.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LoadReport {
+    /// For the user: skipped libraries, shapes and parameters, and values
+    /// replaced by defaults.
+    pub notices: Vec<String>,
+    /// For the log only: unknown fields, which a library written for a
+    /// later Mindweave may add.
+    pub log: Vec<String>,
+}
+
+/// The files of the library being loaded. Counts the bytes read against
+/// [`MAX_LIBRARY_BYTES`] and reads each SVG outline once, however many
+/// shapes and icons use it.
+struct Reader<'a> {
+    files: &'a dyn LibraryFiles,
+    bytes_read: usize,
+    outlines: HashMap<String, Result<Geometry, String>>,
+}
+
+impl<'a> Reader<'a> {
+    fn new(files: &'a dyn LibraryFiles) -> Self {
+        Reader {
+            files,
+            bytes_read: 0,
+            outlines: HashMap::new(),
+        }
+    }
+
+    fn over_budget(&self) -> bool {
+        self.bytes_read > MAX_LIBRARY_BYTES
+    }
+
+    /// Reads `rel`, enforcing [`MAX_FILE_BYTES`] whatever the source.
+    /// Nothing more is read once the budget is spent.
+    fn read(&mut self, rel: &str) -> Result<String, LibraryError> {
+        if self.over_budget() {
+            return Err(LibraryError::TooMuchData);
+        }
+        let text = self.files.read(rel)?;
+        if text.len() > MAX_FILE_BYTES {
+            return Err(LibraryError::TooLarge(quote(rel)));
+        }
+        self.bytes_read += text.len();
+        if self.over_budget() {
+            return Err(LibraryError::TooMuchData);
+        }
+        Ok(text)
+    }
+
+    /// The SVG outline file `rel`.
+    fn outline(&mut self, rel: &str) -> Result<Geometry, String> {
+        if let Some(outline) = self.outlines.get(rel) {
+            return outline.clone();
+        }
+        let outline = self
+            .read(rel)
+            .map_err(|e| e.to_string())
+            .and_then(|text| parse_outline(&text).map_err(|e| format!("`{}`: {e}", quote(rel))));
+        self.outlines.insert(rel.to_owned(), outline.clone());
+        outline
+    }
 }
 
 /// Accepts only plain relative paths (`shapes/a.svg`, `./a.svg`).
@@ -285,18 +383,20 @@ fn check_relative_path(rel: &str) -> Result<(), LibraryError> {
     }
 }
 
-/// Loads one library. The warnings describe ignored fields, skipped shapes
-/// and parameters, and values replaced by defaults.
+/// Loads one library. The report describes skipped shapes and
+/// parameters, values replaced by defaults and (in its log) ignored fields.
 pub fn load_library(
     files: &dyn LibraryFiles,
     builtin: bool,
-) -> Result<(Library, Vec<String>), LibraryError> {
-    let mut warnings = Vec::new();
+) -> Result<(Library, LoadReport), LibraryError> {
+    let mut report = LoadReport::default();
+    let mut files = Reader::new(files);
+    let files = &mut files;
 
     let table = read_toml(files, "library.toml")?;
     // Checked first: a newer format may change every other field.
     check_format(&table)?;
-    warn_unknown(&table, LIBRARY_FIELDS, "library.toml", &mut warnings);
+    warn_unknown(&table, LIBRARY_FIELDS, "library.toml", &mut report.log);
     let invalid = |e: String| LibraryError::Invalid(format!("library.toml: {e}"));
     let id = valid_id(required_str(&table, "id").map_err(invalid)?).map_err(invalid)?;
     let name = valid_name(required_str(&table, "name").map_err(invalid)?).map_err(invalid)?;
@@ -304,23 +404,41 @@ pub fn load_library(
     if version.trim().is_empty() {
         return Err(invalid("`version` is empty".into()));
     }
-    let author = optional_str(&table, "author").map_err(invalid)?;
-    let description = optional_str(&table, "description").map_err(invalid)?;
+    // Optional fields fall back with a warning, as shape fields do.
+    let mut optional = |key: &str| {
+        optional_str(&table, key).unwrap_or_else(|e| {
+            report.notices.push(format!("library.toml: {e}; ignored"));
+            None
+        })
+    };
+    let author = optional("author");
+    let description = optional("description");
+    let icon_value = optional("icon");
     let order = match table.get("order") {
         None => 0,
-        Some(Value::Integer(n)) => {
-            i32::try_from(*n).map_err(|_| invalid("`order` is out of range".into()))?
+        Some(Value::Integer(n)) => i32::try_from(*n).unwrap_or_else(|_| {
+            report
+                .notices
+                .push("library.toml: `order` is out of range; using 0".into());
+            0
+        }),
+        Some(_) => {
+            report
+                .notices
+                .push("library.toml: `order` must be a whole number; using 0".into());
+            0
         }
-        Some(_) => return Err(invalid("`order` must be a whole number".into())),
     };
-    let icon_value = optional_str(&table, "icon").map_err(invalid)?;
     let icon = load_icon(
         files,
         icon_value,
         Icon::Lucide(DEFAULT_ICON.into()),
         "library.toml",
-        &mut warnings,
+        &mut report.notices,
     );
+    if files.over_budget() {
+        return Err(LibraryError::TooMuchData);
+    }
 
     let mut table = read_toml(files, "shapes.toml")?;
     let entries = match table.remove("shape") {
@@ -332,19 +450,22 @@ pub fn load_library(
             ))
         }
     };
-    warn_unknown(&table, &[], "shapes.toml", &mut warnings);
+    warn_unknown(&table, &[], "shapes.toml", &mut report.log);
     if entries.len() > MAX_SHAPES {
         return Err(LibraryError::TooManyShapes(entries.len()));
     }
     let mut shapes: Vec<ShapeDef> = Vec::with_capacity(entries.len());
     let mut ids = HashSet::new();
     for (index, entry) in entries.iter().enumerate() {
-        match load_shape(files, entry, index + 1, &ids, &mut warnings) {
+        match load_shape(files, entry, index + 1, &ids, &mut report) {
             Ok(shape) => {
                 ids.insert(shape.id.clone());
                 shapes.push(shape);
             }
-            Err(warning) => warnings.push(warning),
+            Err(warning) => report.notices.push(warning),
+        }
+        if files.over_budget() {
+            return Err(LibraryError::TooMuchData);
         }
     }
 
@@ -359,21 +480,11 @@ pub fn load_library(
         builtin,
         shapes,
     };
-    Ok((library, warnings))
+    Ok((library, report))
 }
 
-/// Reads `rel` through `files`, enforcing [`MAX_FILE_BYTES`] whatever the
-/// source.
-fn read_file(files: &dyn LibraryFiles, rel: &str) -> Result<String, LibraryError> {
+fn read_toml(files: &mut Reader, rel: &str) -> Result<Table, LibraryError> {
     let text = files.read(rel)?;
-    if text.len() > MAX_FILE_BYTES {
-        return Err(LibraryError::TooLarge(rel.into()));
-    }
-    Ok(text)
-}
-
-fn read_toml(files: &dyn LibraryFiles, rel: &str) -> Result<Table, LibraryError> {
-    let text = read_file(files, rel)?;
     text.parse::<Table>().map_err(|e| {
         let message = e.message().trim_end();
         LibraryError::Toml(match e.span() {
@@ -409,10 +520,10 @@ fn check_format(table: &Table) -> Result<(), LibraryError> {
     }
 }
 
-/// Adds one warning per key of `table` not in `known`.
-fn warn_unknown(table: &Table, known: &[&str], context: &str, warnings: &mut Vec<String>) {
+/// Adds one log line per key of `table` not in `known`.
+fn warn_unknown(table: &Table, known: &[&str], context: &str, log: &mut Vec<String>) {
     for key in table.keys().filter(|k| !known.contains(&k.as_str())) {
-        warnings.push(format!("{context}: unknown field `{key}` ignored"));
+        log.push(format!("{context}: unknown field `{}` ignored", quote(key)));
     }
 }
 
@@ -455,8 +566,9 @@ fn valid_id(id: &str) -> Result<&str, String> {
         Ok(id)
     } else {
         Err(format!(
-            "id `{id}` must be 1 to {MAX_ID_LEN} lowercase letters, digits, `-`, `_` or `.`, \
-             starting with a letter or digit"
+            "id `{}` must be 1 to {MAX_ID_LEN} lowercase letters, digits, `-`, `_` or `.`, \
+             starting with a letter or digit",
+            quote(id)
         ))
     }
 }
@@ -482,16 +594,10 @@ fn valid_lucide_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// Reads an SVG outline file of the library.
-fn load_outline(files: &dyn LibraryFiles, rel: &str) -> Result<Geometry, String> {
-    let text = read_file(files, rel).map_err(|e| e.to_string())?;
-    parse_outline(&text).map_err(|e| format!("`{rel}`: {e}"))
-}
-
 /// The icon named by `value` (a Lucide name, or an SVG file when it ends
 /// in `.svg`), or `fallback` with a warning when it cannot be used.
 fn load_icon(
-    files: &dyn LibraryFiles,
+    files: &mut Reader,
     value: Option<&str>,
     fallback: Icon,
     context: &str,
@@ -501,7 +607,7 @@ fn load_icon(
         return fallback;
     };
     if value.ends_with(".svg") {
-        match load_outline(files, value) {
+        match files.outline(value) {
             Ok(g) => Icon::Outline(g),
             Err(e) => {
                 warnings.push(format!("{context}: icon {e}; the default icon is used"));
@@ -512,8 +618,9 @@ fn load_icon(
         Icon::Lucide(value.to_owned())
     } else {
         warnings.push(format!(
-            "{context}: icon `{value}` is neither a Lucide icon name nor an .svg file; \
-             the default icon is used"
+            "{context}: icon `{}` is neither a Lucide icon name nor an .svg file; \
+             the default icon is used",
+            quote(value)
         ));
         fallback
     }
@@ -522,11 +629,11 @@ fn load_icon(
 /// Loads `[[shape]]` number `number` (1-based). `Err` is the warning for
 /// a skipped shape; smaller problems add warnings and use defaults.
 fn load_shape(
-    files: &dyn LibraryFiles,
+    files: &mut Reader,
     entry: &Value,
     number: usize,
     taken_ids: &HashSet<String>,
-    warnings: &mut Vec<String>,
+    report: &mut LoadReport,
 ) -> Result<ShapeDef, String> {
     let Value::Table(table) = entry else {
         return Err(format!(
@@ -534,7 +641,7 @@ fn load_shape(
         ));
     };
     let context = match table.get("id") {
-        Some(Value::String(id)) => format!("shape `{id}`"),
+        Some(Value::String(id)) => format!("shape `{}`", quote(id)),
         _ => format!("shape #{number}"),
     };
     let skip = |e: String| format!("{context}: {e}; skipped");
@@ -548,52 +655,59 @@ fn load_shape(
     let svg = optional_str(table, "svg").map_err(skip)?;
     let source = match (primitive, svg) {
         (Some(p), None) => ShapeSource::Primitive(
-            Primitive::from_name(p).ok_or_else(|| skip(format!("unknown primitive `{p}`")))?,
+            Primitive::from_name(p)
+                .ok_or_else(|| skip(format!("unknown primitive `{}`", quote(p))))?,
         ),
-        (None, Some(rel)) => ShapeSource::Outline(load_outline(files, rel).map_err(skip)?),
+        (None, Some(rel)) => ShapeSource::Outline(files.outline(rel).map_err(skip)?),
         (Some(_), Some(_)) => return Err(skip("has both `primitive` and `svg`".into())),
         (None, None) => return Err(skip("has neither `primitive` nor `svg`".into())),
     };
     // Only reached for shapes that load, so warnings are not doubled up
     // with a skip message.
-    warn_unknown(table, SHAPE_FIELDS, &context, warnings);
+    warn_unknown(table, SHAPE_FIELDS, &context, &mut report.log);
 
     let default_icon = match &source {
         ShapeSource::Outline(g) => Icon::Outline(g.clone()),
         ShapeSource::Primitive(_) => Icon::Lucide(DEFAULT_ICON.into()),
     };
     let icon = match optional_str(table, "icon") {
-        Ok(value) => load_icon(files, value, default_icon, &context, warnings),
+        Ok(value) => load_icon(files, value, default_icon, &context, &mut report.notices),
         Err(e) => {
-            warnings.push(format!("{context}: {e}; the default icon is used"));
+            report
+                .notices
+                .push(format!("{context}: {e}; the default icon is used"));
             default_icon
         }
     };
     let default_size = load_default_size(table.get("default_size")).unwrap_or_else(|e| {
-        warnings.push(format!("{context}: {e}; using 120 × 80"));
+        report
+            .notices
+            .push(format!("{context}: {e}; using 120 × 80"));
         DEFAULT_SIZE
     });
     let style = match table.get("style") {
         None => StyleDefaults::default(),
-        Some(Value::Table(style)) => load_style(style, &context, warnings),
+        Some(Value::Table(style)) => load_style(style, &context, report),
         Some(_) => {
-            warnings.push(format!("{context}: `style` must be a table; defaults used"));
+            report
+                .notices
+                .push(format!("{context}: `style` must be a table; defaults used"));
             StyleDefaults::default()
         }
     };
     let params = match (&source, table.get("param")) {
         (_, None) => Vec::new(),
         (ShapeSource::Outline(_), Some(_)) => {
-            warnings.push(format!(
+            report.notices.push(format!(
                 "{context}: SVG shapes have no parameters; `param` ignored"
             ));
             Vec::new()
         }
         (ShapeSource::Primitive(kind), Some(Value::Array(entries))) => {
-            load_params(*kind, entries, &context, warnings)
+            load_params(*kind, entries, &context, report)
         }
         (ShapeSource::Primitive(_), Some(_)) => {
-            warnings.push(format!(
+            report.notices.push(format!(
                 "{context}: parameters must be written as [[shape.param]] tables; ignored"
             ));
             Vec::new()
@@ -632,20 +746,21 @@ fn load_default_size(value: Option<&Value>) -> Result<(f32, f32), String> {
     }
 }
 
-fn load_style(table: &Table, context: &str, warnings: &mut Vec<String>) -> StyleDefaults {
+fn load_style(table: &Table, context: &str, report: &mut LoadReport) -> StyleDefaults {
     let context = format!("{context} style");
-    warn_unknown(table, STYLE_FIELDS, &context, warnings);
+    warn_unknown(table, STYLE_FIELDS, &context, &mut report.log);
     let mut colour = |key: &str, default: &str| match table.get(key) {
         None => Some(default.to_owned()),
         Some(Value::String(s)) if s.trim() == "none" => None,
         Some(Value::String(s)) => normalize_hex_color(s).or_else(|| {
-            warnings.push(format!(
-                "{context}: `{key}` \"{s}\" is not a #RRGGBB colour; no {key} is used"
+            report.notices.push(format!(
+                "{context}: `{key}` \"{}\" is not a #RRGGBB colour; no {key} is used",
+                quote(s)
             ));
             None
         }),
         Some(_) => {
-            warnings.push(format!(
+            report.notices.push(format!(
                 "{context}: `{key}` must be a \"#RRGGBB\" string; no {key} is used"
             ));
             None
@@ -657,13 +772,15 @@ fn load_style(table: &Table, context: &str, warnings: &mut Vec<String>) -> Style
         Ok(None) => default,
         Ok(Some(n)) if (0.0..=max).contains(&n) => n,
         Ok(Some(_)) => {
-            warnings.push(format!(
+            report.notices.push(format!(
                 "{context}: `{key}` must be from 0 to {max}; using {default}"
             ));
             default
         }
         Err(e) => {
-            warnings.push(format!("{context}: {e}; using {default}"));
+            report
+                .notices
+                .push(format!("{context}: {e}; using {default}"));
             default
         }
     };
@@ -681,24 +798,26 @@ fn load_params(
     kind: Primitive,
     entries: &[Value],
     context: &str,
-    warnings: &mut Vec<String>,
+    report: &mut LoadReport,
 ) -> Vec<ParamDef> {
     let mut params: Vec<ParamDef> = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         let number = index + 1;
         let Value::Table(table) = entry else {
-            warnings.push(format!(
+            report.notices.push(format!(
                 "{context}: parameter #{number} is not a table; ignored"
             ));
             continue;
         };
         let param_context = match table.get("key") {
-            Some(Value::String(key)) => format!("{context} parameter `{key}`"),
+            Some(Value::String(key)) => format!("{context} parameter `{}`", quote(key)),
             _ => format!("{context} parameter #{number}"),
         };
-        match load_param(kind, table, &param_context, &params, warnings) {
+        match load_param(kind, table, &param_context, &params, report) {
             Ok(param) => params.push(param),
-            Err(e) => warnings.push(format!("{param_context}: {e}; ignored")),
+            Err(e) => report
+                .notices
+                .push(format!("{param_context}: {e}; ignored")),
         }
     }
     params
@@ -709,12 +828,12 @@ fn load_param(
     table: &Table,
     context: &str,
     earlier: &[ParamDef],
-    warnings: &mut Vec<String>,
+    report: &mut LoadReport,
 ) -> Result<ParamDef, String> {
     let key = required_str(table, "key")?;
-    if !kind.param_keys().contains(&key) {
-        return Err(format!("the primitive has no parameter `{key}`"));
-    }
+    let Some((lowest, highest)) = kind.param_range(key) else {
+        return Err(format!("the primitive has no parameter `{}`", quote(key)));
+    };
     if earlier.iter().any(|p| p.key == key) {
         return Err("declared twice".into());
     }
@@ -729,6 +848,19 @@ fn load_param(
     if min > max {
         return Err("`min` is greater than `max`".into());
     }
+    // The outline ignores values outside the primitive's own range, so
+    // the sidebar must not offer them.
+    let (min, max) = if min < lowest || max > highest {
+        let clamped = (min.clamp(lowest, highest), max.clamp(lowest, highest));
+        report.notices.push(format!(
+            "{context}: the range {min} to {max} is wider than the primitive allows; \
+             using {} to {}",
+            clamped.0, clamped.1
+        ));
+        clamped
+    } else {
+        (min, max)
+    };
     let step = optional_number(table, "step")?.unwrap_or(1.0);
     if step <= 0.0 {
         return Err("`step` must be greater than 0".into());
@@ -736,12 +868,12 @@ fn load_param(
     let mut default = optional_number(table, "default")?.unwrap_or(min);
     if !(min..=max).contains(&default) {
         default = default.clamp(min, max);
-        warnings.push(format!(
+        report.notices.push(format!(
             "{context}: `default` is outside `min`..`max`; using {default}"
         ));
     }
     // Every field was read; report extras only for parameters that load.
-    warn_unknown(table, PARAM_FIELDS, context, warnings);
+    warn_unknown(table, PARAM_FIELDS, context, &mut report.log);
     Ok(ParamDef {
         key: key.to_owned(),
         label,
@@ -803,12 +935,14 @@ pub struct LibraryRegistry {
 
 impl LibraryRegistry {
     /// Combines the built-in libraries with those in `user_dir` (one
-    /// library per subfolder). Returns notices for the user: one per
-    /// skipped library and one per library with warnings, each starting
-    /// with the library folder name. A user library whose id is already
-    /// taken is skipped.
-    pub fn new(builtin: Vec<Library>, user_dir: Option<&Path>) -> (LibraryRegistry, Vec<String>) {
+    /// library per subfolder, at most [`MAX_USER_LIBRARIES`]). The report
+    /// has notices for the user, one per skipped library and one per
+    /// library with warnings, and log lines for ignored fields; each
+    /// starts with the library folder name. A user library whose id is
+    /// already taken is skipped.
+    pub fn new(builtin: Vec<Library>, user_dir: Option<&Path>) -> (LibraryRegistry, LoadReport) {
         let mut notices = Vec::new();
+        let mut log = Vec::new();
         let mut ids: HashSet<String> = HashSet::new();
         let mut libraries = Vec::new();
         for library in builtin {
@@ -826,17 +960,18 @@ impl LibraryRegistry {
         for folder in user_dir.map_or_else(Vec::new, |dir| library_folders(dir, &mut notices)) {
             let label = folder
                 .file_name()
-                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                .map_or_else(String::new, |n| quote(&n.to_string_lossy()));
             match load_library(&DirFiles(folder), false) {
                 Err(e) => notices.push(format!("{label}: {e}")),
                 Ok((library, _)) if ids.contains(&library.id) => notices.push(format!(
                     "{label}: the library id `{}` is already in use; skipped",
                     library.id
                 )),
-                Ok((library, warnings)) => {
-                    if !warnings.is_empty() {
-                        notices.push(format!("{label}: {}", summarize(&warnings)));
+                Ok((library, report)) => {
+                    if !report.notices.is_empty() {
+                        notices.push(format!("{label}: {}", summarize(&report.notices)));
                     }
+                    log.extend(report.log.iter().map(|line| format!("{label}: {line}")));
                     ids.insert(library.id.clone());
                     user.push(library);
                 }
@@ -849,7 +984,17 @@ impl LibraryRegistry {
                 .then_with(|| a.id.cmp(&b.id))
         });
         libraries.extend(user);
-        (LibraryRegistry { libraries }, notices)
+        let short = |lines: Vec<String>| {
+            lines
+                .iter()
+                .map(|line| shortened(line, MAX_NOTICE_CHARS))
+                .collect()
+        };
+        let report = LoadReport {
+            notices: short(notices),
+            log: short(log),
+        };
+        (LibraryRegistry { libraries }, report)
     }
 
     /// Built-in libraries first, then user libraries by `order`, then name.
@@ -866,8 +1011,8 @@ impl LibraryRegistry {
     }
 }
 
-/// Subfolders of `dir`, sorted by name, skipping hidden ones. A missing
-/// `dir` simply has none.
+/// Subfolders of `dir`, sorted by name, skipping hidden ones, and at most
+/// [`MAX_USER_LIBRARIES`] of them. A missing `dir` simply has none.
 fn library_folders(dir: &Path, notices: &mut Vec<String>) -> Vec<PathBuf> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -884,6 +1029,13 @@ fn library_folders(dir: &Path, notices: &mut Vec<String>) -> Vec<PathBuf> {
         .filter(|p| p.is_dir())
         .collect();
     folders.sort();
+    if folders.len() > MAX_USER_LIBRARIES {
+        notices.push(format!(
+            "{} library folders were not loaded: at most {MAX_USER_LIBRARIES} are read",
+            folders.len() - MAX_USER_LIBRARIES
+        ));
+        folders.truncate(MAX_USER_LIBRARIES);
+    }
     folders
 }
 
@@ -908,6 +1060,8 @@ fn summarize(warnings: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::geometry::{bounds, PathCmd};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::fs;
 
     const LIB_TOML: &str = r#"
@@ -928,8 +1082,11 @@ version = "1.0.0"
         root
     }
 
+    /// Loads the library at `root`, with its notices and log lines as
+    /// one list.
     fn load_dir(root: &Path) -> Result<(Library, Vec<String>), LibraryError> {
         load_library(&DirFiles(root.to_path_buf()), false)
+            .map(|(lib, report)| (lib, [report.notices, report.log].concat()))
     }
 
     fn library_toml(id: &str, name: &str, order: i32) -> String {
@@ -941,8 +1098,8 @@ version = "1.0.0"
     #[test]
     fn builtin_basic_shapes_loads_cleanly() {
         let files = EmbeddedFiles(BASIC_SHAPES_FILES);
-        let (lib, warnings) = load_library(&files, true).unwrap();
-        assert!(warnings.is_empty(), "{warnings:?}");
+        let (lib, report) = load_library(&files, true).unwrap();
+        assert_eq!(report, LoadReport::default());
         assert_eq!(lib.id, "basic-shapes");
         assert_eq!(lib.name, "Basic Shapes");
         assert_eq!(lib.order, 0);
@@ -1578,7 +1735,8 @@ max = 8
         fs::write(user.join(".DS_Store"), "junk").unwrap();
         fs::write(user.join("notes.txt"), "not a library").unwrap();
 
-        let (registry, notices) = LibraryRegistry::new(builtin_libraries(), Some(user));
+        let (registry, report) = LibraryRegistry::new(builtin_libraries(), Some(user));
+        let notices = report.notices;
         let ids: Vec<_> = registry.libraries().iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["basic-shapes", "first", "alpha", "zeta"]);
         assert!(registry.libraries()[0].builtin);
@@ -1604,7 +1762,7 @@ max = 8
         );
         write_lib(user, "empty", &[]);
         fs::create_dir_all(user.join("empty")).unwrap();
-        let warn_shapes = format!("{ONE_RECT}color = \"blue\"\n");
+        let warn_shapes = format!("{ONE_RECT}icon = \"Blue Icon\"\n");
         write_lib(
             user,
             "warns",
@@ -1622,7 +1780,8 @@ max = 8
             ],
         );
 
-        let (registry, notices) = LibraryRegistry::new(builtin_libraries(), Some(user));
+        let (registry, report) = LibraryRegistry::new(builtin_libraries(), Some(user));
+        let notices = report.notices;
         let ids: Vec<_> = registry.libraries().iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["basic-shapes", "good", "warns"]);
         assert_eq!(notices.len(), 4, "{notices:?}");
@@ -1637,15 +1796,263 @@ max = 8
             .any(|n| n == "empty: `library.toml` is missing"));
         assert!(notices
             .iter()
-            .any(|n| n.starts_with("warns: ") && n.contains("color")));
+            .any(|n| n.starts_with("warns: ") && n.contains("Blue Icon")));
 
-        let (registry, notices) =
+        let (registry, report) =
             LibraryRegistry::new(builtin_libraries(), Some(&user.join("does-not-exist")));
         assert_eq!(registry.libraries().len(), 1);
-        assert!(notices.is_empty());
-        let (registry, notices) = LibraryRegistry::new(builtin_libraries(), None);
+        assert_eq!(report, LoadReport::default());
+        let (registry, report) = LibraryRegistry::new(builtin_libraries(), None);
         assert_eq!(registry.libraries().len(), 1);
-        assert!(notices.is_empty());
+        assert_eq!(report, LoadReport::default());
+    }
+
+    /// In-memory library files that count how often each file is read.
+    struct CountingFiles {
+        files: HashMap<String, String>,
+        reads: RefCell<HashMap<String, usize>>,
+    }
+
+    impl CountingFiles {
+        fn new(files: Vec<(String, String)>) -> Self {
+            CountingFiles {
+                files: files.into_iter().collect(),
+                reads: RefCell::default(),
+            }
+        }
+
+        fn reads(&self, rel: &str) -> usize {
+            self.reads.borrow().get(rel).copied().unwrap_or(0)
+        }
+    }
+
+    impl LibraryFiles for CountingFiles {
+        fn read(&self, rel: &str) -> Result<String, LibraryError> {
+            *self.reads.borrow_mut().entry(rel.to_owned()).or_default() += 1;
+            self.files
+                .get(rel)
+                .cloned()
+                .ok_or_else(|| LibraryError::Missing(rel.into()))
+        }
+    }
+
+    #[test]
+    fn quote_shortens_long_values() {
+        assert_eq!(quote("short"), "short");
+        let exact = "x".repeat(MAX_QUOTED_CHARS);
+        assert_eq!(quote(&exact), exact);
+        let long = "é".repeat(MAX_QUOTED_CHARS + 1);
+        assert_eq!(quote(&long), "é".repeat(MAX_QUOTED_CHARS) + "…");
+    }
+
+    #[test]
+    fn huge_echoed_values_stay_short() {
+        let dir = tempfile::tempdir().unwrap();
+        // A 1 MB unknown key, and long ids and values that are echoed.
+        let key = "k".repeat(MAX_FILE_BYTES - 200);
+        let lib = format!("{}{key} = 1\n", library_toml("huge", "Huge", 0));
+        let huge = "v".repeat(200_000);
+        let shapes = format!(
+            "[[shape]]\nid = \"{huge}\"\nname = \"Bad\"\nprimitive = \"rect\"\n\
+             [[shape]]\nid = \"r\"\nname = \"R\"\nprimitive = \"{huge}\"\n\
+             [[shape]]\nid = \"s\"\nname = \"S\"\nicon = \"{huge}\"\nprimitive = \"rect\"\n\
+             style = {{ fill = \"{huge}\" }}\n"
+        );
+        write_lib(
+            dir.path(),
+            &"f".repeat(200),
+            &[("library.toml", &lib), ("shapes.toml", &shapes)],
+        );
+        let (registry, report) = LibraryRegistry::new(vec![], Some(dir.path()));
+        assert_eq!(registry.libraries()[0].shapes.len(), 1);
+        assert_eq!(report.notices.len(), 1, "{report:?}");
+        assert_eq!(report.log.len(), 1, "{report:?}");
+        for text in report.notices.iter().chain(&report.log) {
+            assert!(
+                text.chars().count() <= MAX_NOTICE_CHARS + 1,
+                "{}",
+                text.len()
+            );
+            assert!(text.contains('…'), "{text}");
+        }
+    }
+
+    #[test]
+    fn library_over_the_byte_budget_is_skipped() {
+        // 16 SVGs and the TOML files fit in 16 MB; the 17th crosses it.
+        let big = "x".repeat((MAX_LIBRARY_BYTES - 4096) / 16);
+        let count = 17;
+        let mut files = vec![
+            ("library.toml".to_owned(), LIB_TOML.to_owned()),
+            (
+                "shapes.toml".to_owned(),
+                (0..count + 5)
+                    .map(|i| format!("[[shape]]\nid = \"s{i}\"\nname = \"S\"\nsvg = \"{i}.svg\"\n"))
+                    .collect(),
+            ),
+        ];
+        files.extend((0..count + 5).map(|i| (format!("{i}.svg"), big.clone())));
+        let files = CountingFiles::new(files);
+        let err = load_library(&files, false).unwrap_err();
+        assert_eq!(err, LibraryError::TooMuchData);
+        assert_eq!(err.to_string(), "its files add up to more than 16 MB");
+        // Reading stopped at the file that crossed the budget.
+        assert_eq!(files.reads(&format!("{}.svg", count - 1)), 1);
+        assert_eq!(files.reads(&format!("{count}.svg")), 0);
+    }
+
+    #[test]
+    fn an_svg_used_several_times_is_read_once() {
+        let svg = r#"<svg viewBox="0 0 1 1"><rect width="1" height="1"/></svg>"#;
+        let shapes = "[[shape]]\nid = \"a\"\nname = \"A\"\nicon = \"a.svg\"\nsvg = \"a.svg\"\n\
+                      [[shape]]\nid = \"b\"\nname = \"B\"\nsvg = \"a.svg\"\n\
+                      [[shape]]\nid = \"c\"\nname = \"C\"\nsvg = \"none.svg\"\n\
+                      [[shape]]\nid = \"d\"\nname = \"D\"\nsvg = \"none.svg\"\n";
+        let files = CountingFiles::new(vec![
+            (
+                "library.toml".into(),
+                format!("{LIB_TOML}icon = \"a.svg\"\n"),
+            ),
+            ("shapes.toml".into(), shapes.into()),
+            ("a.svg".into(), svg.into()),
+        ]);
+        let (lib, report) = load_library(&files, false).unwrap();
+        assert_eq!(lib.shapes.len(), 2);
+        assert!(matches!(lib.icon, Icon::Outline(_)));
+        assert_eq!(files.reads("a.svg"), 1);
+        // A missing file is looked for once but reported for each shape.
+        assert_eq!(files.reads("none.svg"), 1);
+        assert_eq!(report.notices.len(), 2, "{report:?}");
+    }
+
+    #[test]
+    fn user_library_folders_are_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..MAX_USER_LIBRARIES + 2 {
+            fs::create_dir(dir.path().join(format!("lib{i:03}"))).unwrap();
+        }
+        let (_, report) = LibraryRegistry::new(vec![], Some(dir.path()));
+        assert_eq!(report.notices.len(), MAX_USER_LIBRARIES + 1);
+        assert_eq!(
+            report.notices[0],
+            "2 library folders were not loaded: at most 100 are read"
+        );
+        assert!(report.notices.iter().any(|n| n.starts_with("lib099: ")));
+        assert!(!report.notices.iter().any(|n| n.starts_with("lib100: ")));
+    }
+
+    #[test]
+    fn wrongly_typed_optional_library_fields_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = format!("{LIB_TOML}author = 1\ndescription = []\norder = \"first\"\nicon = 5\n");
+        let root = write_lib(
+            dir.path(),
+            "l",
+            &[("library.toml", &lib), ("shapes.toml", ONE_RECT)],
+        );
+        let (lib, warnings) = load_dir(&root).unwrap();
+        assert_eq!((lib.author, lib.description, lib.order), (None, None, 0));
+        assert_eq!(lib.icon, Icon::Lucide("shapes".into()));
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        for key in ["author", "description", "order", "icon"] {
+            assert!(
+                warnings.iter().any(|w| w.contains(&format!("`{key}`"))),
+                "{key}: {warnings:?}"
+            );
+        }
+
+        let far = format!("{LIB_TOML}order = 99999999999\n");
+        fs::write(root.join("library.toml"), far).unwrap();
+        let (lib, warnings) = load_dir(&root).unwrap();
+        assert_eq!(lib.order, 0);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+
+    #[test]
+    fn unknown_fields_are_logged_not_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let shapes = format!("{ONE_RECT}glow = true\n");
+        write_lib(
+            dir.path(),
+            "future",
+            &[
+                ("library.toml", &format!("{LIB_TOML}homepage = \"x\"\n")),
+                ("shapes.toml", &shapes),
+            ],
+        );
+        let (registry, report) = LibraryRegistry::new(vec![], Some(dir.path()));
+        assert_eq!(registry.libraries().len(), 1);
+        assert!(report.notices.is_empty(), "{report:?}");
+        assert_eq!(
+            report.log,
+            [
+                "future: library.toml: unknown field `homepage` ignored",
+                "future: shape `r`: unknown field `glow` ignored",
+            ]
+        );
+    }
+
+    #[test]
+    fn param_ranges_are_clamped_to_the_primitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let shapes = r#"
+[[shape]]
+id = "s"
+name = "S"
+primitive = "star"
+
+[[shape.param]]
+key = "points"
+min = 1
+max = 50
+default = 40
+
+[[shape.param]]
+key = "inner_ratio"
+min = 0
+max = 1
+step = 0.1
+
+[[shape]]
+id = "p"
+name = "P"
+primitive = "polygon"
+
+[[shape.param]]
+key = "sides"
+min = 30
+max = 40
+
+[[shape]]
+id = "r"
+name = "R"
+primitive = "rect"
+
+[[shape.param]]
+key = "corner_radius"
+min = -5
+max = 100000
+"#;
+        let root = write_lib(
+            dir.path(),
+            "l",
+            &[("library.toml", LIB_TOML), ("shapes.toml", shapes)],
+        );
+        let (lib, warnings) = load_dir(&root).unwrap();
+        let range = |shape: &str, i: usize| {
+            let p = &lib.shape(shape).unwrap().params[i];
+            (p.min, p.max, p.default)
+        };
+        assert_eq!(range("s", 0), (3.0, 20.0, 20.0));
+        assert_eq!(range("s", 1), (0.1, 0.9, 0.1));
+        assert_eq!(range("p", 0), (12.0, 12.0, 12.0));
+        assert_eq!(range("r", 0), (0.0, 100000.0, 0.0));
+        // points: range and default; inner_ratio, sides, corner_radius: range.
+        assert_eq!(warnings.len(), 5, "{warnings:?}");
+        assert!(
+            warnings[0].contains("1 to 50") && warnings[0].contains("3 to 20"),
+            "{warnings:?}"
+        );
     }
 
     #[test]

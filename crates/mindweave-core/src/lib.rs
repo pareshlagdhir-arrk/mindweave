@@ -25,8 +25,9 @@ pub use files::{rename_document, validate_new_stem, RenameError, MAX_STEM_LEN};
 pub use format::{load, save, FormatError, FORMAT_VERSION};
 pub use library::{
     builtin_libraries, load_library, user_libraries_dir, DirFiles, EmbeddedFiles, Icon, Library,
-    LibraryError, LibraryFiles, LibraryRegistry, ParamDef, ShapeDef, ShapeSource, StyleDefaults,
-    LIBRARY_FORMAT, MAX_FILE_BYTES, MAX_SHAPES,
+    LibraryError, LibraryFiles, LibraryRegistry, LoadReport, ParamDef, ShapeDef, ShapeSource,
+    StyleDefaults, LIBRARY_FORMAT, MAX_FILE_BYTES, MAX_LIBRARY_BYTES, MAX_SHAPES,
+    MAX_USER_LIBRARIES,
 };
 pub use session::DocumentSession;
 pub use settings::{

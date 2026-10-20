@@ -22,7 +22,7 @@ use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _
 use gpui_kit::*;
 use mindweave_core::{
     duplicate, format_hex_color, from_clipboard, parse_hex_color, prepare_paste, to_clipboard,
-    DocumentSession, Shape, Viewport,
+    DocumentSession, Shape, Viewport, MAX_CLIPBOARD_SHAPES,
 };
 
 // `Copy` is used by path: importing it would hide the derivable trait.
@@ -560,15 +560,21 @@ impl EditorWindow {
             .collect()
     }
 
-    /// Puts the selected shapes on the clipboard; returns whether there
-    /// were any (with none the clipboard is left alone).
-    fn copy_selection(&mut self, cx: &mut Context<Self>) -> bool {
-        let shapes = self.selected_shapes();
-        if shapes.is_empty() {
-            return false;
+    /// Puts the selected shapes on the clipboard; returns whether it did.
+    /// With none selected the clipboard is left alone; with more than
+    /// paste accepts, a notification says so.
+    fn copy_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match clipboard_text(&self.selected_shapes()) {
+            Ok(Some(text)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                true
+            }
+            Ok(None) => false,
+            Err(message) => {
+                window.push_notification(Notification::warning(message), cx);
+                false
+            }
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(to_clipboard(&shapes)));
-        true
     }
 
     /// Removes the selected shapes as one undo step.
@@ -621,7 +627,7 @@ impl EditorWindow {
             return;
         }
         self.begin_edit_action(window, cx);
-        self.copy_selection(cx);
+        self.copy_selection(window, cx);
     }
 
     fn on_cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
@@ -629,7 +635,7 @@ impl EditorWindow {
             return;
         }
         self.begin_edit_action(window, cx);
-        if self.copy_selection(cx) {
+        if self.copy_selection(window, cx) {
             self.delete_selection(cx);
         }
     }
@@ -756,6 +762,15 @@ fn selectable_in_order(shapes: &[Shape], layer_visible: bool) -> Vec<Uuid> {
 
 /// Ids of the shapes in `shapes` that can stay selected: the unlocked
 /// ones.
+/// `shapes` as clipboard text: `Ok(None)` for none, `Err` with a message
+/// for more than paste accepts ([`MAX_CLIPBOARD_SHAPES`]).
+fn clipboard_text(shapes: &[Shape]) -> Result<Option<String>, String> {
+    if shapes.len() > MAX_CLIPBOARD_SHAPES {
+        return Err("Copy at most 10,000 shapes at a time.".into());
+    }
+    Ok((!shapes.is_empty()).then(|| to_clipboard(shapes)))
+}
+
 fn selectable_ids(shapes: &[Shape]) -> HashSet<Uuid> {
     selectable_in_order(shapes, true).into_iter().collect()
 }
@@ -930,12 +945,15 @@ impl Render for EditorWindow {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        hex_to_hsla, hsla_to_hex, in_text_field, is_plain_space, letter_spaced, panel_group_id,
-        parse_number, pruned, row_click, selectable_ids, selectable_in_order, RowClick,
+        clipboard_text, hex_to_hsla, hsla_to_hex, in_text_field, is_plain_space, letter_spaced,
+        panel_group_id, parse_number, pruned, row_click, selectable_ids, selectable_in_order,
+        RowClick,
     };
     use gpui_kit::Keystroke;
     use mindweave_core::geometry::Frame;
-    use mindweave_core::{builtin_libraries, LibraryRegistry, Shape};
+    use mindweave_core::{
+        builtin_libraries, from_clipboard, LibraryRegistry, Shape, MAX_CLIPBOARD_SHAPES,
+    };
     use std::collections::HashSet;
     use uuid::Uuid;
 
@@ -955,6 +973,25 @@ mod tests {
         assert!(pruned(sel.clone(), scope, (other_page, layer), &active, true).is_empty());
         assert!(pruned(sel.clone(), scope, (page, other_layer), &active, true).is_empty());
         assert!(pruned(sel, scope, scope, &active, false).is_empty());
+    }
+
+    #[test]
+    fn copying_more_than_paste_accepts_is_refused() {
+        let libs = LibraryRegistry::new(builtin_libraries(), None).0;
+        let def = libs.shape("basic-shapes", "rectangle").unwrap();
+        let one = Shape::new(def, "basic-shapes", Frame::default());
+        assert_eq!(clipboard_text(&[]), Ok(None));
+        let mut shapes = vec![one; MAX_CLIPBOARD_SHAPES];
+        let text = clipboard_text(&shapes).unwrap().unwrap();
+        assert_eq!(
+            from_clipboard(&text).map(|s| s.len()),
+            Some(MAX_CLIPBOARD_SHAPES)
+        );
+        shapes.push(shapes[0].clone());
+        assert_eq!(
+            clipboard_text(&shapes),
+            Err("Copy at most 10,000 shapes at a time.".into())
+        );
     }
 
     #[test]
