@@ -197,7 +197,12 @@ impl DocumentSession {
         }
     }
 
+    /// Sets the active page's viewport. A viewport with a non-finite value
+    /// is ignored: it would not survive a save and reload.
     pub fn set_viewport(&mut self, v: Viewport) {
+        if !(v.x.is_finite() && v.y.is_finite() && v.zoom.is_finite()) {
+            return;
+        }
         self.page_mut().viewport = v;
     }
 }
@@ -330,6 +335,38 @@ mod tests {
         let r = DocumentSession::open(s.path.clone()).unwrap();
         assert_eq!(r.page().viewport, v);
         assert_eq!(r.doc.active_page, 1);
+    }
+
+    #[test]
+    fn set_viewport_ignores_non_finite_values() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let good = Viewport {
+            x: 10.0,
+            y: 20.0,
+            zoom: 2.0,
+        };
+        s.set_viewport(good);
+        for bad in [
+            Viewport {
+                x: f32::NAN,
+                ..good
+            },
+            Viewport {
+                y: f32::INFINITY,
+                ..good
+            },
+            Viewport {
+                zoom: f32::NAN,
+                ..good
+            },
+            Viewport {
+                zoom: f32::NEG_INFINITY,
+                ..good
+            },
+        ] {
+            s.set_viewport(bad);
+            assert_eq!(s.page().viewport, good);
+        }
     }
 
     #[test]
