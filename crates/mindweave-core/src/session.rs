@@ -4,11 +4,10 @@ use std::path::PathBuf;
 
 use crate::document::{BackgroundPattern, Document, Layer, Page, Viewport};
 use crate::format::{self, FormatError};
+pub use crate::viewport::{ZOOM_MAX, ZOOM_MIN};
 
 pub const GRID_MIN: f32 = 4.0;
 pub const GRID_MAX: f32 = 200.0;
-pub const ZOOM_MIN: f32 = 0.1;
-pub const ZOOM_MAX: f32 = 10.0;
 
 const DEFAULT_GRID: f32 = 20.0;
 
