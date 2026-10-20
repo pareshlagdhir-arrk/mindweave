@@ -474,6 +474,13 @@ mod tests {
             assert!(!majors.is_empty());
             assert!(majors.iter().all(|x| x.rem_euclid(80) == 0), "{majors:?}");
         }
+        // In the doubled frame (2 cells per line) every visible multiple of
+        // 80 is major, not just every fourth line (every 160).
+        let v = vp(-50.0, 0.0, 0.25);
+        let g = grid_lines(&v, (800.0, 100.0), 20.0);
+        assert_eq!(g.cells_per_line, 2);
+        let expected: Vec<i64> = (0..=3120).step_by(80).collect();
+        assert_eq!(major_xs(&v, &g, every), expected);
     }
 
     #[test]

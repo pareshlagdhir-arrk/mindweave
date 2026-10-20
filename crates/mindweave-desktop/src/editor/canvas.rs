@@ -76,7 +76,7 @@ fn paint_background(
                 }
             };
             for (k, &x) in grid.xs.iter().enumerate() {
-                let (color, width) = line(grid.first_ix.0 + k as i64);
+                let (color, width) = line(grid.first_ix.0.wrapping_add(k as i64));
                 let quad = Bounds::new(
                     point(origin.x + px(x - (width - 1.) / 2.), origin.y),
                     size(px(width), bounds.size.height),
@@ -84,7 +84,7 @@ fn paint_background(
                 window.paint_quad(fill(quad, color));
             }
             for (k, &y) in grid.ys.iter().enumerate() {
-                let (color, width) = line(grid.first_ix.1 + k as i64);
+                let (color, width) = line(grid.first_ix.1.wrapping_add(k as i64));
                 let quad = Bounds::new(
                     point(origin.x, origin.y + px(y - (width - 1.) / 2.)),
                     size(bounds.size.width, px(width)),

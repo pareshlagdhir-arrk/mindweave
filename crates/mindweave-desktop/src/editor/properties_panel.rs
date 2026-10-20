@@ -464,7 +464,12 @@ fn color_row(
 ) -> AnyElement {
     let field = editor.properties.color(setting);
     let custom = setting.value(&editor.session().page().canvas).is_some();
-    let hex = field.shows.map(hsla_to_hex).unwrap_or_default();
+    // The page's own colour, so the label follows the picker while its
+    // popover is open (`shows` only syncs once it closes).
+    let hex = match setting.value(&editor.session().page().canvas) {
+        Some(hex) => hex.to_string(),
+        None => field.shows.map(hsla_to_hex).unwrap_or_default(),
+    };
     let reset = div()
         .w(px(RESET_WIDTH))
         .flex()

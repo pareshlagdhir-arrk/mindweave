@@ -12,6 +12,9 @@ pub const GRID_MAX: f32 = 200.0;
 pub const MAJOR_EVERY_MAX: u32 = 20;
 pub const DOT_SIZE_MIN: f32 = 1.0;
 pub const DOT_SIZE_MAX: f32 = 6.0;
+/// Largest viewport offset kept on open, in canvas pixels; beyond it grid
+/// indices and f32 precision break down.
+pub const VIEWPORT_COORD_MAX: f32 = 1e9;
 
 const DEFAULT_GRID: f32 = 20.0;
 
@@ -50,11 +53,12 @@ fn normalize_page(page: &mut Page) {
     } else {
         1.0
     };
-    if !v.x.is_finite() {
-        v.x = 0.0;
-    }
-    if !v.y.is_finite() {
-        v.y = 0.0;
+    for c in [&mut v.x, &mut v.y] {
+        *c = if c.is_finite() {
+            c.clamp(-VIEWPORT_COORD_MAX, VIEWPORT_COORD_MAX)
+        } else {
+            0.0
+        };
     }
 }
 
@@ -493,6 +497,23 @@ mod tests {
         let r = DocumentSession::open(s.path.clone()).unwrap();
         assert_eq!(r.page().canvas, s.page().canvas);
         assert!(!r.is_dirty());
+    }
+
+    #[test]
+    fn open_clamps_huge_viewport_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("far.mindweave");
+        let mut d = Document::new();
+        d.pages[0].viewport = Viewport {
+            x: 1e30,
+            y: -1e20,
+            zoom: 1.0,
+        };
+        crate::format::save(&d, &path).unwrap();
+        let s = DocumentSession::open(path).unwrap();
+        let v = s.page().viewport;
+        assert_eq!((v.x, v.y), (VIEWPORT_COORD_MAX, -VIEWPORT_COORD_MAX));
+        assert!(!s.is_dirty());
     }
 
     #[test]
