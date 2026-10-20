@@ -4,8 +4,8 @@
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use mindweave_core::{
-    dot_stride, grid_lines, pinch_zoom_factor, scroll_zoom_factor, BackgroundPattern, Page,
-    Viewport, ZOOM_STEP,
+    dot_stride, grid_lines, pinch_zoom_factor, scroll_zoom_factor, stride_offset,
+    BackgroundPattern, Page, Viewport, ZOOM_STEP,
 };
 
 use super::EditorWindow;
@@ -82,8 +82,12 @@ fn paint_background(
         BackgroundPattern::Dots => {
             let stride = dot_stride(grid.xs.len(), grid.ys.len(), MAX_DOTS);
             let half = DOT_SIZE / 2.;
-            for &y in grid.ys.iter().step_by(stride) {
-                for &x in grid.xs.iter().step_by(stride) {
+            // Anchor the thinning to canvas grid indices so the kept dots
+            // stay on the same canvas points while panning.
+            let skip_x = stride_offset(grid.first_ix.0, stride);
+            let skip_y = stride_offset(grid.first_ix.1, stride);
+            for &y in grid.ys.iter().skip(skip_y).step_by(stride) {
+                for &x in grid.xs.iter().skip(skip_x).step_by(stride) {
                     let dot = Bounds::new(
                         point(origin.x + px(x - half), origin.y + px(y - half)),
                         size(px(DOT_SIZE), px(DOT_SIZE)),
@@ -121,6 +125,7 @@ fn register_input(
             let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
             let anchor = local(event.position, bounds);
             editor.update(cx, |editor, cx| {
+                editor.pointer_local = Some(anchor);
                 if event.modifiers.platform {
                     editor.change_viewport(|vp| vp.zoom_at(scroll_zoom_factor(dy), anchor), cx);
                 } else {
@@ -144,6 +149,7 @@ fn register_input(
             let anchor = local(event.position, bounds);
             let factor = pinch_zoom_factor(event.delta);
             editor.update(cx, |editor, cx| {
+                editor.pointer_local = Some(anchor);
                 editor.change_viewport(|vp| vp.zoom_at(factor, anchor), cx)
             });
             cx.stop_propagation();
@@ -183,8 +189,11 @@ fn register_input(
             if phase != DispatchPhase::Bubble {
                 return;
             }
-            let hovered = hitbox.is_hovered(window);
+            let pointer = hitbox
+                .is_hovered(window)
+                .then(|| local(event.position, bounds));
             editor.update(cx, |editor, cx| {
+                editor.pointer_local = pointer;
                 if let Some(last) = editor.pan_drag {
                     if event.pressed_button.is_some() {
                         let d = event.position - last;
@@ -196,14 +205,7 @@ fn register_input(
                         cx.notify();
                     }
                 }
-                let cursor = hovered.then(|| {
-                    editor
-                        .session
-                        .page()
-                        .viewport
-                        .screen_to_canvas(local(event.position, bounds))
-                });
-                editor.set_cursor(cursor, cx);
+                editor.refresh_cursor(cx);
             });
         }
     });
@@ -225,7 +227,10 @@ fn register_input(
     // Leaving the window hides the pointer position.
     window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
         if phase == DispatchPhase::Bubble {
-            editor.update(cx, |editor, cx| editor.set_cursor(None, cx));
+            editor.update(cx, |editor, cx| {
+                editor.pointer_local = None;
+                editor.refresh_cursor(cx);
+            });
         }
     });
 }
@@ -243,7 +248,17 @@ impl EditorWindow {
         f(&mut viewport);
         if viewport != self.session.page().viewport {
             self.update_session(|s| s.set_viewport(viewport), cx);
+            self.refresh_cursor(cx);
         }
+    }
+
+    /// Recomputes the status bar's pointer position from the last pointer
+    /// position over the canvas and the active page's viewport, so it stays
+    /// right when the viewport moves under a still pointer.
+    pub(super) fn refresh_cursor(&mut self, cx: &mut Context<Self>) {
+        let viewport = self.session.page().viewport;
+        let cursor = self.pointer_local.map(|p| viewport.screen_to_canvas(p));
+        self.set_cursor(cursor, cx);
     }
 
     /// The centre of the canvas, relative to its origin; the origin itself

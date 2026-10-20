@@ -106,6 +106,9 @@ pub struct EditorWindow {
     /// The canvas's bounds when it was last painted; zoom actions anchor on
     /// its centre.
     canvas_bounds: Option<Bounds<Pixels>>,
+    /// The pointer position relative to the canvas origin, or `None` when
+    /// the pointer is off the canvas.
+    pointer_local: Option<(f32, f32)>,
     /// Whether Space is held down while the editor has focus (left drag
     /// then pans).
     space_held: bool,
@@ -133,6 +136,14 @@ impl EditorWindow {
                     this.commit_grid_size(window, cx);
                 }
             }),
+            // A Space released while the window is inactive or the editor
+            // is unfocused never reaches `on_key_up`; forget it instead.
+            cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.release_space(cx);
+                }
+            }),
+            cx.on_blur(&focus_handle, window, |this, _, cx| this.release_space(cx)),
         ];
         let window_title = session.title();
         Self {
@@ -140,6 +151,7 @@ impl EditorWindow {
             cursor_canvas: None,
             focus_handle,
             canvas_bounds: None,
+            pointer_local: None,
             space_held: false,
             pan_drag: None,
             rename: None,
@@ -303,6 +315,8 @@ impl EditorWindow {
     pub(crate) fn activate_page(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.finish_rename(true, cx);
         self.update_session(|s| s.set_active_page(ix), cx);
+        // The new page has its own viewport.
+        self.refresh_cursor(cx);
     }
 
     /// Adds a page, committing any rename in progress first.
@@ -376,7 +390,13 @@ impl EditorWindow {
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.key == "space" && self.space_held {
+        if event.keystroke.key == "space" {
+            self.release_space(cx);
+        }
+    }
+
+    fn release_space(&mut self, cx: &mut Context<Self>) {
+        if self.space_held {
             self.space_held = false;
             cx.notify();
         }

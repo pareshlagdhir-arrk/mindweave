@@ -13,6 +13,6 @@ pub use settings::{
     load_settings, save_settings, settings_path, AppSettings, RecentFile, WindowSize, MAX_RECENT,
 };
 pub use viewport::{
-    dot_stride, grid_lines, pinch_zoom_factor, scroll_zoom_factor, GridLines, ZOOM_MAX, ZOOM_MIN,
-    ZOOM_STEP,
+    dot_stride, grid_lines, pinch_zoom_factor, scroll_zoom_factor, stride_offset, GridLines,
+    ZOOM_MAX, ZOOM_MIN, ZOOM_STEP,
 };

@@ -66,6 +66,9 @@ pub struct GridLines {
     pub ys: Vec<f32>,
     pub spacing_px: f32,
     pub alpha: f32,
+    /// Canvas grid index (multiple of the current spacing) of `xs[0]` and
+    /// `ys[0]`, so a thinned pattern can stay anchored to the canvas.
+    pub first_ix: (i64, i64),
 }
 
 /// Computes grid lines for a canvas area of `size` screen pixels. Spacing is
@@ -78,6 +81,7 @@ pub fn grid_lines(vp: &Viewport, size: (f32, f32), grid_size: f32) -> GridLines 
         ys: Vec::new(),
         spacing_px: 0.0,
         alpha: 0.0,
+        first_ix: (0, 0),
     };
     if !valid(grid_size)
         || !valid(vp.zoom)
@@ -104,19 +108,23 @@ pub fn grid_lines(vp: &Viewport, size: (f32, f32), grid_size: f32) -> GridLines 
         let first = (f64::from(origin) / f64::from(canvas_spacing)).ceil();
         let start = (first * f64::from(canvas_spacing) - f64::from(origin)) * f64::from(vp.zoom);
         if start > f64::from(extent) {
-            return Vec::new();
+            return (Vec::new(), first as i64);
         }
         let count = (((f64::from(extent) - start) / spacing).floor() + 1.0).min(MAX_LINES_PER_AXIS);
-        (0..count as usize)
+        let positions = (0..count as usize)
             .map(|k| (start + k as f64 * spacing) as f32)
-            .collect()
+            .collect();
+        (positions, first as i64)
     };
 
+    let (xs, first_x) = lines(vp.x, size.0);
+    let (ys, first_y) = lines(vp.y, size.1);
     GridLines {
-        xs: lines(vp.x, size.0),
-        ys: lines(vp.y, size.1),
+        xs,
+        ys,
         spacing_px,
         alpha,
+        first_ix: (first_x, first_y),
     }
 }
 
@@ -153,6 +161,15 @@ pub fn dot_stride(nx: usize, ny: usize, max_dots: usize) -> usize {
         stride *= 2;
     }
     stride
+}
+
+/// How many lines to skip before stepping by `stride`, so that the kept
+/// lines are the canvas lines whose grid index is a multiple of `stride`
+/// (given the index `first_ix` of the first line). Keeps a thinned pattern
+/// fixed to the canvas while panning. A zero stride is treated as 1.
+pub fn stride_offset(first_ix: i64, stride: usize) -> usize {
+    let stride = stride.max(1) as i64;
+    first_ix.wrapping_neg().rem_euclid(stride) as usize
 }
 
 #[cfg(test)]
@@ -341,6 +358,52 @@ mod tests {
         let s = dot_stride(10_000, 10_000, 40_000);
         assert!(10_000usize.div_ceil(s).pow(2) <= 40_000);
         assert!(10_000usize.div_ceil(s / 2).pow(2) > 40_000);
+    }
+
+    /// Canvas grid indices of the lines kept when every `stride`-th line is
+    /// drawn, anchored with `stride_offset`.
+    fn kept_indices(first_ix: i64, count: usize, stride: usize) -> Vec<i64> {
+        (stride_offset(first_ix, stride)..count)
+            .step_by(stride)
+            .map(|k| first_ix + k as i64)
+            .collect()
+    }
+
+    #[test]
+    fn grid_lines_report_the_first_line_index() {
+        let g = grid_lines(&vp(5.0, -45.0, 1.0), (100.0, 100.0), 20.0);
+        // First visible lines: x = 20 (index 1), y = -40 (index -2).
+        assert_eq!(g.first_ix, (1, -2));
+    }
+
+    #[test]
+    fn stride_offset_selects_global_multiples() {
+        assert_eq!(stride_offset(0, 4), 0);
+        assert_eq!(stride_offset(1, 4), 3);
+        assert_eq!(stride_offset(4, 4), 0);
+        assert_eq!(stride_offset(-1, 4), 1);
+        assert_eq!(stride_offset(-5, 4), 1);
+        assert_eq!(stride_offset(7, 1), 0);
+        assert_eq!(stride_offset(7, 0), 0);
+    }
+
+    #[test]
+    fn thinned_lines_stay_on_the_same_canvas_lines_while_panning() {
+        let stride = 4;
+        let before = grid_lines(&vp(0.0, 0.0, 1.0), (400.0, 400.0), 20.0);
+        // Pan by exactly one spacing: the first visible line changes.
+        let after = grid_lines(&vp(20.0, 0.0, 1.0), (400.0, 400.0), 20.0);
+        assert_ne!(before.first_ix.0, after.first_ix.0);
+        let a = kept_indices(before.first_ix.0, before.xs.len(), stride);
+        let b = kept_indices(after.first_ix.0, after.xs.len(), stride);
+        assert!(a.iter().all(|i| i.rem_euclid(stride as i64) == 0));
+        assert!(b.iter().all(|i| i.rem_euclid(stride as i64) == 0));
+        // Every canvas line kept in both frames' overlap is kept in both.
+        let overlap = |v: &[i64]| -> Vec<i64> {
+            v.iter().copied().filter(|i| (1..=20).contains(i)).collect()
+        };
+        assert_eq!(overlap(&a), overlap(&b));
+        assert!(!overlap(&a).is_empty());
     }
 
     #[test]
