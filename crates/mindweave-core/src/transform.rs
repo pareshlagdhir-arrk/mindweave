@@ -8,7 +8,8 @@ use crate::geometry::{Frame, Pt, Rect};
 
 /// Smallest width or height a resize or a drawn box can produce.
 pub const MIN_SIZE: f32 = 1.0;
-/// Pointer travel below which a press counts as a click, not a drag.
+/// Pointer travel below which a press counts as a click, not a drag, in
+/// screen pixels.
 pub const CLICK_DRAG_THRESHOLD: f32 = 3.0;
 /// Offset of duplicated or pasted shapes on each axis.
 pub const DUPLICATE_OFFSET: f32 = 10.0;
@@ -117,8 +118,9 @@ pub fn selection_bounds(frames: &[Frame]) -> Option<Rect> {
 
 /// The frame of a shape drawn by dragging from `start` to `end`.
 ///
-/// A drag shorter than [`CLICK_DRAG_THRESHOLD`] gives `default_size`
-/// centred on `start`. Box shapes get a normalised rectangle at least
+/// `end` is `None` for a click, which gives `default_size` centred on
+/// `start`. The caller decides what is a click, since the threshold is in
+/// screen pixels (see [`CLICK_DRAG_THRESHOLD`]). Box shapes get a normalised rectangle at least
 /// [`MIN_SIZE`] on each side (`constrain`: a square of the larger side;
 /// `from_center`: `start` is the centre). Line-like shapes get the box
 /// between the end points with `flip_x`/`flip_y` recording a backwards
@@ -126,18 +128,18 @@ pub fn selection_bounds(frames: &[Frame]) -> Option<Rect> {
 /// `from_center`: `start` is the midpoint).
 pub fn drag_create(
     start: Pt,
-    end: Pt,
+    end: Option<Pt>,
     default_size: (f32, f32),
     line_like: bool,
     constrain: bool,
     from_center: bool,
 ) -> Frame {
-    let (mut dx, mut dy) = (end.0 - start.0, end.1 - start.1);
-    let len = dx.hypot(dy);
-    if len < CLICK_DRAG_THRESHOLD {
+    let Some(end) = end else {
         let (w, h) = default_size;
         return recentred(&Frame::default(), start, w, h);
-    }
+    };
+    let (mut dx, mut dy) = (end.0 - start.0, end.1 - start.1);
+    let len = dx.hypot(dy);
     if constrain {
         if line_like {
             const D: f32 = std::f32::consts::FRAC_1_SQRT_2;
@@ -420,23 +422,43 @@ mod tests {
 
     #[test]
     fn drag_create_click_uses_default_size() {
+        let f = drag_create((50.0, 50.0), None, (100.0, 60.0), false, false, false);
+        assert_frame(&f, 0.0, 20.0, 100.0, 60.0);
+        assert!(!f.flip_x && !f.flip_y && f.rotation == 0.0);
+        // A line placed with a click also takes its default size.
+        let f = drag_create((50.0, 50.0), None, (100.0, 0.0), true, true, true);
+        assert_frame(&f, 0.0, 50.0, 100.0, 0.0);
+    }
+
+    #[test]
+    fn drag_create_short_drag_is_still_a_drag() {
+        // The caller decides what is a click (the threshold is in screen
+        // pixels); a drag back near the start keeps a drawn size.
         let f = drag_create(
             (50.0, 50.0),
-            (51.0, 51.0),
+            Some((51.0, 50.5)),
             (100.0, 60.0),
             false,
             false,
             false,
         );
-        assert_frame(&f, 0.0, 20.0, 100.0, 60.0);
-        assert!(!f.flip_x && !f.flip_y && f.rotation == 0.0);
+        assert_frame(&f, 50.0, 49.75, MIN_SIZE, MIN_SIZE);
+        let f = drag_create(
+            (50.0, 50.0),
+            Some((50.0, 50.0)),
+            (100.0, 0.0),
+            true,
+            false,
+            false,
+        );
+        assert_frame(&f, 50.0, 50.0, 0.0, 0.0);
     }
 
     #[test]
     fn drag_create_normalises_backwards_box() {
         let f = drag_create(
             (100.0, 80.0),
-            (40.0, 20.0),
+            Some((40.0, 20.0)),
             (100.0, 60.0),
             false,
             false,
@@ -450,7 +472,7 @@ mod tests {
     fn drag_create_constrain_makes_square() {
         let f = drag_create(
             (10.0, 10.0),
-            (50.0, 30.0),
+            Some((50.0, 30.0)),
             (100.0, 60.0),
             false,
             true,
@@ -459,7 +481,7 @@ mod tests {
         assert_frame(&f, 10.0, 10.0, 40.0, 40.0);
         let f = drag_create(
             (10.0, 10.0),
-            (0.0, -20.0),
+            Some((0.0, -20.0)),
             (100.0, 60.0),
             false,
             true,
@@ -472,7 +494,7 @@ mod tests {
     fn drag_create_from_center() {
         let f = drag_create(
             (100.0, 100.0),
-            (130.0, 80.0),
+            Some((130.0, 80.0)),
             (100.0, 60.0),
             false,
             false,
@@ -481,7 +503,7 @@ mod tests {
         assert_frame(&f, 70.0, 80.0, 60.0, 40.0);
         let f = drag_create(
             (100.0, 100.0),
-            (130.0, 80.0),
+            Some((130.0, 80.0)),
             (100.0, 60.0),
             false,
             true,
@@ -494,7 +516,7 @@ mod tests {
     fn line_backwards_sets_flips() {
         let f = drag_create(
             (100.0, 100.0),
-            (40.0, 70.0),
+            Some((40.0, 70.0)),
             (100.0, 0.0),
             true,
             false,
@@ -504,7 +526,7 @@ mod tests {
         assert!(f.flip_x && f.flip_y);
         let f = drag_create(
             (10.0, 100.0),
-            (40.0, 70.0),
+            Some((40.0, 70.0)),
             (100.0, 0.0),
             true,
             false,
@@ -512,23 +534,51 @@ mod tests {
         );
         assert!(!f.flip_x && f.flip_y);
         // A horizontal line keeps zero height.
-        let f = drag_create((10.0, 10.0), (60.0, 10.0), (100.0, 0.0), true, false, false);
+        let f = drag_create(
+            (10.0, 10.0),
+            Some((60.0, 10.0)),
+            (100.0, 0.0),
+            true,
+            false,
+            false,
+        );
         assert_frame(&f, 10.0, 10.0, 50.0, 0.0);
     }
 
     #[test]
     fn line_constrain_snaps_45() {
         // Nearly horizontal → horizontal, same length.
-        let f = drag_create((0.0, 0.0), (100.0, 10.0), (100.0, 0.0), true, true, false);
+        let f = drag_create(
+            (0.0, 0.0),
+            Some((100.0, 10.0)),
+            (100.0, 0.0),
+            true,
+            true,
+            false,
+        );
         let len = (100.0f32 * 100.0 + 10.0 * 10.0).sqrt();
         assert_frame(&f, 0.0, 0.0, len, 0.0);
         // Up-left near the diagonal → exact 45°, flipped both ways.
-        let f = drag_create((0.0, 0.0), (-50.0, -45.0), (100.0, 0.0), true, true, false);
+        let f = drag_create(
+            (0.0, 0.0),
+            Some((-50.0, -45.0)),
+            (100.0, 0.0),
+            true,
+            true,
+            false,
+        );
         assert!(close(f.w, f.h) && f.w > 0.0);
         assert!(f.flip_x && f.flip_y);
         assert!(close(f.x + f.w, 0.0) && close(f.y + f.h, 0.0));
         // Nearly vertical downward.
-        let f = drag_create((0.0, 0.0), (5.0, 80.0), (100.0, 0.0), true, true, false);
+        let f = drag_create(
+            (0.0, 0.0),
+            Some((5.0, 80.0)),
+            (100.0, 0.0),
+            true,
+            true,
+            false,
+        );
         assert!(close(f.w, 0.0) && !f.flip_x && !f.flip_y);
     }
 

@@ -54,6 +54,10 @@ pub enum Gesture {
         constrain: bool,
         /// Alt: `start` is the centre.
         from_center: bool,
+        /// The pointer has travelled [`CLICK_DRAG_THRESHOLD`] pixels at
+        /// some point: the shape gets the dragged box, not its default
+        /// size, even if the pointer comes back.
+        dragged: bool,
     },
     /// Selecting the shapes inside the box from `start` to `current`;
     /// `additive` (Shift) adds them to the selection.
@@ -373,11 +377,12 @@ pub fn is_line_like(def: &ShapeDef) -> bool {
     )
 }
 
-/// The frame of `def` drawn from `start` to `end`.
+/// The frame of `def` drawn from `start` to `end`, or placed with a click
+/// at `start` when `end` is `None`.
 pub fn placement_frame(
     def: &ShapeDef,
     start: Pt,
-    end: Pt,
+    end: Option<Pt>,
     constrain: bool,
     from_center: bool,
 ) -> Frame {
@@ -417,6 +422,7 @@ impl EditorWindow {
             shape: shape.clone(),
             constrain: modifiers.shift,
             from_center: modifiers.alt,
+            dragged: false,
         };
         cx.notify();
     }
@@ -429,22 +435,9 @@ impl EditorWindow {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
-        if let Gesture::Placing {
-            current,
-            constrain,
-            from_center,
-            ..
-        } = &mut self.gesture
-        {
-            let before = (*current, *constrain, *from_center);
-            if let Some(at) = at {
-                *current = at;
-            }
-            *constrain = modifiers.shift;
-            *from_center = modifiers.alt;
-            if before != (*current, *constrain, *from_center) {
-                cx.notify();
-            }
+        let zoom = self.session.page().viewport.zoom;
+        if move_placement(&mut self.gesture, at, modifiers.shift, modifiers.alt, zoom) {
+            cx.notify();
         }
     }
 
@@ -770,6 +763,37 @@ pub fn hit_shape(
     })
 }
 
+/// Moves a placement's pointer to `at` (if given) and sets its modifiers.
+/// Once the pointer has travelled far enough at `zoom` for a drag, the
+/// placement stays a drag. Returns whether anything changed.
+fn move_placement(
+    gesture: &mut Gesture,
+    at: Option<Pt>,
+    shift: bool,
+    alt: bool,
+    zoom: f32,
+) -> bool {
+    let Gesture::Placing {
+        start,
+        current,
+        constrain,
+        from_center,
+        dragged,
+        ..
+    } = gesture
+    else {
+        return false;
+    };
+    let before = (*current, *constrain, *from_center, *dragged);
+    if let Some(at) = at {
+        *current = at;
+        *dragged |= is_drag(*start, at, zoom);
+    }
+    *constrain = shift;
+    *from_center = alt;
+    before != (*current, *constrain, *from_center, *dragged)
+}
+
 /// The shape `gesture` places, if it is placing an installed shape.
 fn placement_shape(gesture: &Gesture, libs: &LibraryRegistry) -> Option<Shape> {
     let Gesture::Placing {
@@ -779,12 +803,14 @@ fn placement_shape(gesture: &Gesture, libs: &LibraryRegistry) -> Option<Shape> {
         shape,
         constrain,
         from_center,
+        dragged,
     } = gesture
     else {
         return None;
     };
     let def = libs.shape(library, shape)?;
-    let frame = placement_frame(def, *start, *current, *constrain, *from_center);
+    let end = dragged.then_some(*current);
+    let frame = placement_frame(def, *start, end, *constrain, *from_center);
     Some(Shape::new(def, library, frame))
 }
 
@@ -793,8 +819,8 @@ mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
         chrome_frame, handle_at, hit_shape, is_drag, is_line_like, marquee_rect, marquee_selection,
-        placement_frame, placement_shape, press_kind, press_selection, press_target, resize_cursor,
-        transformed, visible_handles, Gesture, HandleHit, PressKind,
+        move_placement, placement_frame, placement_shape, press_kind, press_selection,
+        press_target, resize_cursor, transformed, visible_handles, Gesture, HandleHit, PressKind,
     };
     use gpui_kit::CursorStyle;
     use mindweave_core::geometry::Frame;
@@ -821,12 +847,12 @@ mod tests {
     fn a_backwards_line_drag_flips_and_a_click_uses_the_default_size() {
         let libs = registry();
         let line = libs.shape("basic-shapes", "line").unwrap();
-        let f = placement_frame(line, (100., 100.), (40., 70.), false, false);
+        let f = placement_frame(line, (100., 100.), Some((40., 70.)), false, false);
         assert_eq!((f.x, f.y, f.w, f.h), (40., 70., 60., 30.));
         assert!(f.flip_x && f.flip_y);
 
         let rect = libs.shape("basic-shapes", "rectangle").unwrap();
-        let f = placement_frame(rect, (100., 100.), (101., 100.), false, false);
+        let f = placement_frame(rect, (100., 100.), None, false, false);
         let (w, h) = rect.default_size;
         assert_eq!((f.x, f.y, f.w, f.h), (100. - w / 2., 100. - h / 2., w, h));
     }
@@ -835,9 +861,9 @@ mod tests {
     fn shift_squares_and_alt_draws_from_the_centre() {
         let libs = registry();
         let rect = libs.shape("basic-shapes", "rectangle").unwrap();
-        let f = placement_frame(rect, (0., 0.), (40., 10.), true, false);
+        let f = placement_frame(rect, (0., 0.), Some((40., 10.)), true, false);
         assert_eq!((f.w, f.h), (40., 40.));
-        let f = placement_frame(rect, (50., 50.), (60., 70.), false, true);
+        let f = placement_frame(rect, (50., 50.), Some((60., 70.)), false, true);
         assert_eq!((f.x, f.y, f.w, f.h), (40., 30., 20., 40.));
     }
 
@@ -851,6 +877,7 @@ mod tests {
             shape: shape.into(),
             constrain: false,
             from_center: false,
+            dragged: true,
         };
         let shape = placement_shape(&placing("ellipse"), &libs).unwrap();
         assert_eq!(
@@ -860,6 +887,68 @@ mod tests {
         assert_eq!((shape.frame.w, shape.frame.h), (30., 20.));
         assert!(placement_shape(&placing("no-such-shape"), &libs).is_none());
         assert!(placement_shape(&Gesture::Idle, &libs).is_none());
+    }
+
+    fn start_placing(at: (f32, f32)) -> Gesture {
+        Gesture::Placing {
+            start: at,
+            current: at,
+            library: "basic-shapes".into(),
+            shape: "rectangle".into(),
+            constrain: false,
+            from_center: false,
+            dragged: false,
+        }
+    }
+
+    fn placed_size(gesture: &Gesture) -> (f32, f32) {
+        let frame = placement_shape(gesture, &registry()).unwrap().frame;
+        (frame.w, frame.h)
+    }
+
+    #[test]
+    fn the_click_or_drag_decision_uses_screen_pixels() {
+        let default = registry()
+            .shape("basic-shapes", "rectangle")
+            .unwrap()
+            .default_size;
+        // At 1000% a 25 px drag (2.5 canvas units) draws the box.
+        let mut g = start_placing((0., 0.));
+        assert!(move_placement(&mut g, Some((2.5, 2.)), false, false, 10.));
+        assert_eq!(placed_size(&g), (2.5, 2.));
+        // At 10% a 1 px wobble (10 canvas units) is still a click.
+        let mut g = start_placing((0., 0.));
+        move_placement(&mut g, Some((10., 0.)), false, false, 0.1);
+        assert_eq!(placed_size(&g), default);
+        // ...but a 3 px drag (30 canvas units) is not.
+        move_placement(&mut g, Some((30., 0.)), false, false, 0.1);
+        assert_ne!(placed_size(&g), default);
+    }
+
+    #[test]
+    fn a_placement_stays_a_drag_once_dragged() {
+        let default = registry()
+            .shape("basic-shapes", "rectangle")
+            .unwrap()
+            .default_size;
+        let mut g = start_placing((100., 100.));
+        move_placement(&mut g, Some((150., 140.)), false, false, 1.);
+        assert_eq!(placed_size(&g), (50., 40.));
+        // Back next to the start: a tiny box, not the default size.
+        move_placement(&mut g, Some((101., 100.)), false, false, 1.);
+        assert_eq!(placed_size(&g), (1., 1.));
+        assert_ne!(placed_size(&g), default);
+        // Modifier changes alone keep the decision.
+        assert!(move_placement(&mut g, None, true, false, 1.));
+        assert!(matches!(
+            g,
+            Gesture::Placing {
+                dragged: true,
+                constrain: true,
+                ..
+            }
+        ));
+        assert!(!move_placement(&mut g, None, true, false, 1.));
     }
 
     fn session() -> (tempfile::TempDir, DocumentSession) {
