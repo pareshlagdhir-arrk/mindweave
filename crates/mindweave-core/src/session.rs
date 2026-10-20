@@ -1,10 +1,16 @@
-//! An open document: edit operations plus dirty tracking.
+//! An open document: edit operations, undo history and dirty tracking.
 
 use std::path::PathBuf;
 
+use uuid::Uuid;
+
 use crate::color::normalize_hex_color;
-use crate::document::{BackgroundPattern, Document, Layer, Page, Viewport, DEFAULT_DOT_SIZE};
+use crate::document::{
+    BackgroundPattern, CanvasSettings, Document, Layer, Page, Viewport, DEFAULT_DOT_SIZE,
+};
 use crate::format::{self, FormatError};
+use crate::history::{History, HISTORY_CAP};
+use crate::shape::Shape;
 pub use crate::viewport::{ZOOM_MAX, ZOOM_MIN};
 
 pub const GRID_MIN: f32 = 4.0;
@@ -18,15 +24,39 @@ pub const VIEWPORT_COORD_MAX: f32 = 1e9;
 
 const DEFAULT_GRID: f32 = 20.0;
 
-/// A document bound to a file path, tracking unsaved content edits.
+/// A document bound to a file path, with undo history and unsaved-change
+/// tracking.
 ///
-/// View state (viewport, active page/layer) is saved with the file but
-/// never marks the session dirty.
+/// View state (each page's viewport and active layer, and the document's
+/// active page) is saved with the file but is neither in the undo history
+/// nor counted as an unsaved change.
 #[derive(Debug)]
 pub struct DocumentSession {
     pub doc: Document,
     pub path: PathBuf,
-    dirty: bool,
+    /// Page content at the last save or open.
+    saved: Vec<Page>,
+    history: History<Vec<Page>>,
+    /// Page content when the open gesture began.
+    gesture: Option<Vec<Page>>,
+}
+
+/// Whether `a` and `b` have the same content, ignoring view state.
+fn content_eq(a: &[Page], b: &[Page]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| page_content_eq(a, b))
+}
+
+fn page_content_eq(a: &Page, b: &Page) -> bool {
+    // Destructured so a new `Page` field must be classified here.
+    let Page {
+        id,
+        name,
+        canvas,
+        viewport: _,
+        layers,
+        active_layer: _,
+    } = a;
+    *id == b.id && *name == b.name && *canvas == b.canvas && *layers == b.layers
 }
 
 /// Replace out-of-range or non-finite values with usable ones.
@@ -72,21 +102,13 @@ fn clamp_dot_size(px: f32) -> f32 {
     ((px * 2.0).round() / 2.0).clamp(DOT_SIZE_MIN, DOT_SIZE_MAX)
 }
 
-/// Sets `slot` to `value` normalised (`None` resets to the theme colour).
-/// Returns whether it changed; an unparsable colour changes nothing.
-fn set_color(slot: &mut Option<String>, value: Option<&str>) -> bool {
-    let value = match value {
-        Some(text) => match normalize_hex_color(text) {
-            Some(hex) => Some(hex),
-            None => return false,
-        },
-        None => None,
-    };
-    if *slot == value {
-        return false;
+/// `value` normalised (`None` is the theme colour), or `None` when it is
+/// unparsable.
+fn color_value(value: Option<&str>) -> Option<Option<String>> {
+    match value {
+        Some(text) => normalize_hex_color(text).map(Some),
+        None => Some(None),
     }
-    *slot = value;
-    true
 }
 
 /// Smallest `N >= 1` such that `"{prefix} N"` is not among `names`.
@@ -103,31 +125,34 @@ impl DocumentSession {
     pub fn create(path: PathBuf) -> Result<Self, FormatError> {
         let doc = Document::new();
         format::save(&doc, &path)?;
-        Ok(Self {
-            doc,
-            path,
-            dirty: false,
-        })
+        Ok(Self::with_doc(doc, path))
     }
 
     pub fn open(path: PathBuf) -> Result<Self, FormatError> {
         let mut doc = format::load(&path)?;
         doc.pages.iter_mut().for_each(normalize_page);
-        Ok(Self {
+        Ok(Self::with_doc(doc, path))
+    }
+
+    fn with_doc(doc: Document, path: PathBuf) -> Self {
+        Self {
+            saved: doc.pages.clone(),
             doc,
             path,
-            dirty: false,
-        })
+            history: History::new(HISTORY_CAP),
+            gesture: None,
+        }
     }
 
     pub fn save(&mut self) -> Result<(), FormatError> {
         format::save(&self.doc, &self.path)?;
-        self.dirty = false;
+        self.saved = self.doc.pages.clone();
         Ok(())
     }
 
+    /// Whether the content differs from the last save, ignoring view state.
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        !content_eq(&self.doc.pages, &self.saved)
     }
 
     /// File stem, followed by `" •"` when there are unsaved changes.
@@ -137,7 +162,7 @@ impl DocumentSession {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".to_string());
-        if self.dirty {
+        if self.is_dirty() {
             format!("{stem} •")
         } else {
             stem
@@ -153,65 +178,162 @@ impl DocumentSession {
         &mut self.doc.pages[self.doc.active_page]
     }
 
-    // Content edits (mark dirty).
+    // Undo history.
+
+    /// Records the current content as an undo step before a content edit.
+    /// Callers check first that the edit changes something. Inside a
+    /// gesture nothing is recorded until `end_gesture`.
+    fn checkpoint(&mut self) {
+        if self.gesture.is_none() {
+            self.history.record(self.doc.pages.clone());
+        }
+    }
+
+    /// Starts grouping content edits into one undo step. A nested begin is
+    /// a no-op.
+    pub fn begin_gesture(&mut self) {
+        if self.gesture.is_none() {
+            self.gesture = Some(self.doc.pages.clone());
+        }
+    }
+
+    /// Ends the open gesture, recording one undo step if the content
+    /// changed. Without an open gesture this does nothing.
+    pub fn end_gesture(&mut self) {
+        if let Some(before) = self.gesture.take() {
+            if !content_eq(&before, &self.doc.pages) {
+                self.history.record(before);
+            }
+        }
+    }
+
+    /// Undoes the last content step (ending any open gesture first).
+    /// Returns whether anything was undone.
+    pub fn undo(&mut self) -> bool {
+        self.end_gesture();
+        if !self.history.can_undo() {
+            return false;
+        }
+        let current = self.doc.pages.clone();
+        match self.history.undo(current) {
+            Some(pages) => {
+                self.restore(pages);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Redoes the last undone step (ending any open gesture first).
+    /// Returns whether anything was redone.
+    pub fn redo(&mut self) -> bool {
+        self.end_gesture();
+        if !self.history.can_redo() {
+            return false;
+        }
+        let current = self.doc.pages.clone();
+        match self.history.redo(current) {
+            Some(pages) => {
+                self.restore(pages);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo() || self.gesture_changed()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo() && !self.gesture_changed()
+    }
+
+    fn gesture_changed(&self) -> bool {
+        self.gesture
+            .as_ref()
+            .is_some_and(|before| !content_eq(before, &self.doc.pages))
+    }
+
+    /// Replaces the page content with `pages`, keeping the current view
+    /// state of pages that still exist (matched by id) and clamping the
+    /// active page and layers.
+    fn restore(&mut self, mut pages: Vec<Page>) {
+        let active_id = self.page().id;
+        for page in &mut pages {
+            if let Some(cur) = self.doc.pages.iter().find(|p| p.id == page.id) {
+                page.viewport = cur.viewport;
+                page.active_layer = cur.active_layer;
+            }
+            page.active_layer = page.active_layer.min(page.layers.len().saturating_sub(1));
+        }
+        self.doc.active_page = pages
+            .iter()
+            .position(|p| p.id == active_id)
+            .unwrap_or(self.doc.active_page)
+            .min(pages.len().saturating_sub(1));
+        self.doc.pages = pages;
+    }
+
+    // Content edits (recorded in history only when they change something).
 
     pub fn add_page(&mut self) -> usize {
+        self.checkpoint();
         let name = next_name("Page", self.doc.pages.iter().map(|p| p.name.as_str()));
         self.doc.pages.push(Page::new(name));
         self.doc.active_page = self.doc.pages.len() - 1;
-        self.dirty = true;
         self.doc.active_page
     }
 
     pub fn rename_page(&mut self, idx: usize, name: &str) {
         let name = name.trim();
-        if name.is_empty() {
+        if name.is_empty() || self.doc.pages.get(idx).is_none_or(|p| p.name == name) {
             return;
         }
-        if let Some(p) = self.doc.pages.get_mut(idx) {
-            if p.name != name {
-                p.name = name.to_string();
-                self.dirty = true;
-            }
-        }
+        self.checkpoint();
+        self.doc.pages[idx].name = name.to_string();
     }
 
     /// Insert a new layer at the top of the active page and make it active.
     pub fn add_layer(&mut self) -> usize {
+        self.checkpoint();
         let page = self.page_mut();
         let name = next_name("Layer", page.layers.iter().map(|l| l.name.as_str()));
         page.layers.insert(0, Layer::new(name));
         page.active_layer = 0;
-        self.dirty = true;
         0
     }
 
     pub fn rename_layer(&mut self, idx: usize, name: &str) {
         let name = name.trim();
-        if name.is_empty() {
+        if name.is_empty() || self.page().layers.get(idx).is_none_or(|l| l.name == name) {
             return;
         }
-        if let Some(l) = self.page_mut().layers.get_mut(idx) {
-            if l.name != name {
-                l.name = name.to_string();
-                self.dirty = true;
-            }
-        }
+        self.checkpoint();
+        self.page_mut().layers[idx].name = name.to_string();
     }
 
     pub fn toggle_layer_visibility(&mut self, idx: usize) {
-        if let Some(l) = self.page_mut().layers.get_mut(idx) {
-            l.visible = !l.visible;
-            self.dirty = true;
+        if idx >= self.page().layers.len() {
+            return;
         }
+        self.checkpoint();
+        let layer = &mut self.page_mut().layers[idx];
+        layer.visible = !layer.visible;
+    }
+
+    /// Sets one canvas setting of the active page, recording a step only
+    /// when the value changes.
+    fn set_canvas<T: PartialEq>(&mut self, value: T, field: fn(&mut CanvasSettings) -> &mut T) {
+        if *field(&mut self.page_mut().canvas) == value {
+            return;
+        }
+        self.checkpoint();
+        *field(&mut self.page_mut().canvas) = value;
     }
 
     pub fn set_pattern(&mut self, p: BackgroundPattern) {
-        let canvas = &mut self.page_mut().canvas;
-        if canvas.pattern != p {
-            canvas.pattern = p;
-            self.dirty = true;
-        }
+        self.set_canvas(p, |c| &mut c.pattern);
     }
 
     /// Round to whole pixels and clamp to `GRID_MIN..=GRID_MAX`; NaN is ignored.
@@ -219,41 +341,37 @@ impl DocumentSession {
         if px.is_nan() {
             return;
         }
-        let px = px.round().clamp(GRID_MIN, GRID_MAX);
-        let canvas = &mut self.page_mut().canvas;
-        if canvas.grid_size != px {
-            canvas.grid_size = px;
-            self.dirty = true;
-        }
+        self.set_canvas(px.round().clamp(GRID_MIN, GRID_MAX), |c| &mut c.grid_size);
     }
 
     /// Canvas fill colour (`#RRGGBB`); `None` uses the theme background.
     /// An unparsable colour is ignored.
     pub fn set_background(&mut self, color: Option<&str>) {
-        self.dirty |= set_color(&mut self.page_mut().canvas.background, color);
+        if let Some(v) = color_value(color) {
+            self.set_canvas(v, |c| &mut c.background);
+        }
     }
 
     /// Lines colour (`#RRGGBB`); `None` uses the theme border colour.
     /// An unparsable colour is ignored.
     pub fn set_line_color(&mut self, color: Option<&str>) {
-        self.dirty |= set_color(&mut self.page_mut().canvas.line_color, color);
+        if let Some(v) = color_value(color) {
+            self.set_canvas(v, |c| &mut c.line_color);
+        }
     }
 
     /// Dots colour (`#RRGGBB`); `None` uses the theme border colour.
     /// An unparsable colour is ignored.
     pub fn set_dot_color(&mut self, color: Option<&str>) {
-        self.dirty |= set_color(&mut self.page_mut().canvas.dot_color, color);
+        if let Some(v) = color_value(color) {
+            self.set_canvas(v, |c| &mut c.dot_color);
+        }
     }
 
     /// Every `n`th grid line is drawn stronger (0 = off), clamped to
     /// `MAJOR_EVERY_MAX`.
     pub fn set_major_every(&mut self, n: u32) {
-        let n = n.min(MAJOR_EVERY_MAX);
-        let canvas = &mut self.page_mut().canvas;
-        if canvas.major_every != n {
-            canvas.major_every = n;
-            self.dirty = true;
-        }
+        self.set_canvas(n.min(MAJOR_EVERY_MAX), |c| &mut c.major_every);
     }
 
     /// Round to half pixels and clamp to `DOT_SIZE_MIN..=DOT_SIZE_MAX`; NaN
@@ -262,11 +380,91 @@ impl DocumentSession {
         if px.is_nan() {
             return;
         }
-        let px = clamp_dot_size(px);
-        let canvas = &mut self.page_mut().canvas;
-        if canvas.dot_size != px {
-            canvas.dot_size = px;
-            self.dirty = true;
+        self.set_canvas(clamp_dot_size(px), |c| &mut c.dot_size);
+    }
+
+    // Shapes.
+
+    fn active_layer(&self) -> &Layer {
+        let page = self.page();
+        &page.layers[page.active_layer]
+    }
+
+    fn active_layer_mut(&mut self) -> &mut Layer {
+        let page = self.page_mut();
+        let idx = page.active_layer;
+        &mut page.layers[idx]
+    }
+
+    /// Shapes of the active layer, back to front.
+    pub fn shapes_on_active_layer(&self) -> &[Shape] {
+        &self.active_layer().objects
+    }
+
+    /// The shape `id` on the active layer.
+    pub fn find_shape(&self, id: Uuid) -> Option<&Shape> {
+        self.shapes_on_active_layer().iter().find(|s| s.id == id)
+    }
+
+    /// Whether shapes on the active layer can be selected (it is visible).
+    pub fn active_layer_selectable(&self) -> bool {
+        self.active_layer().visible
+    }
+
+    /// Appends `shapes` to the top of the active layer.
+    pub fn add_shapes(&mut self, shapes: Vec<Shape>) {
+        if shapes.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        self.active_layer_mut().objects.extend(shapes);
+    }
+
+    /// Removes the shapes with `ids` from every layer of the active page
+    /// and returns them, back to front.
+    pub fn remove_shapes(&mut self, ids: &[Uuid]) -> Vec<Shape> {
+        let found = self
+            .page()
+            .layers
+            .iter()
+            .any(|l| l.objects.iter().any(|s| ids.contains(&s.id)));
+        if !found {
+            return Vec::new();
+        }
+        self.checkpoint();
+        let mut removed = Vec::new();
+        // Layers are stored top first; walk bottom first.
+        for layer in self.page_mut().layers.iter_mut().rev() {
+            let (out, keep) = std::mem::take(&mut layer.objects)
+                .into_iter()
+                .partition(|s| ids.contains(&s.id));
+            layer.objects = keep;
+            removed.extend::<Vec<Shape>>(out);
+        }
+        removed
+    }
+
+    /// Applies `f` to each shape with one of `ids` on the active layer,
+    /// recording a step only if some shape changed.
+    pub fn update_shapes(&mut self, ids: &[Uuid], mut f: impl FnMut(&mut Shape)) {
+        let changed: Vec<(usize, Shape)> = self
+            .shapes_on_active_layer()
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| ids.contains(&s.id))
+            .filter_map(|(i, s)| {
+                let mut new = s.clone();
+                f(&mut new);
+                (new != *s).then_some((i, new))
+            })
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        let objects = &mut self.active_layer_mut().objects;
+        for (i, shape) in changed {
+            objects[i] = shape;
         }
     }
 
@@ -682,5 +880,226 @@ mod tests {
         s.frame.y = f32::INFINITY;
         s.normalize();
         assert_eq!((s.frame.x, s.frame.y), (0.0, 0.0));
+    }
+
+    fn rect(x: f32) -> Shape {
+        let def = crate::library::builtin_libraries()[0].shapes[0].clone();
+        let frame = crate::geometry::Frame {
+            x,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            ..Default::default()
+        };
+        Shape::new(&def, "basic-shapes", frame)
+    }
+
+    #[test]
+    fn undo_to_saved_state_is_clean() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.save().unwrap();
+        assert!(!s.can_undo());
+        s.add_shapes(vec![rect(0.0)]);
+        assert!(s.is_dirty());
+        assert!(s.can_undo());
+        assert!(s.undo());
+        assert!(s.shapes_on_active_layer().is_empty());
+        assert!(!s.is_dirty());
+        assert!(s.can_redo());
+        assert!(s.redo());
+        assert_eq!(s.shapes_on_active_layer().len(), 1);
+        assert!(s.is_dirty());
+        assert!(!s.redo());
+    }
+
+    #[test]
+    fn gesture_is_one_step() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let shape = rect(0.0);
+        let id = shape.id;
+        s.add_shapes(vec![shape.clone()]);
+        s.begin_gesture();
+        s.begin_gesture(); // nested: no-op
+        for _ in 0..3 {
+            s.update_shapes(&[id], |sh| sh.frame.x += 5.0);
+        }
+        s.end_gesture();
+        assert_eq!(s.find_shape(id).unwrap().frame.x, 15.0);
+        assert!(s.undo());
+        assert_eq!(s.find_shape(id), Some(&shape));
+        assert!(s.undo());
+        assert!(s.find_shape(id).is_none());
+        assert!(!s.can_undo());
+    }
+
+    #[test]
+    fn empty_gesture_records_nothing() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.begin_gesture();
+        s.set_pattern(BackgroundPattern::Dots); // same value
+        s.set_viewport(Viewport {
+            x: 5.0,
+            y: 5.0,
+            zoom: 1.0,
+        });
+        s.end_gesture();
+        assert!(!s.can_undo());
+        assert!(!s.is_dirty());
+        // A gesture that changes and restores content records nothing.
+        s.begin_gesture();
+        s.toggle_layer_visibility(0);
+        s.toggle_layer_visibility(0);
+        s.end_gesture();
+        assert!(!s.can_undo());
+        s.end_gesture(); // unmatched end: no-op
+        assert!(!s.can_undo());
+    }
+
+    #[test]
+    fn undo_keeps_viewport() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.add_shapes(vec![rect(0.0)]);
+        let v = Viewport {
+            x: 40.0,
+            y: -10.0,
+            zoom: 2.0,
+        };
+        s.set_viewport(v);
+        assert!(s.undo());
+        assert_eq!(s.page().viewport, v);
+        assert!(s.redo());
+        assert_eq!(s.page().viewport, v);
+    }
+
+    #[test]
+    fn undo_restores_page_add_while_on_other_page() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.add_page();
+        assert_eq!(s.doc.active_page, 1);
+        assert!(s.undo());
+        assert_eq!(s.doc.pages.len(), 1);
+        assert_eq!(s.doc.active_page, 0);
+        assert!(!s.is_dirty());
+        assert!(s.redo());
+        assert_eq!(s.doc.pages.len(), 2);
+        // Undo the add while viewing the first page.
+        s.set_active_page(0);
+        s.add_layer();
+        s.set_active_layer(1);
+        s.set_active_page(1);
+        assert!(s.undo()); // removes the layer on page 0
+        assert_eq!(s.doc.active_page, 1);
+        assert_eq!(s.doc.pages[0].layers.len(), 1);
+        assert_eq!(s.doc.pages[0].active_layer, 0);
+        assert!(s.undo()); // removes page 2 while it is active
+        assert_eq!(s.doc.pages.len(), 1);
+        assert_eq!(s.doc.active_page, 0);
+    }
+
+    #[test]
+    fn existing_edits_are_undoable() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.rename_layer(0, "Back");
+        s.set_pattern(BackgroundPattern::Lines);
+        s.set_background(Some("#101010"));
+        s.set_grid_size(30.0);
+        s.rename_page(0, "Plan");
+        assert!(s.undo());
+        assert_eq!(s.page().name, "Page 1");
+        assert!(s.undo());
+        assert_eq!(s.page().canvas.grid_size, 20.0);
+        assert!(s.undo());
+        assert_eq!(s.page().canvas.background, None);
+        assert!(s.undo());
+        assert_eq!(s.page().canvas.pattern, BackgroundPattern::Dots);
+        assert!(s.undo());
+        assert_eq!(s.page().layers[0].name, "Layer 1");
+        assert!(!s.undo());
+        assert!(!s.is_dirty());
+        // No-op edits record nothing.
+        s.set_pattern(BackgroundPattern::Dots);
+        s.set_background(Some("garbage"));
+        s.rename_layer(0, "Layer 1");
+        s.set_dot_size(1.5);
+        s.set_major_every(0);
+        assert!(!s.can_undo());
+        // A new edit clears redo.
+        assert!(s.can_redo());
+        s.toggle_layer_visibility(0);
+        assert!(!s.can_redo());
+    }
+
+    #[test]
+    fn remove_shapes_returns_removed() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let (a, b, c) = (rect(0.0), rect(1.0), rect(2.0));
+        s.add_shapes(vec![a.clone(), b.clone()]);
+        s.add_layer();
+        s.add_shapes(vec![c.clone()]);
+        assert_eq!(s.shapes_on_active_layer(), std::slice::from_ref(&c));
+        s.save().unwrap();
+        // Searches every layer of the active page.
+        let removed = s.remove_shapes(&[a.id, c.id]);
+        assert_eq!(removed, vec![a.clone(), c.clone()]);
+        assert!(s.shapes_on_active_layer().is_empty());
+        assert_eq!(s.page().layers[1].objects, vec![b.clone()]);
+        assert!(s.is_dirty());
+        assert!(s.undo());
+        assert!(!s.is_dirty());
+        assert_eq!(s.page().layers[1].objects, vec![a, b]);
+        // Unknown ids remove nothing and record nothing.
+        s.redo();
+        s.save().unwrap();
+        assert!(s.remove_shapes(&[uuid::Uuid::new_v4()]).is_empty());
+        assert!(!s.is_dirty());
+        assert!(!s.can_redo());
+        assert!(s.can_undo());
+        assert!(s.undo());
+        assert_eq!(s.page().layers[0].objects, vec![c]);
+    }
+
+    #[test]
+    fn update_shapes_marks_dirty_only_on_change() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let shape = rect(0.0);
+        let id = shape.id;
+        s.add_shapes(vec![shape]);
+        s.save().unwrap();
+        s.update_shapes(&[id], |sh| sh.frame.x = 0.0);
+        s.update_shapes(&[uuid::Uuid::new_v4()], |sh| sh.frame.x = 99.0);
+        assert!(!s.is_dirty());
+        assert!(s.undo()); // only the add is in history
+        assert!(s.find_shape(id).is_none());
+        assert!(s.redo());
+        s.update_shapes(&[id], |sh| sh.frame.x = 7.0);
+        assert!(s.is_dirty());
+        assert_eq!(s.find_shape(id).unwrap().frame.x, 7.0);
+        s.update_shapes(&[id], |sh| sh.frame.x = 0.0);
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn active_layer_selectable_follows_visibility() {
+        let (_d, mut s) = new_session("a.mindweave");
+        assert!(s.active_layer_selectable());
+        s.toggle_layer_visibility(0);
+        assert!(!s.active_layer_selectable());
+    }
+
+    #[test]
+    fn dirty_ignores_view_state() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.add_page();
+        s.add_layer();
+        s.save().unwrap();
+        s.set_active_layer(1);
+        s.set_active_page(0);
+        s.set_viewport(Viewport {
+            x: 3.0,
+            y: 4.0,
+            zoom: 1.5,
+        });
+        assert!(!s.is_dirty());
+        assert!(!s.title().ends_with('•'));
     }
 }

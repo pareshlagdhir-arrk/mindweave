@@ -5,6 +5,7 @@ pub mod document;
 pub mod files;
 pub mod format;
 pub mod geometry;
+pub mod history;
 pub mod library;
 pub mod session;
 pub mod settings;
