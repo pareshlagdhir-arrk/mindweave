@@ -10,12 +10,12 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{TitleBar, WindowExt as _};
 use gpui_kit::*;
 use mindweave_core::{
-    load_settings, save_settings, settings_path, AppSettings, DocumentSession, FormatError,
-    WindowSize,
+    load_settings, rename_document, save_settings, settings_path, AppSettings, DocumentSession,
+    FormatError, WindowSize,
 };
 
 use crate::actions::{self, NewFile, OpenFile, Quit, ShowDashboard, ToggleThemePicker};
-use crate::dashboard::Dashboard;
+use crate::dashboard::{file_stem, Dashboard};
 use crate::editor::{prompt_to_save, EditorWindow, SaveChoice};
 use crate::menu_bar::{native_menus, WindowKind};
 use crate::theme_picker::open_theme_picker;
@@ -208,6 +208,64 @@ impl AppState {
                 notify_error(err.to_string(), cx);
             }
         }
+    }
+
+    /// Whether the document at `path` is open in an editor, in which case a
+    /// notification asks to close it before `doing` ("renaming") it.
+    pub fn refuse_if_open(path: &Path, doing: &str, cx: &mut App) -> bool {
+        let open = cx
+            .global::<AppState>()
+            .editors
+            .contains_key(&canonical(path));
+        if open {
+            notify_error(
+                format!("Close \"{}\" before {doing} it.", file_stem(path)),
+                cx,
+            );
+        }
+        open
+    }
+
+    /// Renames the document at `path` to `new_stem` in its folder and points
+    /// its recent entry at the new path. Refused while it is open.
+    pub fn rename_file(path: &Path, new_stem: &str, cx: &mut App) {
+        if Self::refuse_if_open(path, "renaming", cx) {
+            return;
+        }
+        match rename_document(path, new_stem) {
+            Ok(new_path) if new_path != path => {
+                Self::update_settings(cx, |settings| settings.rename_recent(path, &new_path));
+            }
+            Ok(_) => {}
+            Err(err) => notify_error(err.to_string(), cx),
+        }
+    }
+
+    /// Asks for confirmation, then moves the document at `path` to the Trash
+    /// and drops it from the recent list. Refused while it is open.
+    pub fn trash_file(path: PathBuf, window: &mut Window, cx: &mut App) {
+        if Self::refuse_if_open(&path, "deleting", cx) {
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Move \"{}\" to Trash?", file_stem(&path)),
+            Some("You can restore it from the Trash."),
+            &["Move to Trash", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |cx| {
+            if !matches!(answer.await, Ok(0)) {
+                return;
+            }
+            cx.update(|cx| match move_to_trash(&path) {
+                Ok(()) => forget_recent(&path, cx),
+                Err(err) => {
+                    notify_error(format!("Could not move the file to the Trash: {err}"), cx)
+                }
+            });
+        })
+        .detach();
     }
 
     fn open_editor(session: DocumentSession, cx: &mut App) {
@@ -494,6 +552,20 @@ fn touch_recent(path: &Path, cx: &mut App) {
 
 fn forget_recent(path: &Path, cx: &mut App) {
     AppState::update_settings(cx, |settings| settings.remove_recent(path));
+}
+
+/// Moves `path` to the Trash. On macOS this asks the file manager directly
+/// rather than scripting Finder, which needs Automation permission.
+fn move_to_trash(path: &Path) -> Result<(), trash::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos as _};
+        let mut context = trash::TrashContext::new();
+        context.set_delete_method(DeleteMethod::NsFileManager);
+        context.delete(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    trash::delete(path)
 }
 
 fn canonical(path: &Path) -> PathBuf {

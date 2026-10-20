@@ -5,8 +5,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::actions::{CloseWindow, ToggleThemePicker};
@@ -24,9 +27,20 @@ const GRID_PADDING: f32 = 20.;
 const STATUS_BAR_HEIGHT: f32 = 24.;
 const TEXT_SIZE: f32 = 13.;
 const SMALL_TEXT_SIZE: f32 = 12.;
+const TILE_MENU_INSET: f32 = 6.;
+
+/// An inline rename of a recent file in progress.
+struct Rename {
+    path: PathBuf,
+    input: Entity<InputState>,
+    _subscription: Subscription,
+}
 
 pub struct Dashboard {
     focus_handle: FocusHandle,
+    /// The file whose tile menu is open; its menu button stays visible.
+    menu_open: Option<PathBuf>,
+    rename: Option<Rename>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -44,8 +58,61 @@ impl Dashboard {
         ];
         Self {
             focus_handle,
+            menu_open: None,
+            rename: None,
             _subscriptions,
         }
+    }
+
+    /// Starts an inline rename of the file at `path` with its name selected.
+    /// Refused while the file is open in an editor.
+    fn begin_rename(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if AppState::refuse_if_open(&path, "renaming", cx) {
+            return;
+        }
+        self.finish_rename(true, cx);
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(file_stem(&path)));
+        input.update(cx, |input, cx| {
+            input.select_all(window, cx);
+            input.focus(window, cx);
+        });
+        let _subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| {
+            match event {
+                InputEvent::PressEnter { .. } => {
+                    this.finish_rename(true, cx);
+                    this.focus_handle.focus(window, cx);
+                }
+                // Focus has already gone elsewhere; leave it there.
+                InputEvent::Blur => this.finish_rename(true, cx),
+                _ => {}
+            }
+        });
+        self.rename = Some(Rename {
+            path,
+            input,
+            _subscription,
+        });
+        cx.notify();
+    }
+
+    /// Ends the inline rename, renaming the file when `commit` is set.
+    fn finish_rename(&mut self, commit: bool, cx: &mut Context<Self>) {
+        let Some(rename) = self.rename.take() else {
+            return;
+        };
+        if commit {
+            let name = rename.input.read(cx).value().to_string();
+            AppState::rename_file(&rename.path, &name, cx);
+        }
+        cx.notify();
+    }
+
+    /// The rename input when the file at `path` is being renamed.
+    fn rename_input(&self, path: &Path) -> Option<&Entity<InputState>> {
+        self.rename
+            .as_ref()
+            .filter(|r| r.path == path)
+            .map(|r| &r.input)
     }
 
     fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
@@ -76,7 +143,7 @@ impl Render for Dashboard {
                     .min_h_0()
                     .items_stretch()
                     .child(nav(cx))
-                    .child(file_grid(cx)),
+                    .child(file_grid(self, cx)),
             )
             .child(status_bar(cx))
     }
@@ -115,7 +182,7 @@ fn nav(cx: &App) -> impl IntoElement {
 }
 
 /// The New file tile followed by one tile per recent file that still exists.
-fn file_grid(cx: &App) -> impl IntoElement {
+fn file_grid(dashboard: &Dashboard, cx: &Context<Dashboard>) -> impl IntoElement {
     let recent: Vec<(PathBuf, u64)> = cx
         .global::<AppState>()
         .settings
@@ -149,7 +216,7 @@ fn file_grid(cx: &App) -> impl IntoElement {
             recent
                 .into_iter()
                 .enumerate()
-                .map(|(ix, (path, edited_at))| file_tile(ix, path, edited_at, now, cx)),
+                .map(|(ix, (path, edited_at))| file_tile(ix, path, edited_at, now, dashboard, cx)),
         );
     }
 
@@ -183,11 +250,40 @@ fn new_file_tile(cx: &App) -> impl IntoElement {
         .on_click(|_, _, cx| AppState::new_file(cx))
 }
 
-fn file_tile(ix: usize, path: PathBuf, edited_at: u64, now: u64, cx: &App) -> impl IntoElement {
+/// A recent file: thumbnail, name and last-edited time. Clicking opens it;
+/// the "⋯" button (shown on hover) and a right-click offer Open, Rename…
+/// and Delete.
+fn file_tile(
+    ix: usize,
+    path: PathBuf,
+    edited_at: u64,
+    now: u64,
+    dashboard: &Dashboard,
+    cx: &Context<Dashboard>,
+) -> impl IntoElement {
     let theme = cx.theme();
     let tooltip: SharedString = path.display().to_string().into();
+    let group: SharedString = format!("recent-file-{ix}").into();
+    let view = cx.entity().downgrade();
+    let rename_input = dashboard.rename_input(&path);
+    // A click in the open rename field places the caret; it does not open
+    // the file.
+    let renaming = rename_input.is_some();
+    let name = match rename_input {
+        Some(input) => div()
+            .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                this.finish_rename(false, cx);
+                this.focus_handle.focus(window, cx);
+            }))
+            .child(Input::new(input).small())
+            .into_any_element(),
+        None => div().truncate().child(file_stem(&path)).into_any_element(),
+    };
+    let menu_open = dashboard.menu_open.as_deref() == Some(path.as_path());
     v_flex()
         .id(("recent-file", ix))
+        .group(group.clone())
+        .relative()
         .w(px(TILE_WIDTH))
         .h(px(TILE_HEIGHT))
         .flex_none()
@@ -213,7 +309,7 @@ fn file_tile(ix: usize, path: PathBuf, edited_at: u64, now: u64, cx: &App) -> im
                 .justify_center()
                 .gap(px(2.))
                 .px(px(10.))
-                .child(div().truncate().child(file_stem(&path)))
+                .child(name)
                 .child(
                     div()
                         .text_size(px(SMALL_TEXT_SIZE))
@@ -221,12 +317,106 @@ fn file_tile(ix: usize, path: PathBuf, edited_at: u64, now: u64, cx: &App) -> im
                         .child(format_relative(edited_at, now)),
                 ),
         )
+        .child(tile_menu_button(
+            ix,
+            &path,
+            group,
+            menu_open,
+            view.clone(),
+            cx,
+        ))
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-        .on_click(move |_, _, cx| {
+        .on_click({
             let path = path.clone();
-            // Opening a window is deferred until this window's update ends.
-            cx.defer(move |cx| AppState::open_path(path, cx));
+            move |_, _, cx| {
+                if renaming {
+                    return;
+                }
+                let path = path.clone();
+                // Opening a window is deferred until this window's update ends.
+                cx.defer(move |cx| AppState::open_path(path, cx));
+            }
         })
+        .context_menu(move |menu, _, cx| tile_menu(menu, &path, &view, cx))
+}
+
+/// The "⋯" button in a tile's top-right corner, over the thumbnail: shown
+/// while the tile is hovered or its menu is open.
+fn tile_menu_button(
+    ix: usize,
+    path: &Path,
+    group: SharedString,
+    menu_open: bool,
+    view: WeakEntity<Dashboard>,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let menu_path = path.to_path_buf();
+    let menu_view = view.clone();
+    let path = path.to_path_buf();
+    div()
+        .absolute()
+        .top(px(TILE_MENU_INSET))
+        .right(px(TILE_MENU_INSET))
+        .rounded(theme.radius)
+        .bg(theme.background)
+        .border_1()
+        .border_color(theme.border)
+        .when(!menu_open, |this| {
+            this.opacity(0.)
+                .group_hover(group, |style| style.opacity(1.))
+        })
+        .child(
+            Button::new(("recent-file-menu", ix))
+                .ghost()
+                .small()
+                .icon(IconName::Ellipsis)
+                // The menu opens on mouse down; the click must not reach the
+                // tile and open the file.
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
+                    tile_menu(menu, &menu_path, &menu_view, cx)
+                })
+                .on_open_change(move |open, _, cx| {
+                    let path = path.clone();
+                    view.update(cx, |dashboard, cx| {
+                        dashboard.menu_open = open.then_some(path);
+                        cx.notify();
+                    })
+                    .ok();
+                }),
+        )
+}
+
+/// A recent file's menu: Open, Rename…, then Delete (to the Trash).
+fn tile_menu(menu: PopupMenu, path: &Path, view: &WeakEntity<Dashboard>, cx: &App) -> PopupMenu {
+    let danger = cx.theme().danger;
+    let (open_path, rename_path, trash_path) =
+        (path.to_path_buf(), path.to_path_buf(), path.to_path_buf());
+    let view = view.clone();
+    menu.item(PopupMenuItem::new("Open").on_click(move |_, _, cx| {
+        let path = open_path.clone();
+        cx.defer(move |cx| AppState::open_path(path, cx));
+    }))
+    .item(
+        PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+            let (path, view) = (rename_path.clone(), view.clone());
+            // Once the menu has closed, so focus stays in the rename field.
+            window.defer(cx, move |window, cx| {
+                view.update(cx, |dashboard, cx| dashboard.begin_rename(path, window, cx))
+                    .ok();
+            });
+        }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::element(move |_, _| div().text_color(danger).child("Delete")).on_click(
+            move |_, window, cx| {
+                let path = trash_path.clone();
+                window.defer(cx, move |window, cx| AppState::trash_file(path, window, cx));
+            },
+        ),
+    )
 }
 
 /// A placeholder thumbnail: a regular grid of small dots.
@@ -278,7 +468,7 @@ fn status_bar(cx: &App) -> impl IntoElement {
 }
 
 /// The file name without its extension, as shown on a tile.
-fn file_stem(path: &Path) -> String {
+pub fn file_stem(path: &Path) -> String {
     path.file_stem()
         .or_else(|| path.file_name())
         .map(|name| name.to_string_lossy().into_owned())
