@@ -91,7 +91,7 @@ fn later(label: &'static str) -> MenuEntry {
     item(label, NotImplemented, false)
 }
 
-/// The File, Edit, View, Insert, Arrange and Help menus for `kind`.
+/// The File, Edit, View, Arrange and Help menus for `kind`.
 ///
 /// `include_quit` adds Quit to the end of File; the native menu leaves it out
 /// because macOS puts Quit in the application menu.
@@ -146,15 +146,6 @@ pub(crate) fn menus(kind: WindowKind, panels: PanelState, include_quit: bool) ->
                 ),
                 Separator,
                 item("Theme…", ToggleThemePicker, true),
-            ],
-        },
-        MenuSpec {
-            name: "Insert",
-            entries: vec![
-                later("Rectangle"),
-                later("Ellipse"),
-                later("Line"),
-                later("Text"),
             ],
         },
         MenuSpec {
@@ -328,7 +319,7 @@ mod tests {
             .iter()
             .map(|m| m.name)
             .collect();
-        assert_eq!(names, ["File", "Edit", "View", "Insert", "Arrange", "Help"]);
+        assert_eq!(names, ["File", "Edit", "View", "Arrange", "Help"]);
     }
 
     #[test]
@@ -336,7 +327,7 @@ mod tests {
         for kind in [WindowKind::Dashboard, WindowKind::Editor] {
             let unbuilt: Vec<_> = items(kind, true)
                 .into_iter()
-                .filter(|(menu, ..)| ["Edit", "Insert", "Arrange", "Help"].contains(menu))
+                .filter(|(menu, ..)| ["Edit", "Arrange", "Help"].contains(menu))
                 .collect();
             assert!(!unbuilt.is_empty());
             assert!(
@@ -386,15 +377,7 @@ mod tests {
         let names: Vec<_> = native.iter().map(|m| m.name.as_ref()).collect();
         assert_eq!(
             names,
-            [
-                "Mindweave",
-                "File",
-                "Edit",
-                "View",
-                "Insert",
-                "Arrange",
-                "Help"
-            ]
+            ["Mindweave", "File", "Edit", "View", "Arrange", "Help"]
         );
         let quits: Vec<_> = native
             .iter()
