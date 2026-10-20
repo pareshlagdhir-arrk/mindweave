@@ -3697,6 +3697,7 @@ dependencies = [
 name = "mindweave-core"
 version = "0.1.0"
 dependencies = [
+ "dirs 6.0.0",
  "serde",
  "serde_json",
  "tempfile",
