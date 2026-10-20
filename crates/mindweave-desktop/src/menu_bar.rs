@@ -199,20 +199,26 @@ fn native_menus_for(panels: PanelState) -> Vec<Menu> {
     native
 }
 
-/// The compact in-window menu bar. It is also the window's title bar: it
-/// leaves room for the traffic lights, drags the window, and shows `title`
-/// (when given) centred in the window.
+/// Whether the menus are drawn inside the window. On macOS they live only in
+/// the system menu bar.
+const IN_WINDOW_MENUS: bool = !cfg!(target_os = "macos");
+
+/// The window's title bar: it leaves room for the traffic lights, drags the
+/// window, and shows `title` (when given) centred in the window. Off macOS it
+/// also carries the compact menu bar.
 pub fn menu_bar(
     window_kind: WindowKind,
     title: Option<SharedString>,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
-    let menus = h_flex().h_full().items_center().gap(px(2.)).children(
-        menus(window_kind, PanelState::current(cx), true)
-            .into_iter()
-            .map(menu_button),
-    );
+    let menus = IN_WINDOW_MENUS.then(|| {
+        h_flex().h_full().items_center().gap(px(2.)).children(
+            menus(window_kind, PanelState::current(cx), true)
+                .into_iter()
+                .map(menu_button),
+        )
+    });
     // Equal flexible sides keep the title centred; the right side also
     // matches the traffic-light padding so the centre is the window's. When
     // the menus need more room the title moves right instead of overlapping.
@@ -220,7 +226,7 @@ pub fn menu_bar(
         .flex_1()
         .min_w_0()
         .h_full()
-        .child(h_flex().flex_1().h_full().child(menus))
+        .child(h_flex().flex_1().h_full().children(menus))
         .child(
             div()
                 .min_w_0()

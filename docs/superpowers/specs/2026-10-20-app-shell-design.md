@@ -24,7 +24,7 @@ This document covers only the first milestone: the **application shell**. Featur
    - An "Open…" action (menu + Cmd+O) opens an existing file via native open dialog.
    - Recent list persists between launches; entries whose file no longer exists are hidden or shown as missing.
 2. **Editor** shown when a file is open:
-   - **Menu bar** (File, Edit, View, Arrange, Help). Only items that work in this milestone are enabled (New, Open, Save, Close, theme, toggle sidebars, zoom); the rest may be present but disabled.
+   - **Menu bar** (File, Edit, View, Arrange, Help). On macOS the menus live only in the system menu bar; the window keeps a slim title bar (traffic lights, drag area, centred file name). Other platforms draw the menus in that title bar. Only items that work in this milestone are enabled (New, Open, Save, Close, theme, toggle sidebars, zoom); the rest may be present but disabled.
    - **Left sidebar — Layers**: list of layers for the current page; "+" adds a layer; each row has an eye toggle to show/hide; one layer is active (highlighted). Renaming by double-click is desirable.
    - **Centre — Infinite canvas**: pans (trackpad scroll / space+drag / middle-drag) and zooms (pinch / Cmd+scroll / Cmd+= / Cmd+-), draws its background pattern. No shapes yet.
    - **Page tabs** at the bottom of the canvas, spreadsheet-style: switch pages, "+" adds a page, rename by double-click. Each page has its own layers and viewport.
