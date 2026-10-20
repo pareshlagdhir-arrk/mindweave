@@ -133,6 +133,28 @@ pub fn press_kind(handle: Option<HandleHit>, shape: Option<Uuid>, shift: bool) -
     }
 }
 
+/// What a press at `p` starts, given the selection chrome (if anything is
+/// selected), the grab radius and rotate-handle offset in canvas units, and
+/// the shape hit there. Handles win, except that inside a selection
+/// smaller than two grab radii on both axes the shape body wins over its
+/// resize handles, so tiny shapes can still be moved.
+pub fn press_target(
+    chrome: Option<&Frame>,
+    p: Pt,
+    grab: f32,
+    rotate_offset: f32,
+    shape: Option<Uuid>,
+    shift: bool,
+) -> PressKind {
+    let handle = chrome.and_then(|f| handle_at(f, p, grab, rotate_offset));
+    let tiny = chrome.is_some_and(|f| f.w < 2. * grab && f.h < 2. * grab);
+    let handle = match handle {
+        Some(HandleHit::Resize(_)) if tiny && shape.is_some() => None,
+        h => h,
+    };
+    press_kind(handle, shape, shift)
+}
+
 /// The selection after pressing shape `hit`, and the selection to apply
 /// instead if the press ends as a click (no drag). An unselected shape is
 /// selected at once (Shift: added), so a drag moves it; on a selected
@@ -219,11 +241,27 @@ fn frame_centre(f: &Frame) -> Pt {
     (f.x + f.w / 2., f.y + f.h / 2.)
 }
 
+/// The resize handles shown on the chrome `frame`: an axis shorter than
+/// two grab radii (`grab` canvas units) has no edge-midpoint handles on it,
+/// so the middle of a flat line or a thin box is not a handle.
+pub fn visible_handles(frame: &Frame, grab: f32) -> Vec<(Handle, Pt)> {
+    let (thin_w, thin_h) = (frame.w < 2. * grab, frame.h < 2. * grab);
+    handle_positions(frame)
+        .into_iter()
+        .filter(|(h, _)| match h {
+            Handle::N | Handle::S => !thin_h,
+            Handle::E | Handle::W => !thin_w,
+            _ => true,
+        })
+        .collect()
+}
+
 /// The handle of the chrome `frame` nearest to `p` within `grab` canvas
-/// units; the rotate handle sits `rotate_offset` above the top edge.
+/// units (of [`visible_handles`]); the rotate handle sits `rotate_offset`
+/// above the top edge.
 pub fn handle_at(frame: &Frame, p: Pt, grab: f32, rotate_offset: f32) -> Option<HandleHit> {
     let dist = |q: Pt| (q.0 - p.0).hypot(q.1 - p.1);
-    handle_positions(frame)
+    visible_handles(frame, grab)
         .into_iter()
         .map(|(h, q)| (HandleHit::Resize(h), dist(q)))
         .chain([(
@@ -264,27 +302,14 @@ pub fn resize_cursor(handle: Handle, rotation: f32) -> CursorStyle {
 /// aspect ratio (resize) or snaps to 15° (rotate); Alt resizes from the
 /// centre. `None` for other gestures.
 pub fn transformed(gesture: &Gesture, p: Pt, shift: bool, alt: bool) -> Option<Originals> {
-    let (originals, frames) = match gesture {
-        Gesture::Moving { start, originals } => {
-            let frames: Vec<Frame> = originals.iter().map(|(_, f)| *f).collect();
-            (originals, translate(&frames, p.0 - start.0, p.1 - start.1))
+    let originals = gesture.originals()?;
+    let start_frames: Vec<Frame> = originals.iter().map(|(_, f)| *f).collect();
+    let frames = match gesture {
+        Gesture::Moving { start, .. } => translate(&start_frames, p.0 - start.0, p.1 - start.1),
+        Gesture::Resizing { handle, start, .. } => {
+            resize(&start_frames, *handle, *start, p, shift, alt)
         }
-        Gesture::Resizing {
-            handle,
-            start,
-            originals,
-        } => {
-            let frames: Vec<Frame> = originals.iter().map(|(_, f)| *f).collect();
-            (originals, resize(&frames, *handle, *start, p, shift, alt))
-        }
-        Gesture::Rotating {
-            center,
-            start,
-            originals,
-        } => {
-            let frames: Vec<Frame> = originals.iter().map(|(_, f)| *f).collect();
-            (originals, rotate(&frames, *center, *start, p, shift))
-        }
+        Gesture::Rotating { center, start, .. } => rotate(&start_frames, *center, *start, p, shift),
         _ => return None,
     };
     Some(originals.iter().map(|(id, _)| *id).zip(frames).collect())
@@ -376,6 +401,8 @@ impl EditorWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A gesture whose mouse-up was missed ends as it would have.
+        self.finish_gesture(None, modifiers, cx);
         let Tool::Shape { library, shape } = &self.tools.tool else {
             return;
         };
@@ -509,24 +536,21 @@ impl EditorWindow {
                 .map(|(_, f)| f)
                 .collect::<Vec<_>>(),
         );
-        let handle = chrome.and_then(|f| {
-            handle_at(
-                &f,
-                at,
-                HANDLE_GRAB_PX / zoom,
-                ROTATE_HANDLE_OFFSET_PX / zoom,
-            )
-        });
-        let shape = match handle {
-            Some(_) => None,
-            None => self.shape_at(at, cx),
-        };
+        let shape = self.shape_at(at, cx);
+        let kind = press_target(
+            chrome.as_ref(),
+            at,
+            HANDLE_GRAB_PX / zoom,
+            ROTATE_HANDLE_OFFSET_PX / zoom,
+            shape,
+            modifiers.shift,
+        );
         self.press = Press {
             dragged: false,
             on_click: None,
             last: at,
         };
-        self.gesture = match press_kind(handle, shape, modifiers.shift) {
+        self.gesture = match kind {
             PressKind::Marquee { additive } => Gesture::Marquee {
                 start: at,
                 current: at,
@@ -769,8 +793,8 @@ mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
         chrome_frame, handle_at, hit_shape, is_drag, is_line_like, marquee_rect, marquee_selection,
-        placement_frame, placement_shape, press_kind, press_selection, resize_cursor, transformed,
-        Gesture, HandleHit, PressKind,
+        placement_frame, placement_shape, press_kind, press_selection, press_target, resize_cursor,
+        transformed, visible_handles, Gesture, HandleHit, PressKind,
     };
     use gpui_kit::CursorStyle;
     use mindweave_core::geometry::Frame;
@@ -1165,5 +1189,60 @@ mod tests {
         let turned = transformed(&rotating, (31., 6.), true, false).unwrap();
         assert!(turned.iter().all(|(_, f)| f.rotation == 90.));
         assert!(transformed(&Gesture::Idle, (0., 0.), false, false).is_none());
+    }
+
+    #[test]
+    fn edge_handles_of_a_flat_or_thin_box_are_dropped() {
+        let flat = boxed(0., 50., 100., 0.);
+        let kept: Vec<Handle> = visible_handles(&flat, 6.).iter().map(|(h, _)| *h).collect();
+        assert!(!kept.contains(&Handle::N) && !kept.contains(&Handle::S));
+        assert!(kept.contains(&Handle::E) && kept.contains(&Handle::NE));
+        let thin = boxed(0., 0., 4., 100.);
+        let kept: Vec<Handle> = visible_handles(&thin, 6.).iter().map(|(h, _)| *h).collect();
+        assert!(!kept.contains(&Handle::E) && !kept.contains(&Handle::W));
+        assert!(kept.contains(&Handle::N));
+        assert_eq!(visible_handles(&boxed(0., 0., 100., 50.), 6.).len(), 8);
+        // Nothing to grab in the middle of a flat line.
+        assert_eq!(handle_at(&flat, (50., 50.), 6., 12.), None);
+    }
+
+    #[test]
+    fn pressing_the_middle_of_a_selected_flat_line_moves_it() {
+        let [line] = ids();
+        let flat = boxed(0., 50., 100., 0.);
+        assert_eq!(
+            press_target(Some(&flat), (50., 50.), 6., 12., Some(line), false),
+            PressKind::Move(line)
+        );
+        // Its ends still resize.
+        assert_eq!(
+            press_target(Some(&flat), (100., 50.), 6., 12., Some(line), false),
+            PressKind::Resize(Handle::NE)
+        );
+    }
+
+    #[test]
+    fn pressing_inside_a_tiny_selected_shape_moves_it() {
+        let [tiny] = ids();
+        let f = boxed(0., 0., 8., 8.);
+        assert_eq!(
+            press_target(Some(&f), (4., 4.), 6., 12., Some(tiny), false),
+            PressKind::Move(tiny)
+        );
+        // Outside the body a corner still resizes.
+        assert_eq!(
+            press_target(Some(&f), (10., 10.), 6., 12., None, false),
+            PressKind::Resize(Handle::SE)
+        );
+        // A larger shape keeps handles first.
+        let big = boxed(0., 0., 100., 100.);
+        assert_eq!(
+            press_target(Some(&big), (2., 2.), 6., 12., Some(tiny), false),
+            PressKind::Resize(Handle::NW)
+        );
+        assert_eq!(
+            press_target(None, (2., 2.), 6., 12., None, true),
+            PressKind::Marquee { additive: true }
+        );
     }
 }

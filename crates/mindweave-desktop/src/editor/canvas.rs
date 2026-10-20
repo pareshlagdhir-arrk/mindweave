@@ -10,7 +10,10 @@ use mindweave_core::{
     BackgroundPattern, CanvasSettings, Page, Viewport, ZOOM_STEP,
 };
 
-use super::interaction::{marquee_rect, Gesture, PREVIEW_OPACITY, ROTATE_HANDLE_OFFSET_PX};
+use super::interaction::{
+    marquee_rect, visible_handles, Gesture, HANDLE_GRAB_PX, PREVIEW_OPACITY,
+    ROTATE_HANDLE_OFFSET_PX,
+};
 use super::shape_paint::{paint_marquee, paint_preview, paint_selection, paint_shapes};
 use super::tool::Tool;
 use super::{hex_to_hsla, EditorWindow};
@@ -335,6 +338,7 @@ impl EditorWindow {
                 &viewport,
                 &chrome,
                 ROTATE_HANDLE_OFFSET_PX,
+                &visible_handles(&chrome, HANDLE_GRAB_PX / viewport.zoom),
                 accent,
             );
         }

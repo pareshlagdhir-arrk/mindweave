@@ -557,6 +557,36 @@ mod tests {
     }
 
     #[test]
+    fn a_gesture_put_back_as_it_was_leaves_no_undo_step() {
+        use crate::geometry::Frame;
+        use crate::library::{builtin_libraries, LibraryRegistry};
+        let (_dir, mut s) = new_session("cancel.mindweave");
+        let libs = LibraryRegistry::new(builtin_libraries(), None).0;
+        let def = libs.shape("basic-shapes", "rectangle").unwrap();
+        let frame = Frame {
+            w: 10.,
+            h: 10.,
+            ..Frame::default()
+        };
+        let shape = Shape::new(def, "basic-shapes", frame);
+        let id = shape.id;
+        s.add_shapes(vec![shape]);
+        s.save().unwrap();
+        let can_undo = s.can_undo();
+        let original = s.find_shape(id).unwrap().frame;
+
+        s.begin_gesture();
+        s.update_shapes(&[id], |sh| sh.frame.x += 25.);
+        assert!(s.is_dirty());
+        s.update_shapes(&[id], |sh| sh.frame = original);
+        s.end_gesture();
+
+        assert_eq!(s.can_undo(), can_undo);
+        assert!(!s.is_dirty());
+        assert_eq!(s.find_shape(id).unwrap().frame, original);
+    }
+
+    #[test]
     fn create_writes_file_and_is_clean() {
         let (_d, s) = new_session("a.mindweave");
         assert!(s.path.exists());

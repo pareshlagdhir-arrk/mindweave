@@ -19,7 +19,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::*;
-use mindweave_core::{format_hex_color, parse_hex_color, DocumentSession, Viewport};
+use mindweave_core::{format_hex_color, parse_hex_color, DocumentSession, Shape, Viewport};
 
 use crate::actions::{
     Cancel, CloseWindow, NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight,
@@ -220,12 +220,7 @@ impl EditorWindow {
         if self.selection.is_empty() {
             return;
         }
-        let active: HashSet<Uuid> = self
-            .session
-            .shapes_on_active_layer()
-            .iter()
-            .map(|s| s.id)
-            .collect();
+        let active = selectable_ids(self.session.shapes_on_active_layer());
         self.selection = pruned(
             std::mem::take(&mut self.selection),
             before,
@@ -526,8 +521,8 @@ impl EditorWindow {
 
 /// The selection after a session edit: empty when the active page or
 /// layer changed (`before` → `after`) or the active layer is hidden,
-/// otherwise `selection` without ids missing from the active layer
-/// (`active`), in its order.
+/// otherwise `selection` without ids missing from the active layer's
+/// selectable (unlocked) shapes `active`, in its order.
 fn pruned(
     mut selection: Vec<Uuid>,
     before: (Uuid, Uuid),
@@ -540,6 +535,12 @@ fn pruned(
     }
     selection.retain(|id| active.contains(id));
     selection
+}
+
+/// Ids of the shapes in `shapes` that can stay selected: the unlocked
+/// ones.
+fn selectable_ids(shapes: &[Shape]) -> HashSet<Uuid> {
+    shapes.iter().filter(|s| !s.locked).map(|s| s.id).collect()
 }
 
 /// Space with no modifiers.
@@ -699,9 +700,11 @@ mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
         hex_to_hsla, hsla_to_hex, is_plain_space, letter_spaced, panel_group_id, parse_number,
-        pruned, row_click, RowClick,
+        pruned, row_click, selectable_ids, RowClick,
     };
     use gpui_kit::Keystroke;
+    use mindweave_core::geometry::Frame;
+    use mindweave_core::{builtin_libraries, LibraryRegistry, Shape};
     use std::collections::HashSet;
     use uuid::Uuid;
 
@@ -721,6 +724,21 @@ mod tests {
         assert!(pruned(sel.clone(), scope, (other_page, layer), &active, true).is_empty());
         assert!(pruned(sel.clone(), scope, (page, other_layer), &active, true).is_empty());
         assert!(pruned(sel, scope, scope, &active, false).is_empty());
+    }
+
+    #[test]
+    fn locked_shapes_drop_out_of_the_selection() {
+        let libs = LibraryRegistry::new(builtin_libraries(), None).0;
+        let def = libs.shape("basic-shapes", "rectangle").unwrap();
+        let free = Shape::new(def, "basic-shapes", Frame::default());
+        let mut locked = Shape::new(def, "basic-shapes", Frame::default());
+        locked.locked = true;
+        let ids = selectable_ids(&[free.clone(), locked.clone()]);
+        let scope = (Uuid::new_v4(), Uuid::new_v4());
+        assert_eq!(
+            pruned(vec![locked.id, free.id], scope, scope, &ids, true),
+            vec![free.id]
+        );
     }
 
     #[test]

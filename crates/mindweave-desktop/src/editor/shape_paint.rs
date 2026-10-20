@@ -426,7 +426,7 @@ impl<'a> ShapePainter<'a> {
 }
 
 /// Paints the selection chrome on `chrome` (canvas coordinates): a 1px
-/// `accent` box, eight square handles and the rotate handle
+/// `accent` box, the square `resize_handles` and the rotate handle
 /// `rotate_offset` pixels above the top edge, all white with an accent
 /// border.
 pub fn paint_selection(
@@ -435,6 +435,7 @@ pub fn paint_selection(
     vp: &Viewport,
     chrome: &Frame,
     rotate_offset: f32,
+    resize_handles: &[(Handle, Pt)],
     accent: Hsla,
 ) {
     let to_window = |p: Pt| {
@@ -488,7 +489,7 @@ pub fn paint_selection(
                 BorderStyle::Solid,
             )
         };
-        for (_, p) in handles {
+        for &(_, p) in resize_handles {
             window.paint_quad(knob(to_window(p), 0.));
         }
         window.paint_quad(knob(rotate, half));
