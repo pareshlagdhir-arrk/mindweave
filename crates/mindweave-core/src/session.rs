@@ -47,6 +47,10 @@ fn normalize_page(page: &mut Page) {
     for color in [&mut c.background, &mut c.line_color, &mut c.dot_color] {
         *color = color.as_deref().and_then(normalize_hex_color);
     }
+    page.layers
+        .iter_mut()
+        .flat_map(|l| l.objects.iter_mut())
+        .for_each(|s| s.normalize());
     let v = &mut page.viewport;
     v.zoom = if v.zoom.is_finite() {
         v.zoom.clamp(ZOOM_MIN, ZOOM_MAX)
@@ -650,5 +654,33 @@ mod tests {
             (p.viewport.x, p.viewport.y, p.viewport.zoom),
             (0.0, 0.0, 1.0)
         );
+    }
+
+    #[test]
+    fn open_normalises_bad_shape_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mindweave");
+        let mut d = Document::new();
+        let def = crate::library::builtin_libraries()[0].shapes[0].clone();
+        let mut s = crate::shape::Shape::new(&def, "basic-shapes", Default::default());
+        s.frame.x = f32::NAN;
+        s.frame.w = -5.0;
+        s.frame.h = 10.0;
+        s.style.opacity = 7.0;
+        d.pages[0].layers[0].objects.push(s);
+        // JSON cannot hold NaN, so write through serde with it replaced by null-free value.
+        let mut v = serde_json::to_value(&d).unwrap();
+        v["pages"][0]["layers"][0]["objects"][0]["x"] = 5.into();
+        std::fs::write(&path, v.to_string()).unwrap();
+        let session = DocumentSession::open(path).unwrap();
+        let s = &session.page().layers[0].objects[0];
+        assert_eq!(s.frame.w, 1.0);
+        assert_eq!(s.style.opacity, 1.0);
+        assert!(!session.is_dirty());
+        let mut s = s.clone();
+        s.frame.x = f32::NAN;
+        s.frame.y = f32::INFINITY;
+        s.normalize();
+        assert_eq!((s.frame.x, s.frame.y), (0.0, 0.0));
     }
 }

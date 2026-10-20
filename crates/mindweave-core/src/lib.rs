@@ -8,6 +8,7 @@ pub mod geometry;
 pub mod library;
 pub mod session;
 pub mod settings;
+pub mod shape;
 pub mod svg;
 pub mod viewport;
 
@@ -24,6 +25,7 @@ pub use session::DocumentSession;
 pub use settings::{
     load_settings, save_settings, settings_path, AppSettings, RecentFile, WindowSize, MAX_RECENT,
 };
+pub use shape::{Shape, Style};
 pub use viewport::{
     dot_stride, grid_lines, is_major_line, pinch_zoom_factor, scroll_zoom_factor, stride_offset,
     GridLines, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP,

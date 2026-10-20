@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::document::Document;
 
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum FormatError {
@@ -35,6 +35,7 @@ pub fn load(path: &Path) -> Result<Document, FormatError> {
     if doc.pages.is_empty() || doc.pages.iter().any(|p| p.layers.is_empty()) {
         return Err(FormatError::Empty);
     }
+    doc.version = FORMAT_VERSION;
     if doc.active_page >= doc.pages.len() {
         doc.active_page = 0;
     }
@@ -66,7 +67,7 @@ mod tests {
     #[test]
     fn new_document_has_one_page_one_layer() {
         let d = Document::new();
-        assert_eq!(d.version, 1);
+        assert_eq!(d.version, 2);
         assert_eq!(d.pages.len(), 1);
         assert_eq!(d.pages[0].name, "Page 1");
         assert_eq!(d.pages[0].layers[0].name, "Layer 1");
@@ -103,17 +104,17 @@ mod tests {
         let s = fs::read_to_string(&path).unwrap();
         assert!(s.contains("\n  "));
         assert!(s.contains("\"pattern\": \"dots\""));
-        assert!(s.contains("\"version\": 1"));
+        assert!(s.contains("\"version\": 2"));
     }
 
     #[test]
     fn load_rejects_newer_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.mindweave");
-        fs::write(&path, r#"{"version":2,"pages":[],"active_page":0}"#).unwrap();
+        fs::write(&path, r#"{"version":3,"pages":[],"active_page":0}"#).unwrap();
         assert!(matches!(
             load(&path),
-            Err(FormatError::UnsupportedVersion(2))
+            Err(FormatError::UnsupportedVersion(3))
         ));
     }
 
@@ -191,5 +192,92 @@ mod tests {
         let l = load(&path).unwrap();
         assert_eq!(l.active_page, 0);
         assert_eq!(l.pages[0].active_layer, 0);
+    }
+
+    const SHAPE_DOC: &str = r##"{
+      "version": 2,
+      "pages": [{
+        "id": "6f1c1f5e-2f0a-4f43-9d5c-6a0f4c1d2e3f",
+        "name": "Page 1",
+        "canvas": { "pattern": "dots", "grid_size": 20.0 },
+        "viewport": { "x": 0.0, "y": 0.0, "zoom": 1.0 },
+        "layers": [{
+          "id": "0b6a2c1d-6c55-4e0e-8a83-0b3e8f1f9a10",
+          "name": "Layer 1",
+          "visible": true,
+          "objects": [{
+            "id": "1b6a2c1d-6c55-4e0e-8a83-0b3e8f1f9a11",
+            "library": "aws",
+            "shape": "ec2",
+            "x": 10.0, "y": 20.5, "w": 120.0, "h": 80.0,
+            "rotation": 0.0, "flip_x": false, "flip_y": false,
+            "style": { "fill": "#112233", "stroke": null, "stroke_width": 2.0, "opacity": 1.0 },
+            "params": { "glow": 3, "corner_radius": 4.5 },
+            "name": null,
+            "locked": false,
+            "future": { "a": [1, 2, { "b": null }] }
+          }]
+        }],
+        "active_layer": 0
+      }],
+      "active_page": 0
+    }"##;
+
+    fn objects_json(path: &std::path::Path) -> serde_json::Value {
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        v["pages"][0]["layers"][0]["objects"][0].clone()
+    }
+
+    #[test]
+    fn shape_roundtrip_preserves_unknown_fields_and_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (
+            dir.path().join("a.mindweave"),
+            dir.path().join("b.mindweave"),
+        );
+        fs::write(&a, SHAPE_DOC).unwrap();
+        let d = load(&a).unwrap();
+        let s = &d.pages[0].layers[0].objects[0];
+        assert_eq!(s.param("glow"), Some(3.0));
+        assert_eq!(s.frame.x, 10.0);
+        save(&d, &b).unwrap();
+        let out = objects_json(&b);
+        assert_eq!(out["future"], serde_json::json!({"a": [1, 2, {"b": null}]}));
+        assert_eq!(out["params"]["glow"], 3);
+        assert_eq!(out["params"]["corner_radius"], 4.5);
+    }
+
+    #[test]
+    fn missing_library_shape_survives_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (
+            dir.path().join("a.mindweave"),
+            dir.path().join("b.mindweave"),
+        );
+        fs::write(&a, SHAPE_DOC).unwrap();
+        save(&load(&a).unwrap(), &b).unwrap();
+        let before: serde_json::Value = serde_json::from_str(SHAPE_DOC).unwrap();
+        assert_eq!(
+            objects_json(&b),
+            before["pages"][0]["layers"][0]["objects"][0]
+        );
+    }
+
+    #[test]
+    fn v1_file_loads_and_saves_as_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (
+            dir.path().join("a.mindweave"),
+            dir.path().join("b.mindweave"),
+        );
+        let mut v: serde_json::Value = serde_json::from_str(SHAPE_DOC).unwrap();
+        v["version"] = 1.into();
+        v["pages"][0]["layers"][0]["objects"] = serde_json::json!([]);
+        fs::write(&a, v.to_string()).unwrap();
+        let d = load(&a).unwrap();
+        assert_eq!(d.version, 2);
+        save(&d, &b).unwrap();
+        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 2"));
     }
 }

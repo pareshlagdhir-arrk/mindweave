@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::format::FORMAT_VERSION;
+use crate::shape::Shape;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -82,9 +83,9 @@ pub struct Layer {
     pub id: Uuid,
     pub name: String,
     pub visible: bool,
-    /// Always empty for now; drawable objects are out of scope.
+    /// Shapes, back to front.
     #[serde(default)]
-    pub objects: Vec<serde_json::Value>,
+    pub objects: Vec<Shape>,
 }
 
 impl Layer {
