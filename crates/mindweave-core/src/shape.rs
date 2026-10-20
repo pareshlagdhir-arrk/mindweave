@@ -12,7 +12,8 @@ use crate::geometry::Frame;
 use crate::library::ShapeDef;
 
 const COORD_MAX: f32 = 1e9;
-const SIZE_MIN: f32 = 1.0;
+/// Zero is allowed: horizontal and vertical lines have no height or width.
+const SIZE_MIN: f32 = 0.0;
 const SIZE_MAX: f32 = 1e6;
 const STROKE_WIDTH_MAX: f32 = 100.0;
 
@@ -108,11 +109,11 @@ impl Shape {
     /// drops invalid colours.
     pub fn normalize(&mut self) {
         let f = &mut self.frame;
-        for (v, fallback) in [(&mut f.w, SIZE_MIN), (&mut f.h, SIZE_MIN)] {
+        for v in [&mut f.w, &mut f.h] {
             *v = if v.is_finite() {
                 v.clamp(SIZE_MIN, SIZE_MAX)
             } else {
-                fallback
+                0.0
             };
         }
         for v in [&mut f.x, &mut f.y] {

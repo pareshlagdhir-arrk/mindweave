@@ -872,7 +872,7 @@ mod tests {
         std::fs::write(&path, v.to_string()).unwrap();
         let session = DocumentSession::open(path).unwrap();
         let s = &session.page().layers[0].objects[0];
-        assert_eq!(s.frame.w, 1.0);
+        assert_eq!(s.frame.w, 0.0);
         assert_eq!(s.style.opacity, 1.0);
         assert!(!session.is_dirty());
         let mut s = s.clone();
@@ -880,6 +880,20 @@ mod tests {
         s.frame.y = f32::INFINITY;
         s.normalize();
         assert_eq!((s.frame.x, s.frame.y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn zero_height_line_survives_open() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let mut line = rect(0.0);
+        line.frame.h = 0.0;
+        let id = line.id;
+        s.add_shapes(vec![line]);
+        s.save().unwrap();
+        let r = DocumentSession::open(s.path.clone()).unwrap();
+        assert_eq!(r.find_shape(id).unwrap().frame.h, 0.0);
+        assert_eq!(r.find_shape(id).unwrap().frame.w, 10.0);
+        assert!(!r.is_dirty());
     }
 
     fn rect(x: f32) -> Shape {
