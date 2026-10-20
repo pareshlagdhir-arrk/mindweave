@@ -15,7 +15,7 @@ mod toolbar;
 use std::collections::HashSet;
 use std::future::Future;
 
-use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+use gpui_kit::component::input::{self, Escape, Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _};
@@ -585,20 +585,49 @@ impl EditorWindow {
         );
     }
 
-    /// Adds `shapes` to the active layer as one undo step and selects them.
-    fn add_and_select(&mut self, shapes: Vec<Shape>, cx: &mut Context<Self>) {
-        let selection = selectable_in_order(&shapes, self.session.active_layer_selectable());
+    /// Adds `shapes` to the active layer as one undo step and selects
+    /// them. A hidden active layer refuses them, as it refuses placing.
+    fn add_and_select(&mut self, shapes: Vec<Shape>, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.session.active_layer_selectable() {
+            window.push_notification(Notification::warning("Show the layer to draw on it."), cx);
+            return;
+        }
+        let selection = selectable_in_order(&shapes, true);
         self.update_session(|s| s.add_shapes(shapes), cx);
         self.selection = selection;
         cx.notify();
     }
 
+    /// Sends a text edit to the focused text field, if one has focus, and
+    /// returns whether it did. Its keys never reach the editor, but Edit
+    /// menu items do; they must edit the text, not the shapes. (gpui's
+    /// `MenuItem::os_action` does not help: macOS sends the selector back
+    /// to the app, which dispatches the same action.)
+    fn forward_to_text_field(
+        &self,
+        action: impl Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let typing = in_text_field(&window.context_stack());
+        if typing {
+            window.dispatch_action(Box::new(action), cx);
+        }
+        typing
+    }
+
     fn on_copy(&mut self, _: &actions::Copy, window: &mut Window, cx: &mut Context<Self>) {
+        if self.forward_to_text_field(input::Copy, window, cx) {
+            return;
+        }
         self.begin_edit_action(window, cx);
         self.copy_selection(cx);
     }
 
     fn on_cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.forward_to_text_field(input::Cut, window, cx) {
+            return;
+        }
         self.begin_edit_action(window, cx);
         if self.copy_selection(cx) {
             self.delete_selection(cx);
@@ -609,6 +638,9 @@ impl EditorWindow {
     /// layer: in place when that is in view, else centred in view.
     /// Clipboard text that is not a shapes payload is ignored.
     fn on_paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if self.forward_to_text_field(input::Paste, window, cx) {
+            return;
+        }
         self.begin_edit_action(window, cx);
         let Some(shapes) = cx
             .read_from_clipboard()
@@ -618,18 +650,21 @@ impl EditorWindow {
             return;
         };
         let shapes = prepare_paste(shapes, &self.visible_canvas());
-        self.add_and_select(shapes, cx);
+        self.add_and_select(shapes, window, cx);
     }
 
     fn on_duplicate(&mut self, _: &Duplicate, window: &mut Window, cx: &mut Context<Self>) {
         self.begin_edit_action(window, cx);
         let copies = duplicate(&self.selected_shapes());
         if !copies.is_empty() {
-            self.add_and_select(copies, cx);
+            self.add_and_select(copies, window, cx);
         }
     }
 
     fn on_delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.forward_to_text_field(input::Delete, window, cx) {
+            return;
+        }
         self.begin_edit_action(window, cx);
         self.delete_selection(cx);
     }
@@ -637,6 +672,9 @@ impl EditorWindow {
     /// Selects every unlocked shape of the active layer (none when it is
     /// hidden).
     fn on_select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
+        if self.forward_to_text_field(input::SelectAll, window, cx) {
+            return;
+        }
         self.begin_edit_action(window, cx);
         self.selection = selectable_in_order(
             self.session.shapes_on_active_layer(),
@@ -719,7 +757,13 @@ fn selectable_in_order(shapes: &[Shape], layer_visible: bool) -> Vec<Uuid> {
 /// Ids of the shapes in `shapes` that can stay selected: the unlocked
 /// ones.
 fn selectable_ids(shapes: &[Shape]) -> HashSet<Uuid> {
-    shapes.iter().filter(|s| !s.locked).map(|s| s.id).collect()
+    selectable_in_order(shapes, true).into_iter().collect()
+}
+
+/// Whether the focus, with key contexts `contexts` from the root down, is
+/// in a text field (gpui's `Input` context).
+fn in_text_field(contexts: &[KeyContext]) -> bool {
+    contexts.iter().any(|c| c.contains("Input"))
 }
 
 /// Space with no modifiers.
@@ -886,8 +930,8 @@ impl Render for EditorWindow {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        hex_to_hsla, hsla_to_hex, is_plain_space, letter_spaced, panel_group_id, parse_number,
-        pruned, row_click, selectable_ids, selectable_in_order, RowClick,
+        hex_to_hsla, hsla_to_hex, in_text_field, is_plain_space, letter_spaced, panel_group_id,
+        parse_number, pruned, row_click, selectable_ids, selectable_in_order, RowClick,
     };
     use gpui_kit::Keystroke;
     use mindweave_core::geometry::Frame;
@@ -938,6 +982,20 @@ mod tests {
         assert_eq!(selectable_in_order(&shapes, true), vec![a.id, b.id]);
         assert!(selectable_in_order(&shapes, false).is_empty());
         assert!(selectable_in_order(&[], true).is_empty());
+    }
+
+    #[test]
+    fn edit_menu_items_go_to_a_focused_text_field() {
+        use gpui_kit::KeyContext;
+        let stack = |names: &[&str]| -> Vec<KeyContext> {
+            names
+                .iter()
+                .map(|n| KeyContext::parse(n).unwrap())
+                .collect()
+        };
+        assert!(in_text_field(&stack(&["Root", "Editor", "Input"])));
+        assert!(!in_text_field(&stack(&["Root", "Editor"])));
+        assert!(!in_text_field(&[]));
     }
 
     #[test]

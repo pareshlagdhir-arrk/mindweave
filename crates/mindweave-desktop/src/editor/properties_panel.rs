@@ -94,15 +94,16 @@ impl NumberSetting {
     }
 }
 
-/// The value to apply from `text` typed into `setting`'s field, which
-/// showed `shows`: `None` when it is not a number or is still the text
-/// shown.
-fn typed_value(setting: NumberSetting, text: &str, shows: Option<f32>) -> Option<f32> {
-    let text = text.trim();
-    if shows.is_some_and(|v| setting.text(v) == text) {
+/// The value to apply from a number field holding `text`, given whether
+/// the user `typed` in it since it was last shown and the page's `stored`
+/// value: `None` unless typed, a number, and different from `stored`.
+/// Text that was only shown may be rounded, or belong to the page active
+/// when it was shown, so it is never written back.
+fn typed_value(text: &str, typed: bool, stored: f32) -> Option<f32> {
+    if !typed {
         return None;
     }
-    parse_number(text)
+    parse_number(text).filter(|v| *v != stored)
 }
 
 /// A typed major-line count as a whole, non-negative number (saturating).
@@ -187,6 +188,8 @@ struct NumberField {
     input: Entity<InputState>,
     /// The value the input currently shows.
     shows: Option<f32>,
+    /// The user has typed in the input since the value was shown.
+    typed: bool,
 }
 
 struct ColorField {
@@ -243,8 +246,22 @@ impl PropertyFields {
                     &input,
                     window,
                     move |this, _, event, window, cx| {
-                        if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                            this.commit_number(setting, window, cx);
+                        match event {
+                            // Showing a value sets it silently, so this is typing.
+                            InputEvent::Change => {
+                                if let Some(f) = this
+                                    .properties
+                                    .numbers
+                                    .iter_mut()
+                                    .find(|f| f.setting == setting)
+                                {
+                                    f.typed = true;
+                                }
+                            }
+                            InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                                this.commit_number(setting, window, cx);
+                            }
+                            _ => {}
                         }
                     },
                 ));
@@ -252,6 +269,7 @@ impl PropertyFields {
                     setting,
                     input,
                     shows: None,
+                    typed: false,
                 }
             })
             .collect();
@@ -343,8 +361,9 @@ impl EditorWindow {
         }
     }
 
-    /// Applies a number field on Enter or blur, unless its text is
-    /// unchanged; whatever happens, the field then shows the page's value.
+    /// Applies a number field on Enter or blur when the user typed a new
+    /// value (see [`typed_value`]); whatever happens, the field then shows
+    /// the page's value.
     fn commit_number(
         &mut self,
         setting: NumberSetting,
@@ -353,7 +372,8 @@ impl EditorWindow {
     ) {
         let field = self.properties.number(setting);
         let text = field.input.read(cx).value();
-        if let Some(value) = typed_value(setting, &text, field.shows) {
+        let stored = setting.value(&self.session.page().canvas);
+        if let Some(value) = typed_value(&text, field.typed, stored) {
             self.update_session(|s| setting.apply(s, value), cx);
         }
         self.show_number(setting, window, cx);
@@ -374,6 +394,7 @@ impl EditorWindow {
             input.set_value(setting.text(value), window, cx)
         });
         field.shows = Some(value);
+        field.typed = false;
     }
 
     /// Applies the number being typed, if any. Only a focused field can
@@ -626,16 +647,19 @@ mod tests {
     }
 
     #[test]
-    fn only_a_changed_number_is_applied() {
-        let grid = NumberSetting::GridSize;
-        assert_eq!(typed_value(grid, "30", Some(20.0)), Some(30.0));
-        assert_eq!(typed_value(grid, " 30 ", None), Some(30.0));
-        assert_eq!(typed_value(grid, "abc", Some(20.0)), None);
-        // The text shown for the stored value is not written back: it may
-        // be rounded, or belong to the page that was active when shown.
-        assert_eq!(typed_value(grid, "20", Some(20.0)), None);
-        assert_eq!(typed_value(grid, "13", Some(12.6)), None);
-        assert_eq!(typed_value(NumberSetting::DotSize, "1.5", Some(1.5)), None);
+    fn only_a_typed_change_is_applied() {
+        let typed = true;
+        assert_eq!(typed_value("30", typed, 20.0), Some(30.0));
+        assert_eq!(typed_value(" 30 ", typed, 20.0), Some(30.0));
+        assert_eq!(typed_value("abc", typed, 20.0), None);
+        // Typing the stored value changes nothing.
+        assert_eq!(typed_value("20", typed, 20.0), None);
+        // Typing what a rounded value shows applies it.
+        assert_eq!(typed_value("13", typed, 12.6), Some(13.0));
+        // Text only shown, not typed, is never written back: it may be
+        // rounded, or belong to the page that was active when shown.
+        assert_eq!(typed_value("13", !typed, 12.6), None);
+        assert_eq!(typed_value("20", !typed, 30.0), None);
     }
 
     #[test]
