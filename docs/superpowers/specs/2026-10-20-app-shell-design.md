@@ -29,8 +29,8 @@ This document covers only the first milestone: the **application shell**. Featur
    - **Centre — Infinite canvas**: pans (trackpad scroll / space+drag / middle-drag) and zooms (pinch / Cmd+scroll / Cmd+= / Cmd+-), draws its background pattern. No shapes yet.
    - **Page tabs** at the bottom of the canvas, spreadsheet-style: switch pages, "+" adds a page, rename by double-click. Each page has its own layers and viewport.
    - **Right sidebar — Properties**: in this milestone shows *Canvas* properties:
-     - **Background pattern**: Lines / Dots / None.
-     - **Grid size** (px, numeric input; hidden when pattern is None).
+     - **Background** colour (swatch + hex, reset to theme), always shown.
+     - **Background pattern** dropdown: Lines / Dots / None, with settings for the chosen pattern — Lines: grid size, line colour, major line every N cells (0 = off); Dots: spacing, dot size, dot colour; None: nothing more. All per page and saved in the file.
      - Leave a clearly separated, empty "Selection" area — later it will show selected-object properties.
    - **Status bar**: current page (e.g. "Page 1 of 3"), active layer, cursor canvas coordinates, zoom %, and a theme selector.
    - Both sidebars can be toggled (View menu + shortcuts) as in Zed.

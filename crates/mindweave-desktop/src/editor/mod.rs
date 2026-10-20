@@ -14,7 +14,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::*;
-use mindweave_core::DocumentSession;
+use mindweave_core::{format_hex_color, parse_hex_color, DocumentSession};
 
 use crate::actions::{CloseWindow, Save, ToggleLayers, ToggleProperties};
 use crate::app_state::AppState;
@@ -115,9 +115,7 @@ pub struct EditorWindow {
     /// The pointer position at the last step of a pan drag in progress.
     pan_drag: Option<Point<Pixels>>,
     rename: Option<Rename>,
-    grid_input: Entity<InputState>,
-    /// The grid size the grid-size input currently shows.
-    grid_input_shows: Option<f32>,
+    properties: properties_panel::PropertyFields,
     /// The title last given to the window.
     window_title: String,
     _subscriptions: Vec<Subscription>,
@@ -127,15 +125,11 @@ impl EditorWindow {
     pub fn new(session: DocumentSession, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        let grid_input = cx.new(|cx| InputState::new(window, cx));
-        let _subscriptions = vec![
+        let (properties, mut _subscriptions) =
+            properties_panel::PropertyFields::new(session.page().canvas.pattern, window, cx);
+        _subscriptions.extend([
             // Panel visibility and the theme name live in the settings.
             cx.observe_global::<AppState>(|_, cx| cx.notify()),
-            cx.subscribe_in(&grid_input, window, |this, _, event, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                    this.commit_grid_size(window, cx);
-                }
-            }),
             // A Space released while the window is inactive or the editor
             // is unfocused never reaches `on_key_up`; forget it instead.
             cx.observe_window_activation(window, |this, window, cx| {
@@ -144,7 +138,7 @@ impl EditorWindow {
                 }
             }),
             cx.on_blur(&focus_handle, window, |this, _, cx| this.release_space(cx)),
-        ];
+        ]);
         let window_title = session.title();
         Self {
             session,
@@ -155,8 +149,7 @@ impl EditorWindow {
             space_held: false,
             pan_drag: None,
             rename: None,
-            grid_input,
-            grid_input_shows: None,
+            properties,
             window_title,
             _subscriptions,
         }
@@ -232,7 +225,7 @@ impl EditorWindow {
     }
 
     /// Applies edits that otherwise wait for Enter or blur: an open rename
-    /// and a grid size being typed. Save, Close and Quit call this first so
+    /// and a Properties number being typed. Save, Close and Quit call this first so
     /// keyboard shortcuts do not skip them.
     pub fn commit_pending_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.rename.is_some() {
@@ -240,12 +233,7 @@ impl EditorWindow {
             // The rename field is gone; keep keyboard shortcuts working.
             self.focus_handle.focus(window, cx);
         }
-        // Only a focused grid-size input can hold an unapplied value; an
-        // unfocused one shows the page's size rounded, which must not be
-        // written back.
-        if self.grid_input.read(cx).focus_handle(cx).is_focused(window) {
-            self.commit_grid_size(window, cx);
-        }
+        self.commit_focused_number(window, cx);
     }
 
     /// Starts an inline rename of `target` with its current name selected.
@@ -351,25 +339,6 @@ impl EditorWindow {
         self.refresh_cursor(cx);
     }
 
-    /// Applies the grid-size input on Enter or blur; whatever happens, the
-    /// input then shows the page's grid size.
-    fn commit_grid_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.grid_input.read(cx).value().to_string();
-        if let Some(size) = parse_grid_size(&text) {
-            self.update_session(|s| s.set_grid_size(size), cx);
-        }
-        self.show_grid_size(window, cx);
-    }
-
-    /// Puts the active page's grid size in the grid-size input.
-    fn show_grid_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let size = self.session.page().canvas.grid_size;
-        self.grid_input.update(cx, |input, cx| {
-            input.set_value(format_grid_size(size), window, cx)
-        });
-        self.grid_input_shows = Some(size);
-    }
-
     /// Gives the window the document's title, and shows the unsaved-changes
     /// dot in its close button while the document is dirty.
     fn sync_window_title(&mut self, window: &mut Window) {
@@ -445,15 +414,23 @@ fn close(window: &mut Window, cx: &mut App) {
     window.remove_window();
 }
 
-/// The grid size typed into the Properties panel, or `None` when it is not
-/// a number.
-pub(crate) fn parse_grid_size(text: &str) -> Option<f32> {
-    text.trim().parse::<f32>().ok()
+/// A number typed into the Properties panel, or `None` when it is not a
+/// finite number.
+pub(crate) fn parse_number(text: &str) -> Option<f32> {
+    text.trim().parse::<f32>().ok().filter(|n| n.is_finite())
 }
 
-/// A grid size as shown in the Properties panel (whole pixels).
-pub(crate) fn format_grid_size(size: f32) -> String {
-    format!("{}", size.round() as i64)
+/// An opaque colour for a `#RRGGBB` string.
+pub(crate) fn hex_to_hsla(hex: &str) -> Option<Hsla> {
+    let (r, g, b) = parse_hex_color(hex)?;
+    Some(rgb(u32::from_be_bytes([0, r, g, b])).into())
+}
+
+/// `color` as an uppercase `#RRGGBB` string; alpha is dropped.
+pub(crate) fn hsla_to_hex(color: Hsla) -> String {
+    let c = Rgba::from(color);
+    let channel = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+    format_hex_color((channel(c.r), channel(c.g), channel(c.b)))
 }
 
 /// `text` with hair spaces between its characters, standing in for letter
@@ -491,12 +468,7 @@ impl Focusable for EditorWindow {
 impl Render for EditorWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_window_title(window);
-        let grid_size = self.session.page().canvas.grid_size;
-        if self.grid_input_shows != Some(grid_size)
-            && !self.grid_input.read(cx).focus_handle(cx).is_focused(window)
-        {
-            self.show_grid_size(window, cx);
-        }
+        self.sync_properties(window, cx);
 
         let (show_layers, show_properties) = {
             let settings = &cx.global::<AppState>().settings;
@@ -562,7 +534,7 @@ impl Render for EditorWindow {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        format_grid_size, is_plain_space, letter_spaced, panel_group_id, parse_grid_size,
+        hex_to_hsla, hsla_to_hex, is_plain_space, letter_spaced, panel_group_id, parse_number,
         row_click, RowClick,
     };
     use gpui_kit::Keystroke;
@@ -586,25 +558,29 @@ mod tests {
     }
 
     #[test]
-    fn grid_size_parses_trimmed_numbers() {
-        assert_eq!(parse_grid_size("20"), Some(20.0));
-        assert_eq!(parse_grid_size("  12.5 "), Some(12.5));
-        assert_eq!(parse_grid_size("0"), Some(0.0));
-        assert_eq!(parse_grid_size("-3"), Some(-3.0));
+    fn numbers_parse_trimmed() {
+        assert_eq!(parse_number("20"), Some(20.0));
+        assert_eq!(parse_number("  12.5 "), Some(12.5));
+        assert_eq!(parse_number("0"), Some(0.0));
+        assert_eq!(parse_number("-3"), Some(-3.0));
     }
 
     #[test]
-    fn grid_size_rejects_non_numbers() {
-        assert_eq!(parse_grid_size("abc"), None);
-        assert_eq!(parse_grid_size(""), None);
-        assert_eq!(parse_grid_size("20px"), None);
+    fn non_numbers_and_non_finite_numbers_are_rejected() {
+        for bad in ["abc", "", "20px", "NaN", "inf", "-inf"] {
+            assert_eq!(parse_number(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
-    fn grid_size_is_shown_in_whole_pixels() {
-        assert_eq!(format_grid_size(20.0), "20");
-        assert_eq!(format_grid_size(4.0), "4");
-        assert_eq!(format_grid_size(12.6), "13");
+    fn hex_colours_convert_to_and_from_hsla() {
+        for hex in ["#000000", "#FFFFFF", "#FF8000", "#1A2B3C", "#808080"] {
+            let hsla = hex_to_hsla(hex).unwrap();
+            assert_eq!(hsla.a, 1.0);
+            assert_eq!(hsla_to_hex(hsla), hex);
+        }
+        assert_eq!(hex_to_hsla("ff8000"), hex_to_hsla("#FF8000"));
+        assert_eq!(hex_to_hsla("nope"), None);
     }
 
     #[test]

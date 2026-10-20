@@ -4,23 +4,22 @@
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use mindweave_core::{
-    dot_stride, grid_lines, pinch_zoom_factor, scroll_zoom_factor, stride_offset,
-    BackgroundPattern, Page, Viewport, ZOOM_STEP,
+    dot_stride, grid_lines, is_major_line, pinch_zoom_factor, scroll_zoom_factor, stride_offset,
+    BackgroundPattern, CanvasSettings, Page, Viewport, ZOOM_STEP,
 };
 
-use super::EditorWindow;
+use super::{hex_to_hsla, EditorWindow};
 use crate::actions::{ZoomIn, ZoomOut, ZoomReset};
 
-/// Side of a dot in the Dots pattern, in pixels.
-const DOT_SIZE: f32 = 1.5;
+/// Width of a major grid line, in pixels (other lines are 1px).
+const MAJOR_LINE_WIDTH: f32 = 2.;
 /// Most dots painted in one frame; denser patterns skip lines (see
 /// [`dot_stride`]).
 const MAX_DOTS: usize = 40_000;
 
 /// The canvas element for `page`, filling its bounds.
 pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
-    let pattern = page.canvas.pattern;
-    let grid_size = page.canvas.grid_size;
+    let settings = page.canvas.clone();
     let viewport = page.viewport;
     let prepaint_editor = editor.clone();
     gpui_kit::canvas(
@@ -29,7 +28,7 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
             window.insert_hitbox(bounds, HitboxBehavior::Normal)
         },
         move |bounds, hitbox, window, cx| {
-            paint_background(bounds, pattern, grid_size, &viewport, window, cx);
+            paint_background(bounds, &settings, &viewport, window, cx);
             let (dragging, space_held) = {
                 let editor = editor.read(cx);
                 (editor.pan_drag.is_some(), editor.space_held)
@@ -47,41 +46,57 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
 
 fn paint_background(
     bounds: Bounds<Pixels>,
-    pattern: BackgroundPattern,
-    grid_size: f32,
+    settings: &CanvasSettings,
     viewport: &Viewport,
     window: &mut Window,
     cx: &mut App,
 ) {
     let theme = cx.theme();
-    window.paint_quad(fill(bounds, theme.background));
+    let color = |hex: &Option<String>, theme_color: Hsla| {
+        hex.as_deref().and_then(hex_to_hsla).unwrap_or(theme_color)
+    };
+    window.paint_quad(fill(bounds, color(&settings.background, theme.background)));
+    let pattern = settings.pattern;
     if pattern == BackgroundPattern::None {
         return;
     }
     let extent = (f32::from(bounds.size.width), f32::from(bounds.size.height));
-    let grid = grid_lines(viewport, extent, grid_size);
-    let color = theme.border.opacity(grid.alpha);
+    let grid = grid_lines(viewport, extent, settings.grid_size);
     let origin = bounds.origin;
     window.with_content_mask(Some(ContentMask { bounds }), |window| match pattern {
         BackgroundPattern::Lines => {
-            for &x in &grid.xs {
-                let line = Bounds::new(
-                    point(origin.x + px(x), origin.y),
-                    size(px(1.), bounds.size.height),
+            let base = color(&settings.line_color, theme.border);
+            let minor = base.opacity(grid.alpha);
+            // Major lines: full opacity and wider, centred on the grid line.
+            let line = |ix: i64| {
+                if is_major_line(ix, grid.cells_per_line, settings.major_every) {
+                    (base, MAJOR_LINE_WIDTH)
+                } else {
+                    (minor, 1.)
+                }
+            };
+            for (k, &x) in grid.xs.iter().enumerate() {
+                let (color, width) = line(grid.first_ix.0 + k as i64);
+                let quad = Bounds::new(
+                    point(origin.x + px(x - (width - 1.) / 2.), origin.y),
+                    size(px(width), bounds.size.height),
                 );
-                window.paint_quad(fill(line, color));
+                window.paint_quad(fill(quad, color));
             }
-            for &y in &grid.ys {
-                let line = Bounds::new(
-                    point(origin.x, origin.y + px(y)),
-                    size(bounds.size.width, px(1.)),
+            for (k, &y) in grid.ys.iter().enumerate() {
+                let (color, width) = line(grid.first_ix.1 + k as i64);
+                let quad = Bounds::new(
+                    point(origin.x, origin.y + px(y - (width - 1.) / 2.)),
+                    size(bounds.size.width, px(width)),
                 );
-                window.paint_quad(fill(line, color));
+                window.paint_quad(fill(quad, color));
             }
         }
         BackgroundPattern::Dots => {
+            let color = color(&settings.dot_color, theme.border).opacity(grid.alpha);
+            let dot_size = settings.dot_size;
             let stride = dot_stride(grid.xs.len(), grid.ys.len(), MAX_DOTS);
-            let half = DOT_SIZE / 2.;
+            let half = dot_size / 2.;
             // Anchor the thinning to canvas grid indices so the kept dots
             // stay on the same canvas points while panning.
             let skip_x = stride_offset(grid.first_ix.0, stride);
@@ -90,7 +105,7 @@ fn paint_background(
                 for &x in grid.xs.iter().skip(skip_x).step_by(stride) {
                     let dot = Bounds::new(
                         point(origin.x + px(x - half), origin.y + px(y - half)),
-                        size(px(DOT_SIZE), px(DOT_SIZE)),
+                        size(px(dot_size), px(dot_size)),
                     );
                     window.paint_quad(fill(dot, color));
                 }
