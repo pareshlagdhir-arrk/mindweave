@@ -1,6 +1,7 @@
 //! The editor window for one document: Layers panel, canvas, page tabs,
 //! Properties panel and status bar.
 
+mod canvas;
 mod layers_panel;
 mod page_tabs;
 mod properties_panel;
@@ -102,6 +103,14 @@ pub struct EditorWindow {
     /// pointer is off the canvas.
     cursor_canvas: Option<(f32, f32)>,
     focus_handle: FocusHandle,
+    /// The canvas's bounds when it was last painted; zoom actions anchor on
+    /// its centre.
+    canvas_bounds: Option<Bounds<Pixels>>,
+    /// Whether Space is held down while the editor has focus (left drag
+    /// then pans).
+    space_held: bool,
+    /// The pointer position at the last step of a pan drag in progress.
+    pan_drag: Option<Point<Pixels>>,
     rename: Option<Rename>,
     grid_input: Entity<InputState>,
     /// The grid size the grid-size input currently shows.
@@ -130,6 +139,9 @@ impl EditorWindow {
             session,
             cursor_canvas: None,
             focus_handle,
+            canvas_bounds: None,
+            space_held: false,
+            pan_drag: None,
             rename: None,
             grid_input,
             grid_input_shows: None,
@@ -151,7 +163,6 @@ impl EditorWindow {
 
     /// Sets the pointer position shown in the status bar, in canvas
     /// coordinates; `None` hides it.
-    #[allow(dead_code)] // Called by the canvas, which is not built yet.
     pub fn set_cursor(&mut self, p: Option<(f32, f32)>, cx: &mut Context<Self>) {
         if self.cursor_canvas != p {
             self.cursor_canvas = p;
@@ -353,10 +364,36 @@ impl EditorWindow {
         AppState::update_settings(cx, |s| s.show_properties = !s.show_properties);
     }
 
-    /// The canvas area. Task 10 replaces this with the drawing canvas.
-    fn render_canvas(&self, cx: &App) -> impl IntoElement {
-        div().flex_1().min_h_0().bg(cx.theme().background)
+    /// Space held over a focused editor turns left drags into pans.
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if is_plain_space(&event.keystroke)
+            && !self.space_held
+            && self.focus_handle.is_focused(window)
+        {
+            self.space_held = true;
+            cx.notify();
+        }
     }
+
+    fn on_key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key == "space" && self.space_held {
+            self.space_held = false;
+            cx.notify();
+        }
+    }
+
+    /// The canvas area.
+    fn render_canvas(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            .child(canvas::canvas(cx.entity(), self.session.page()))
+    }
+}
+
+/// Space with no modifiers.
+fn is_plain_space(keystroke: &Keystroke) -> bool {
+    keystroke.key == "space" && !keystroke.modifiers.modified()
 }
 
 fn close(window: &mut Window, cx: &mut App) {
@@ -459,6 +496,11 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_close_window))
             .on_action(cx.listener(Self::on_toggle_layers))
             .on_action(cx.listener(Self::on_toggle_properties))
+            .on_action(cx.listener(Self::on_zoom_in))
+            .on_action(cx.listener(Self::on_zoom_out))
+            .on_action(cx.listener(Self::on_zoom_reset))
+            .on_key_down(cx.listener(Self::on_key_down))
+            .on_key_up(cx.listener(Self::on_key_up))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .text_size(px(TEXT_SIZE))
@@ -472,8 +514,19 @@ impl Render for EditorWindow {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        format_grid_size, letter_spaced, panel_group_id, parse_grid_size, row_click, RowClick,
+        format_grid_size, is_plain_space, letter_spaced, panel_group_id, parse_grid_size,
+        row_click, RowClick,
     };
+    use gpui_kit::Keystroke;
+
+    #[test]
+    fn only_unmodified_space_arms_panning() {
+        let key = |s: &str| Keystroke::parse(s).unwrap();
+        assert!(is_plain_space(&key("space")));
+        assert!(!is_plain_space(&key("cmd-space")));
+        assert!(!is_plain_space(&key("shift-space")));
+        assert!(!is_plain_space(&key("a")));
+    }
 
     #[test]
     fn row_clicks_activate_rename_or_leave_an_open_rename_alone() {

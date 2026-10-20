@@ -32,15 +32,24 @@ impl Viewport {
     /// Multiplies zoom by `factor` (clamped), keeping the canvas point under
     /// `screen_anchor` fixed on screen.
     pub fn zoom_at(&mut self, factor: f32, screen_anchor: (f32, f32)) {
-        if !factor.is_finite()
-            || factor <= 0.0
+        if !factor.is_finite() || factor <= 0.0 {
+            return;
+        }
+        self.zoom_to(self.zoom * factor, screen_anchor);
+    }
+
+    /// Sets zoom to `zoom` (clamped), keeping the canvas point under
+    /// `screen_anchor` fixed on screen. Invalid input is ignored.
+    pub fn zoom_to(&mut self, zoom: f32, screen_anchor: (f32, f32)) {
+        if !zoom.is_finite()
+            || zoom <= 0.0
             || !screen_anchor.0.is_finite()
             || !screen_anchor.1.is_finite()
         {
             return;
         }
         let anchor = self.screen_to_canvas(screen_anchor);
-        self.zoom = (self.zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+        self.zoom = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
         self.x = anchor.0 - screen_anchor.0 / self.zoom;
         self.y = anchor.1 - screen_anchor.1 / self.zoom;
     }
@@ -109,6 +118,41 @@ pub fn grid_lines(vp: &Viewport, size: (f32, f32), grid_size: f32) -> GridLines 
         spacing_px,
         alpha,
     }
+}
+
+/// Smallest and largest zoom factor a single scroll or pinch event applies.
+const EVENT_ZOOM_MIN: f32 = 0.5;
+const EVENT_ZOOM_MAX: f32 = 2.0;
+
+fn event_zoom_factor(fraction: f32) -> f32 {
+    if fraction.is_nan() {
+        return 1.0;
+    }
+    (1.0 + fraction).clamp(EVENT_ZOOM_MIN, EVENT_ZOOM_MAX)
+}
+
+/// Zoom factor for a Cmd+scroll of `dy` screen pixels: 1% per pixel,
+/// clamped to [0.5, 2.0]. NaN gives 1.0 (no change).
+pub fn scroll_zoom_factor(dy: f32) -> f32 {
+    event_zoom_factor(dy * 0.01)
+}
+
+/// Zoom factor for a trackpad pinch whose magnification is `delta`
+/// (0.1 = 10% larger), clamped to [0.5, 2.0]. NaN gives 1.0.
+pub fn pinch_zoom_factor(delta: f32) -> f32 {
+    event_zoom_factor(delta)
+}
+
+/// How many grid lines to step per dot so that a dot pattern of `nx` x `ny`
+/// intersections draws at most `max_dots` dots: 1 when it already fits,
+/// otherwise the smallest power of two that fits (or that leaves one dot).
+pub fn dot_stride(nx: usize, ny: usize, max_dots: usize) -> usize {
+    let longest = nx.max(ny).max(1);
+    let mut stride = 1usize;
+    while nx.div_ceil(stride).saturating_mul(ny.div_ceil(stride)) > max_dots && stride < longest {
+        stride *= 2;
+    }
+    stride
 }
 
 #[cfg(test)]
@@ -224,7 +268,83 @@ mod tests {
     }
 
     #[test]
+    fn zoom_to_is_exact_and_keeps_anchor_fixed() {
+        let mut v = vp(30.0, 10.0, 1.25 * 1.25 * 1.25);
+        let before = v.screen_to_canvas((300.0, 200.0));
+        v.zoom_to(1.0, (300.0, 200.0));
+        assert_eq!(v.zoom, 1.0);
+        let after = v.screen_to_canvas((300.0, 200.0));
+        assert!((before.0 - after.0).abs() < 1e-3 && (before.1 - after.1).abs() < 1e-3);
+    }
+
+    #[test]
+    fn zoom_to_clamps_and_ignores_invalid_input() {
+        let mut v = vp(3.0, 4.0, 1.5);
+        for (z, a) in [
+            (f32::NAN, (0.0, 0.0)),
+            (0.0, (0.0, 0.0)),
+            (-1.0, (0.0, 0.0)),
+            (2.0, (f32::NAN, 0.0)),
+        ] {
+            v.zoom_to(z, a);
+            assert_eq!(v, vp(3.0, 4.0, 1.5));
+        }
+        v.zoom_to(50.0, (0.0, 0.0));
+        assert_eq!(v.zoom, ZOOM_MAX);
+    }
+
+    #[test]
     fn zoom_percent_rounds() {
         assert_eq!(vp(0.0, 0.0, 1.255).zoom_percent(), 126);
+    }
+
+    #[test]
+    fn scroll_zoom_factor_is_one_percent_per_pixel() {
+        assert!((scroll_zoom_factor(0.0) - 1.0).abs() < 1e-6);
+        assert!((scroll_zoom_factor(10.0) - 1.1).abs() < 1e-6);
+        assert!((scroll_zoom_factor(-10.0) - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scroll_zoom_factor_is_clamped() {
+        assert_eq!(scroll_zoom_factor(500.0), 2.0);
+        assert_eq!(scroll_zoom_factor(-500.0), 0.5);
+        assert_eq!(scroll_zoom_factor(f32::INFINITY), 2.0);
+        assert_eq!(scroll_zoom_factor(f32::NEG_INFINITY), 0.5);
+    }
+
+    #[test]
+    fn scroll_zoom_factor_ignores_nan() {
+        assert_eq!(scroll_zoom_factor(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn pinch_zoom_factor_uses_magnification_directly() {
+        assert!((pinch_zoom_factor(0.1) - 1.1).abs() < 1e-6);
+        assert!((pinch_zoom_factor(-0.1) - 0.9).abs() < 1e-6);
+        assert_eq!(pinch_zoom_factor(5.0), 2.0);
+        assert_eq!(pinch_zoom_factor(-5.0), 0.5);
+        assert_eq!(pinch_zoom_factor(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn dot_stride_is_one_when_under_the_cap() {
+        assert_eq!(dot_stride(100, 100, 40_000), 1);
+        assert_eq!(dot_stride(200, 200, 40_000), 1);
+        assert_eq!(dot_stride(0, 0, 40_000), 1);
+    }
+
+    #[test]
+    fn dot_stride_doubles_until_dots_fit() {
+        // 500 x 375 = 187_500 dots; every 2nd: 250 x 188 = 47_000; every 4th: 125 x 94.
+        assert_eq!(dot_stride(500, 375, 40_000), 4);
+        let s = dot_stride(10_000, 10_000, 40_000);
+        assert!(10_000usize.div_ceil(s).pow(2) <= 40_000);
+        assert!(10_000usize.div_ceil(s / 2).pow(2) > 40_000);
+    }
+
+    #[test]
+    fn dot_stride_survives_a_zero_cap() {
+        assert!(dot_stride(10, 10, 0) >= 1);
     }
 }
