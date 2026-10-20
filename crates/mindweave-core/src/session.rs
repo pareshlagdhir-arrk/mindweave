@@ -2,12 +2,16 @@
 
 use std::path::PathBuf;
 
-use crate::document::{BackgroundPattern, Document, Layer, Page, Viewport};
+use crate::color::normalize_hex_color;
+use crate::document::{BackgroundPattern, Document, Layer, Page, Viewport, DEFAULT_DOT_SIZE};
 use crate::format::{self, FormatError};
 pub use crate::viewport::{ZOOM_MAX, ZOOM_MIN};
 
 pub const GRID_MIN: f32 = 4.0;
 pub const GRID_MAX: f32 = 200.0;
+pub const MAJOR_EVERY_MAX: u32 = 20;
+pub const DOT_SIZE_MIN: f32 = 1.0;
+pub const DOT_SIZE_MAX: f32 = 6.0;
 
 const DEFAULT_GRID: f32 = 20.0;
 
@@ -30,6 +34,16 @@ fn normalize_page(page: &mut Page) {
     } else {
         DEFAULT_GRID
     };
+    let c = &mut page.canvas;
+    c.major_every = c.major_every.min(MAJOR_EVERY_MAX);
+    c.dot_size = if c.dot_size.is_finite() {
+        clamp_dot_size(c.dot_size)
+    } else {
+        DEFAULT_DOT_SIZE
+    };
+    for color in [&mut c.background, &mut c.line_color, &mut c.dot_color] {
+        *color = color.as_deref().and_then(normalize_hex_color);
+    }
     let v = &mut page.viewport;
     v.zoom = if v.zoom.is_finite() {
         v.zoom.clamp(ZOOM_MIN, ZOOM_MAX)
@@ -42,6 +56,29 @@ fn normalize_page(page: &mut Page) {
     if !v.y.is_finite() {
         v.y = 0.0;
     }
+}
+
+/// Rounds to the nearest half pixel and clamps to
+/// `DOT_SIZE_MIN..=DOT_SIZE_MAX`.
+fn clamp_dot_size(px: f32) -> f32 {
+    ((px * 2.0).round() / 2.0).clamp(DOT_SIZE_MIN, DOT_SIZE_MAX)
+}
+
+/// Sets `slot` to `value` normalised (`None` resets to the theme colour).
+/// Returns whether it changed; an unparsable colour changes nothing.
+fn set_color(slot: &mut Option<String>, value: Option<&str>) -> bool {
+    let value = match value {
+        Some(text) => match normalize_hex_color(text) {
+            Some(hex) => Some(hex),
+            None => return false,
+        },
+        None => None,
+    };
+    if *slot == value {
+        return false;
+    }
+    *slot = value;
+    true
 }
 
 /// Smallest `N >= 1` such that `"{prefix} N"` is not among `names`.
@@ -182,6 +219,49 @@ impl DocumentSession {
         }
     }
 
+    /// Canvas fill colour (`#RRGGBB`); `None` uses the theme background.
+    /// An unparsable colour is ignored.
+    pub fn set_background(&mut self, color: Option<&str>) {
+        self.dirty |= set_color(&mut self.page_mut().canvas.background, color);
+    }
+
+    /// Lines colour (`#RRGGBB`); `None` uses the theme border colour.
+    /// An unparsable colour is ignored.
+    pub fn set_line_color(&mut self, color: Option<&str>) {
+        self.dirty |= set_color(&mut self.page_mut().canvas.line_color, color);
+    }
+
+    /// Dots colour (`#RRGGBB`); `None` uses the theme border colour.
+    /// An unparsable colour is ignored.
+    pub fn set_dot_color(&mut self, color: Option<&str>) {
+        self.dirty |= set_color(&mut self.page_mut().canvas.dot_color, color);
+    }
+
+    /// Every `n`th grid line is drawn stronger (0 = off), clamped to
+    /// `MAJOR_EVERY_MAX`.
+    pub fn set_major_every(&mut self, n: u32) {
+        let n = n.min(MAJOR_EVERY_MAX);
+        let canvas = &mut self.page_mut().canvas;
+        if canvas.major_every != n {
+            canvas.major_every = n;
+            self.dirty = true;
+        }
+    }
+
+    /// Round to half pixels and clamp to `DOT_SIZE_MIN..=DOT_SIZE_MAX`; NaN
+    /// is ignored.
+    pub fn set_dot_size(&mut self, px: f32) {
+        if px.is_nan() {
+            return;
+        }
+        let px = clamp_dot_size(px);
+        let canvas = &mut self.page_mut().canvas;
+        if canvas.dot_size != px {
+            canvas.dot_size = px;
+            self.dirty = true;
+        }
+    }
+
     // View edits (never dirty).
 
     pub fn set_active_page(&mut self, idx: usize) {
@@ -316,6 +396,132 @@ mod tests {
     }
 
     #[test]
+    fn new_pattern_settings_have_theme_defaults() {
+        let c = crate::document::CanvasSettings::default();
+        assert_eq!(c.background, None);
+        assert_eq!(c.line_color, None);
+        assert_eq!(c.major_every, 0);
+        assert_eq!(c.dot_size, 1.5);
+        assert_eq!(c.dot_color, None);
+    }
+
+    #[test]
+    fn colours_are_normalized_and_mark_dirty() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.set_background(Some("ff8000"));
+        s.set_line_color(Some("#abcdef"));
+        s.set_dot_color(Some("#123456"));
+        let c = &s.page().canvas;
+        assert_eq!(c.background.as_deref(), Some("#FF8000"));
+        assert_eq!(c.line_color.as_deref(), Some("#ABCDEF"));
+        assert_eq!(c.dot_color.as_deref(), Some("#123456"));
+        assert!(s.is_dirty());
+    }
+
+    #[test]
+    fn invalid_or_same_colour_is_ignored_and_not_dirty() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.set_background(Some("nope"));
+        s.set_line_color(Some("#12345"));
+        s.set_dot_color(Some(""));
+        s.set_background(None);
+        assert_eq!(s.page().canvas, crate::document::CanvasSettings::default());
+        assert!(!s.is_dirty());
+        s.set_background(Some("#FF8000"));
+        s.save().unwrap();
+        // Same colour in another spelling.
+        s.set_background(Some("ff8000"));
+        s.set_background(Some("garbage"));
+        assert_eq!(s.page().canvas.background.as_deref(), Some("#FF8000"));
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn resetting_a_colour_to_theme_marks_dirty() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.set_dot_color(Some("#123456"));
+        s.save().unwrap();
+        s.set_dot_color(None);
+        assert_eq!(s.page().canvas.dot_color, None);
+        assert!(s.is_dirty());
+    }
+
+    #[test]
+    fn major_every_is_clamped_and_dirty_only_on_change() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.set_major_every(0);
+        assert!(!s.is_dirty());
+        s.set_major_every(5);
+        assert_eq!(s.page().canvas.major_every, 5);
+        assert!(s.is_dirty());
+        s.set_major_every(99);
+        assert_eq!(s.page().canvas.major_every, MAJOR_EVERY_MAX);
+        s.save().unwrap();
+        s.set_major_every(21);
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn dot_size_is_rounded_to_halves_and_clamped() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.set_dot_size(1.5);
+        assert!(!s.is_dirty());
+        s.set_dot_size(2.3);
+        assert_eq!(s.page().canvas.dot_size, 2.5);
+        assert!(s.is_dirty());
+        s.set_dot_size(0.0);
+        assert_eq!(s.page().canvas.dot_size, DOT_SIZE_MIN);
+        s.set_dot_size(100.0);
+        assert_eq!(s.page().canvas.dot_size, DOT_SIZE_MAX);
+        s.set_dot_size(f32::INFINITY);
+        assert_eq!(s.page().canvas.dot_size, DOT_SIZE_MAX);
+        s.save().unwrap();
+        s.set_dot_size(f32::NAN);
+        assert_eq!(s.page().canvas.dot_size, DOT_SIZE_MAX);
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn pattern_settings_round_trip_through_save_and_open() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.set_background(Some("#101010"));
+        s.set_line_color(Some("#202020"));
+        s.set_major_every(4);
+        s.set_dot_size(3.0);
+        s.set_dot_color(Some("#303030"));
+        s.save().unwrap();
+        let r = DocumentSession::open(s.path.clone()).unwrap();
+        assert_eq!(r.page().canvas, s.page().canvas);
+        assert!(!r.is_dirty());
+    }
+
+    #[test]
+    fn open_normalizes_pattern_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.mindweave");
+        let mut d = Document::new();
+        let c = &mut d.pages[0].canvas;
+        c.background = Some("ff8000".into());
+        c.line_color = Some("not a colour".into());
+        c.dot_color = Some("#12".into());
+        c.major_every = 500;
+        c.dot_size = 2.2;
+        let mut p2 = Page::new("Two");
+        p2.canvas.dot_size = 0.1;
+        d.pages.push(p2);
+        crate::format::save(&d, &path).unwrap();
+        let s = DocumentSession::open(path).unwrap();
+        let c = &s.doc.pages[0].canvas;
+        assert_eq!(c.background.as_deref(), Some("#FF8000"));
+        assert_eq!(c.line_color, None);
+        assert_eq!(c.dot_color, None);
+        assert_eq!(c.major_every, MAJOR_EVERY_MAX);
+        assert_eq!(c.dot_size, 2.0);
+        assert_eq!(s.doc.pages[1].canvas.dot_size, DOT_SIZE_MIN);
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
     fn view_changes_do_not_mark_dirty() {
         let (_d, mut s) = new_session("a.mindweave");
         s.add_page();
@@ -415,8 +621,10 @@ mod tests {
             y: f32::INFINITY,
             zoom: f32::NAN,
         };
+        p.canvas.dot_size = f32::NAN;
         normalize_page(&mut p);
         assert_eq!(p.canvas.grid_size, 20.0);
+        assert_eq!(p.canvas.dot_size, 1.5);
         assert_eq!(
             (p.viewport.x, p.viewport.y, p.viewport.zoom),
             (0.0, 0.0, 1.0)

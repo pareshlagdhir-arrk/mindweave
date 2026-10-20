@@ -149,6 +149,38 @@ mod tests {
     }
 
     #[test]
+    fn load_fills_in_pattern_settings_missing_from_older_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.mindweave");
+        // A page as saved before the per-pattern settings existed.
+        let old = r#"{
+          "version": 1,
+          "pages": [{
+            "id": "6f1c1f5e-2f0a-4f43-9d5c-6a0f4c1d2e3f",
+            "name": "Page 1",
+            "canvas": { "pattern": "lines", "grid_size": 24.0 },
+            "viewport": { "x": 0.0, "y": 0.0, "zoom": 1.0 },
+            "layers": [{
+              "id": "0b6a2c1d-6c55-4e0e-8a83-0b3e8f1f9a10",
+              "name": "Layer 1",
+              "visible": true
+            }],
+            "active_layer": 0
+          }],
+          "active_page": 0
+        }"#;
+        fs::write(&path, old).unwrap();
+        let c = &load(&path).unwrap().pages[0].canvas;
+        assert_eq!(c.pattern, BackgroundPattern::Lines);
+        assert_eq!(c.grid_size, 24.0);
+        assert_eq!(c.background, None);
+        assert_eq!(c.line_color, None);
+        assert_eq!(c.major_every, 0);
+        assert_eq!(c.dot_size, 1.5);
+        assert_eq!(c.dot_color, None);
+    }
+
+    #[test]
     fn load_clamps_bad_active_indices() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.mindweave");

@@ -14,10 +14,35 @@ pub enum BackgroundPattern {
     None,
 }
 
+/// Side of a dot in the Dots pattern, in pixels, unless a page sets its own.
+pub const DEFAULT_DOT_SIZE: f32 = 1.5;
+
+fn default_dot_size() -> f32 {
+    DEFAULT_DOT_SIZE
+}
+
+/// A page's background. Colours are uppercase `#RRGGBB` strings; `None`
+/// means the theme's colour. Fields added after the first release default
+/// when missing, so older files still load.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanvasSettings {
     pub pattern: BackgroundPattern,
+    /// Line spacing for Lines, dot spacing for Dots, in canvas pixels.
     pub grid_size: f32,
+    /// Canvas fill; `None` is the theme background.
+    #[serde(default)]
+    pub background: Option<String>,
+    /// Lines colour; `None` is the theme border colour.
+    #[serde(default)]
+    pub line_color: Option<String>,
+    /// Every Nth grid line is drawn stronger; 0 turns this off.
+    #[serde(default)]
+    pub major_every: u32,
+    #[serde(default = "default_dot_size")]
+    pub dot_size: f32,
+    /// Dots colour; `None` is the theme border colour.
+    #[serde(default)]
+    pub dot_color: Option<String>,
 }
 
 impl Default for CanvasSettings {
@@ -25,6 +50,11 @@ impl Default for CanvasSettings {
         Self {
             pattern: BackgroundPattern::Dots,
             grid_size: 20.0,
+            background: None,
+            line_color: None,
+            major_every: 0,
+            dot_size: DEFAULT_DOT_SIZE,
+            dot_color: None,
         }
     }
 }

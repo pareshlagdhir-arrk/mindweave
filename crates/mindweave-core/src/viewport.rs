@@ -69,6 +69,9 @@ pub struct GridLines {
     /// Canvas grid index (multiple of the current spacing) of `xs[0]` and
     /// `ys[0]`, so a thinned pattern can stay anchored to the canvas.
     pub first_ix: (i64, i64),
+    /// Grid cells between adjacent lines: 1, or a power of two when the
+    /// spacing was doubled to keep lines apart.
+    pub cells_per_line: u32,
 }
 
 /// Computes grid lines for a canvas area of `size` screen pixels. Spacing is
@@ -82,6 +85,7 @@ pub fn grid_lines(vp: &Viewport, size: (f32, f32), grid_size: f32) -> GridLines 
         spacing_px: 0.0,
         alpha: 0.0,
         first_ix: (0, 0),
+        cells_per_line: 1,
     };
     if !valid(grid_size)
         || !valid(vp.zoom)
@@ -94,8 +98,10 @@ pub fn grid_lines(vp: &Viewport, size: (f32, f32), grid_size: f32) -> GridLines 
     }
 
     let mut canvas_spacing = grid_size;
+    let mut cells_per_line = 1u32;
     while canvas_spacing * vp.zoom < MIN_SPACING_PX {
         canvas_spacing *= 2.0;
+        cells_per_line = cells_per_line.saturating_mul(2);
     }
     let spacing_px = canvas_spacing * vp.zoom;
     if !spacing_px.is_finite() {
@@ -125,7 +131,20 @@ pub fn grid_lines(vp: &Viewport, size: (f32, f32), grid_size: f32) -> GridLines 
         spacing_px,
         alpha,
         first_ix: (first_x, first_y),
+        cells_per_line,
     }
+}
+
+/// Whether the grid line with index `line_ix` (in [`GridLines::first_ix`]
+/// units, `cells_per_line` grid cells apart) falls on every
+/// `major_every`th grid cell. Indexing by canvas cell keeps major lines on
+/// the same canvas lines while panning and zooming. 0 means no major lines.
+pub fn is_major_line(line_ix: i64, cells_per_line: u32, major_every: u32) -> bool {
+    if major_every == 0 {
+        return false;
+    }
+    let cell = i128::from(line_ix) * i128::from(cells_per_line);
+    cell.rem_euclid(i128::from(major_every)) == 0
 }
 
 /// Smallest and largest zoom factor a single scroll or pinch event applies.
@@ -404,6 +423,57 @@ mod tests {
         };
         assert_eq!(overlap(&a), overlap(&b));
         assert!(!overlap(&a).is_empty());
+    }
+
+    #[test]
+    fn grid_lines_report_cells_per_line() {
+        assert_eq!(
+            grid_lines(&vp(0.0, 0.0, 1.0), (100.0, 100.0), 20.0).cells_per_line,
+            1
+        );
+        // 20 * 0.1 = 2px: doubled twice to the 8px minimum.
+        assert_eq!(
+            grid_lines(&vp(0.0, 0.0, 0.1), (100.0, 100.0), 20.0).cells_per_line,
+            4
+        );
+    }
+
+    #[test]
+    fn major_lines_are_every_nth_grid_cell() {
+        assert!(is_major_line(0, 1, 5));
+        assert!(is_major_line(10, 1, 5));
+        assert!(is_major_line(-5, 1, 5));
+        assert!(!is_major_line(3, 1, 5));
+        assert!(!is_major_line(-3, 1, 5));
+        // Line 3 at 2 cells per line is cell 6.
+        assert!(is_major_line(3, 2, 3));
+        assert!(!is_major_line(3, 2, 4));
+        // 0 turns major lines off.
+        assert!(!is_major_line(0, 1, 0));
+        // No overflow at the extremes.
+        assert!(is_major_line(i64::MIN, 4, 2));
+        assert!(!is_major_line(i64::MAX, 1, 2));
+    }
+
+    /// Canvas x positions of the major vertical lines in `g`.
+    fn major_xs(v: &Viewport, g: &GridLines, every: u32) -> Vec<i64> {
+        g.xs.iter()
+            .enumerate()
+            .filter(|(k, _)| is_major_line(g.first_ix.0 + *k as i64, g.cells_per_line, every))
+            .map(|(_, &x)| v.screen_to_canvas((x, 0.0)).0.round() as i64)
+            .collect()
+    }
+
+    #[test]
+    fn major_lines_stay_on_the_same_canvas_lines_while_panning_and_zooming() {
+        let every = 4;
+        // At 0.25 the 20px grid is doubled once (40 canvas px per line).
+        for v in [vp(0.0, 0.0, 1.0), vp(37.0, 0.0, 1.0), vp(-50.0, 0.0, 0.25)] {
+            let g = grid_lines(&v, (800.0, 100.0), 20.0);
+            let majors = major_xs(&v, &g, every);
+            assert!(!majors.is_empty());
+            assert!(majors.iter().all(|x| x.rem_euclid(80) == 0), "{majors:?}");
+        }
     }
 
     #[test]
