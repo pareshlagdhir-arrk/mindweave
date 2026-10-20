@@ -1,18 +1,31 @@
-//! The editor window for one document.
-//!
-//! Placeholder until the editor shell lands: it shows the document name under
-//! the menu bar, saves, and asks before closing with unsaved changes.
+//! The editor window for one document: Layers panel, canvas, page tabs,
+//! Properties panel and status bar.
+
+mod layers_panel;
+mod page_tabs;
+mod properties_panel;
+mod status_bar;
 
 use std::future::Future;
 
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{v_flex, ActiveTheme as _, WindowExt as _};
+use gpui_kit::component::resizable::{h_resizable, resizable_panel};
+use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::*;
 use mindweave_core::DocumentSession;
 
-use crate::actions::{CloseWindow, Save};
+use crate::actions::{CloseWindow, Save, ToggleLayers, ToggleProperties};
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
+
+const TEXT_SIZE: f32 = 13.;
+const SMALL_TEXT_SIZE: f32 = 12.;
+const SECTION_LABEL_SIZE: f32 = 10.;
+const LAYERS_WIDTH: f32 = 220.;
+const PROPERTIES_WIDTH: f32 = 240.;
+const PANEL_MIN_WIDTH: f32 = 160.;
+const PANEL_MAX_WIDTH: f32 = 480.;
 
 /// The user's answer to "save changes before closing?".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,23 +58,81 @@ pub fn prompt_to_save(
     }
 }
 
+/// What an inline rename edits: a page, or a layer of the active page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RenameTarget {
+    Page(usize),
+    Layer(usize),
+}
+
+/// An inline rename in progress.
+struct Rename {
+    target: RenameTarget,
+    input: Entity<InputState>,
+    _subscription: Subscription,
+}
+
 pub struct EditorWindow {
     session: DocumentSession,
+    /// The pointer position in canvas coordinates, or `None` when the
+    /// pointer is off the canvas.
+    cursor_canvas: Option<(f32, f32)>,
     focus_handle: FocusHandle,
+    rename: Option<Rename>,
+    grid_input: Entity<InputState>,
+    /// The grid size the grid-size input currently shows.
+    grid_input_shows: Option<f32>,
+    /// The title last given to the window.
+    window_title: String,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EditorWindow {
     pub fn new(session: DocumentSession, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+        let grid_input = cx.new(|cx| InputState::new(window, cx));
+        let _subscriptions = vec![
+            // Panel visibility and the theme name live in the settings.
+            cx.observe_global::<AppState>(|_, cx| cx.notify()),
+            cx.subscribe_in(&grid_input, window, |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.commit_grid_size(window, cx);
+                }
+            }),
+        ];
+        let window_title = session.title();
         Self {
             session,
+            cursor_canvas: None,
             focus_handle,
+            rename: None,
+            grid_input,
+            grid_input_shows: None,
+            window_title,
+            _subscriptions,
         }
     }
 
     pub fn session(&self) -> &DocumentSession {
         &self.session
+    }
+
+    /// Applies `f` to the session, redraws, and refreshes the window title
+    /// (on the next render).
+    pub fn update_session(&mut self, f: impl FnOnce(&mut DocumentSession), cx: &mut Context<Self>) {
+        f(&mut self.session);
+        cx.notify();
+    }
+
+    /// Sets the pointer position shown in the status bar, in canvas
+    /// coordinates; `None` hides it.
+    #[allow(dead_code)] // Called by the canvas, which is not built yet.
+    pub fn set_cursor(&mut self, p: Option<(f32, f32)>, cx: &mut Context<Self>) {
+        if self.cursor_canvas != p {
+            self.cursor_canvas = p;
+            cx.notify();
+        }
     }
 
     /// The document's file name without extension.
@@ -83,7 +154,7 @@ impl EditorWindow {
                 false
             }
         };
-        window.set_window_title(&self.session.title());
+        self.sync_window_title(window);
         cx.notify();
         saved
     }
@@ -111,6 +182,132 @@ impl EditorWindow {
         .detach();
     }
 
+    /// Starts an inline rename of `target` with its current name selected.
+    pub(crate) fn begin_rename(
+        &mut self,
+        target: RenameTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = match target {
+            RenameTarget::Page(ix) => self.session.doc.pages.get(ix).map(|p| p.name.clone()),
+            RenameTarget::Layer(ix) => self.session.page().layers.get(ix).map(|l| l.name.clone()),
+        };
+        let Some(name) = name else {
+            return;
+        };
+        self.finish_rename(true, cx);
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        input.update(cx, |input, cx| {
+            input.select_all(window, cx);
+            input.focus(window, cx);
+        });
+        let _subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| {
+            match event {
+                InputEvent::PressEnter { .. } => {
+                    this.finish_rename(true, cx);
+                    this.focus_handle.focus(window, cx);
+                }
+                // Focus has already gone elsewhere; leave it there.
+                InputEvent::Blur => this.finish_rename(true, cx),
+                _ => {}
+            }
+        });
+        self.rename = Some(Rename {
+            target,
+            input,
+            _subscription,
+        });
+        cx.notify();
+    }
+
+    /// Ends the inline rename, applying the typed name when `commit` is set.
+    /// A blank name keeps the old one.
+    fn finish_rename(&mut self, commit: bool, cx: &mut Context<Self>) {
+        let Some(rename) = self.rename.take() else {
+            return;
+        };
+        if commit {
+            let name = rename.input.read(cx).value().to_string();
+            self.update_session(
+                |s| match rename.target {
+                    RenameTarget::Page(ix) => s.rename_page(ix, &name),
+                    RenameTarget::Layer(ix) => s.rename_layer(ix, &name),
+                },
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// The rename input when `target` is being renamed.
+    pub(crate) fn rename_input(&self, target: RenameTarget) -> Option<&Entity<InputState>> {
+        self.rename
+            .as_ref()
+            .filter(|r| r.target == target)
+            .map(|r| &r.input)
+    }
+
+    /// The inline rename field: Enter or leaving it commits, Escape cancels.
+    pub(crate) fn render_rename_input(
+        &self,
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                this.finish_rename(false, cx);
+                this.focus_handle.focus(window, cx);
+            }))
+            .child(Input::new(input).small())
+    }
+
+    /// Switches pages, committing any rename in progress first.
+    pub(crate) fn activate_page(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.finish_rename(true, cx);
+        self.update_session(|s| s.set_active_page(ix), cx);
+    }
+
+    /// Adds a page, committing any rename in progress first.
+    pub(crate) fn add_page(&mut self, cx: &mut Context<Self>) {
+        self.finish_rename(true, cx);
+        self.update_session(
+            |s| {
+                s.add_page();
+            },
+            cx,
+        );
+    }
+
+    /// Applies the grid-size input on Enter or blur; whatever happens, the
+    /// input then shows the page's grid size.
+    fn commit_grid_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.grid_input.read(cx).value().to_string();
+        if let Some(size) = parse_grid_size(&text) {
+            self.update_session(|s| s.set_grid_size(size), cx);
+        }
+        self.show_grid_size(window, cx);
+    }
+
+    /// Puts the active page's grid size in the grid-size input.
+    fn show_grid_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let size = self.session.page().canvas.grid_size;
+        self.grid_input.update(cx, |input, cx| {
+            input.set_value(format_grid_size(size), window, cx)
+        });
+        self.grid_input_shows = Some(size);
+    }
+
+    fn sync_window_title(&mut self, window: &mut Window) {
+        let title = self.session.title();
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
+        }
+    }
+
     fn on_save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
         self.save(window, cx);
     }
@@ -118,11 +315,66 @@ impl EditorWindow {
     fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
         self.request_close(window, cx);
     }
+
+    fn on_toggle_layers(&mut self, _: &ToggleLayers, _: &mut Window, cx: &mut Context<Self>) {
+        AppState::update_settings(cx, |s| s.show_layers = !s.show_layers);
+    }
+
+    fn on_toggle_properties(
+        &mut self,
+        _: &ToggleProperties,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        AppState::update_settings(cx, |s| s.show_properties = !s.show_properties);
+    }
+
+    /// The canvas area. Task 10 replaces this with the drawing canvas.
+    fn render_canvas(&self, cx: &App) -> impl IntoElement {
+        div().flex_1().min_h_0().bg(cx.theme().background)
+    }
 }
 
 fn close(window: &mut Window, cx: &mut App) {
     AppState::remember_window_size(WindowKind::Editor, window, cx);
     window.remove_window();
+}
+
+/// The grid size typed into the Properties panel, or `None` when it is not
+/// a number.
+pub(crate) fn parse_grid_size(text: &str) -> Option<f32> {
+    text.trim().parse::<f32>().ok()
+}
+
+/// A grid size as shown in the Properties panel (whole pixels).
+pub(crate) fn format_grid_size(size: f32) -> String {
+    format!("{}", size.round() as i64)
+}
+
+/// `text` with hair spaces between its characters, standing in for letter
+/// spacing, which gpui text does not support.
+pub(crate) fn letter_spaced(text: &str) -> String {
+    let chars: Vec<String> = text.chars().map(String::from).collect();
+    chars.join("\u{200A}")
+}
+
+/// A panel section heading: 10px, uppercase, muted, letter-spaced.
+pub(crate) fn section_label(text: &str, cx: &App) -> Div {
+    div()
+        .text_size(px(SECTION_LABEL_SIZE))
+        .text_color(cx.theme().muted_foreground)
+        .child(letter_spaced(&text.to_uppercase()))
+}
+
+/// Element ids for the panel group, one per sidebar combination, so each
+/// combination keeps its own panel widths.
+fn panel_group_id(show_layers: bool, show_properties: bool) -> &'static str {
+    match (show_layers, show_properties) {
+        (true, true) => "editor-panels-both",
+        (true, false) => "editor-panels-layers",
+        (false, true) => "editor-panels-properties",
+        (false, false) => "editor-panels-none",
+    }
 }
 
 impl Focusable for EditorWindow {
@@ -132,24 +384,111 @@ impl Focusable for EditorWindow {
 }
 
 impl Render for EditorWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_window_title(window);
+        let grid_size = self.session.page().canvas.grid_size;
+        if self.grid_input_shows != Some(grid_size)
+            && !self.grid_input.read(cx).focus_handle(cx).is_focused(window)
+        {
+            self.show_grid_size(window, cx);
+        }
+
+        let (show_layers, show_properties) = {
+            let settings = &cx.global::<AppState>().settings;
+            (settings.show_layers, settings.show_properties)
+        };
+        let panel_range = px(PANEL_MIN_WIDTH)..px(PANEL_MAX_WIDTH);
+
+        let mut panels = h_resizable(panel_group_id(show_layers, show_properties));
+        if show_layers {
+            panels = panels.child(
+                resizable_panel()
+                    .size(px(LAYERS_WIDTH))
+                    .size_range(panel_range.clone())
+                    .fixed()
+                    .child(layers_panel::render(self, cx)),
+            );
+        }
+        panels = panels.child(
+            resizable_panel().child(
+                v_flex()
+                    .size_full()
+                    .min_w_0()
+                    .child(self.render_canvas(cx))
+                    .child(page_tabs::render(self, cx)),
+            ),
+        );
+        if show_properties {
+            panels = panels.child(
+                resizable_panel()
+                    .size(px(PROPERTIES_WIDTH))
+                    .size_range(panel_range)
+                    .fixed()
+                    .child(properties_panel::render(self, cx)),
+            );
+        }
+
         v_flex()
             .size_full()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_close_window))
+            .on_action(cx.listener(Self::on_toggle_layers))
+            .on_action(cx.listener(Self::on_toggle_properties))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .text_size(px(13.))
+            .text_size(px(TEXT_SIZE))
             .child(menu_bar(WindowKind::Editor, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("Editor — {}", self.session.title())),
-            )
+            .child(div().flex_1().min_h_0().child(panels))
+            .child(status_bar::render(self, cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: the gpui glob import would shadow `#[test]`.
+    use super::{format_grid_size, letter_spaced, panel_group_id, parse_grid_size};
+
+    #[test]
+    fn grid_size_parses_trimmed_numbers() {
+        assert_eq!(parse_grid_size("20"), Some(20.0));
+        assert_eq!(parse_grid_size("  12.5 "), Some(12.5));
+        assert_eq!(parse_grid_size("0"), Some(0.0));
+        assert_eq!(parse_grid_size("-3"), Some(-3.0));
+    }
+
+    #[test]
+    fn grid_size_rejects_non_numbers() {
+        assert_eq!(parse_grid_size("abc"), None);
+        assert_eq!(parse_grid_size(""), None);
+        assert_eq!(parse_grid_size("20px"), None);
+    }
+
+    #[test]
+    fn grid_size_is_shown_in_whole_pixels() {
+        assert_eq!(format_grid_size(20.0), "20");
+        assert_eq!(format_grid_size(4.0), "4");
+        assert_eq!(format_grid_size(12.6), "13");
+    }
+
+    #[test]
+    fn letter_spacing_uses_hair_spaces() {
+        assert_eq!(letter_spaced("ABC"), "A\u{200A}B\u{200A}C");
+        assert_eq!(letter_spaced(""), "");
+    }
+
+    #[test]
+    fn each_sidebar_combination_has_its_own_panel_group() {
+        let ids = [
+            panel_group_id(true, true),
+            panel_group_id(true, false),
+            panel_group_id(false, true),
+            panel_group_id(false, false),
+        ];
+        for (i, a) in ids.iter().enumerate() {
+            for b in &ids[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
     }
 }
