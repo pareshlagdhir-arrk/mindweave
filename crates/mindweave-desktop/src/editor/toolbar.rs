@@ -1,6 +1,9 @@
 //! The toolbar under the title bar: tabs (Home and one per library), a
 //! divider, then the tools of the shown tab.
 
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, ActiveTheme as _};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -23,6 +26,11 @@ const OUTLINE_INSET: f32 = 2.;
 const LOCK_DOT_SIZE: f32 = 4.;
 const LOCK_DOT_INSET: f32 = 3.;
 const DIVIDER_HEIGHT: f32 = 16.;
+/// Widest tab; longer library names are cut with an ellipsis.
+const TAB_MAX_WIDTH: f32 = 160.;
+/// The tools keep room for this many buttons however many tabs there are.
+const MIN_VISIBLE_TOOLS: f32 = 3.;
+const TOOL_GAP: f32 = 2.;
 
 /// One toolbar button: its tool, icon and tooltip.
 struct ToolButton {
@@ -34,8 +42,16 @@ struct ToolButton {
 
 enum ButtonIcon {
     Svg(SharedString),
-    Outline(Geometry),
+    /// Built at the origin of the 16px icon box.
+    Outline(Option<Rc<Path<Pixels>>>),
 }
+
+/// Outline icons built once, by library and shape id; the libraries do not
+/// change while the app runs.
+#[derive(Default)]
+struct OutlineIcons(HashMap<(String, String), Option<Rc<Path<Pixels>>>>);
+
+impl Global for OutlineIcons {}
 
 pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoElement {
     let libraries = &cx.global::<Libraries>().0;
@@ -70,7 +86,17 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
         .border_b_1()
         .border_color(theme.border)
         .text_size(px(SMALL_TEXT_SIZE))
-        .child(h_flex().h_full().flex_none().children(tab_elements))
+        .child(
+            // Shrinks and scrolls on its own so many or long library names
+            // never push the tools away.
+            h_flex()
+                .id("toolbar-tabs")
+                .h_full()
+                .flex_initial()
+                .min_w_0()
+                .overflow_x_scroll()
+                .children(tab_elements),
+        )
         .child(
             div()
                 .flex_none()
@@ -83,8 +109,8 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
             h_flex()
                 .id("toolbar-tools")
                 .flex_1()
-                .min_w_0()
-                .gap(px(2.))
+                .min_w(px(MIN_VISIBLE_TOOLS * (BUTTON_SIZE + TOOL_GAP)))
+                .gap(px(TOOL_GAP))
                 .overflow_x_scroll()
                 .children(button_elements),
         )
@@ -92,13 +118,9 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
 
 /// The buttons of tab `tab`: Pointer and Hand on Home, else the library's
 /// shapes. An unknown tab shows Home's.
-fn tab_buttons(tab: &str, cx: &App) -> Vec<ToolButton> {
-    let library = cx
-        .global::<Libraries>()
-        .0
-        .libraries()
-        .iter()
-        .find(|l| l.id == tab);
+fn tab_buttons(tab: &str, cx: &mut App) -> Vec<ToolButton> {
+    let libraries = cx.global::<Libraries>().0.clone();
+    let library = libraries.libraries().iter().find(|l| l.id == tab);
     let Some(library) = library else {
         return vec![
             ToolButton {
@@ -124,7 +146,13 @@ fn tab_buttons(tab: &str, cx: &App) -> Vec<ToolButton> {
             tool: Tool::shape(&library.id, &shape.id),
             icon: match &shape.icon {
                 Icon::Lucide(name) => ButtonIcon::Svg(lucide_icon_path(name, cx)),
-                Icon::Outline(geometry) => ButtonIcon::Outline(geometry.clone()),
+                Icon::Outline(geometry) => ButtonIcon::Outline(
+                    cx.default_global::<OutlineIcons>()
+                        .0
+                        .entry((library.id.clone(), shape.id.clone()))
+                        .or_insert_with(|| outline_icon_path(geometry).map(Rc::new))
+                        .clone(),
+                ),
             },
             tooltip: match shape_key(&library.id, &shape.id) {
                 Some(key) => format!("{} ({key})", shape.name).into(),
@@ -143,12 +171,14 @@ fn tab(
 ) -> impl IntoElement {
     let theme = cx.theme();
     let foreground = theme.foreground;
+    let tooltip = name.clone();
     div()
         .id(("toolbar-tab", ix))
         .h_full()
         .flex()
         .items_center()
         .flex_none()
+        .max_w(px(TAB_MAX_WIDTH))
         .px(px(8.))
         .border_b_1()
         .when(active, |tab| {
@@ -159,7 +189,8 @@ fn tab(
                 .border_color(transparent_black())
                 .hover(move |style| style.text_color(foreground))
         })
-        .child(name)
+        .child(div().min_w_0().truncate().child(name))
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .on_click(cx.listener(move |this, _, _, cx| {
             if this.tools.tab != *id {
                 this.tools.tab = id.to_string();
@@ -191,7 +222,7 @@ fn tool_button(
             .flex_none()
             .text_color(icon_color)
             .into_any_element(),
-        ButtonIcon::Outline(geometry) => outline_icon(geometry, icon_color).into_any_element(),
+        ButtonIcon::Outline(path) => outline_icon(path, icon_color).into_any_element(),
     };
     let tooltip = button.tooltip;
     let tool = button.tool;
@@ -228,35 +259,66 @@ fn tool_button(
         }))
 }
 
-/// A library outline drawn into a 16px box with a thin stroke.
-fn outline_icon(geometry: Geometry, color: Hsla) -> impl IntoElement {
+/// A library outline as a thin stroke in a 16px box at the origin; `None`
+/// when it has nothing to draw.
+fn outline_icon_path(geometry: &Geometry) -> Option<Path<Pixels>> {
+    let span = ICON_SIZE - 2. * OUTLINE_INSET;
+    let at = |(x, y): (f32, f32)| point(px(OUTLINE_INSET + x * span), px(OUTLINE_INSET + y * span));
+    let mut builder = PathBuilder::stroke(px(OUTLINE_STROKE));
+    for cmd in geometry.paths.iter().flat_map(|p| &p.cmds) {
+        match *cmd {
+            PathCmd::MoveTo(p) => builder.move_to(at(p)),
+            PathCmd::LineTo(p) => builder.line_to(at(p)),
+            PathCmd::QuadTo { ctrl, to } => builder.curve_to(at(to), at(ctrl)),
+            PathCmd::CubicTo { c1, c2, to } => builder.cubic_bezier_to(at(to), at(c1), at(c2)),
+            PathCmd::Close => builder.close(),
+        }
+    }
+    builder
+        .build()
+        .ok()
+        .filter(|path| !path.vertices.is_empty())
+}
+
+/// A prebuilt outline icon painted in a 16px box.
+fn outline_icon(path: Option<Rc<Path<Pixels>>>, color: Hsla) -> impl IntoElement {
     gpui_kit::canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
-            let span = ICON_SIZE - 2. * OUTLINE_INSET;
-            let at = |(x, y): (f32, f32)| {
-                point(
-                    bounds.origin.x + px(OUTLINE_INSET + x * span),
-                    bounds.origin.y + px(OUTLINE_INSET + y * span),
-                )
+            let Some(path) = &path else {
+                return;
             };
-            let mut builder = PathBuilder::stroke(px(OUTLINE_STROKE));
-            for cmd in geometry.paths.iter().flat_map(|p| &p.cmds) {
-                match *cmd {
-                    PathCmd::MoveTo(p) => builder.move_to(at(p)),
-                    PathCmd::LineTo(p) => builder.line_to(at(p)),
-                    PathCmd::QuadTo { ctrl, to } => builder.curve_to(at(to), at(ctrl)),
-                    PathCmd::CubicTo { c1, c2, to } => {
-                        builder.cubic_bezier_to(at(to), at(c1), at(c2))
-                    }
-                    PathCmd::Close => builder.close(),
-                }
+            let mut path = Path::clone(path);
+            for v in &mut path.vertices {
+                v.xy_position += bounds.origin;
             }
-            if let Ok(path) = builder.build() {
-                window.paint_path(path, color);
-            }
+            path.bounds.origin += bounds.origin;
+            window.paint_path(path, color);
         },
     )
     .size(px(ICON_SIZE))
     .flex_none()
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: the gpui glob import would shadow `#[test]`.
+    use super::{outline_icon_path, ICON_SIZE};
+    use gpui_kit::px;
+    use mindweave_core::geometry::Geometry;
+    use mindweave_core::{builtin_libraries, ShapeSource};
+
+    #[test]
+    fn outline_icons_are_built_inside_the_icon_box() {
+        let libs = builtin_libraries();
+        let ShapeSource::Outline(diamond) = &libs[0].shape("diamond").unwrap().source else {
+            panic!("the diamond is an SVG outline");
+        };
+        let path = outline_icon_path(diamond).unwrap();
+        let b = path.bounds;
+        assert!(b.origin.x >= px(0.) && b.origin.y >= px(0.));
+        assert!(b.origin.x + b.size.width <= px(ICON_SIZE));
+        assert!(b.origin.y + b.size.height <= px(ICON_SIZE));
+        assert!(outline_icon_path(&Geometry { paths: vec![] }).is_none());
+    }
 }
