@@ -11,14 +11,18 @@
 //! Limitations: of `transform`, only `translate` and `scale` are applied
 //! (`rotate`, `skewX`, `skewY` and `matrix` are skipped); a nested `svg`'s
 //! own viewport is ignored; `width`/`height` in units other than px are
-//! treated as missing. Documents with a DTD are rejected.
+//! treated as missing. Documents with a DTD, or with elements nested more
+//! than [`MAX_NESTING`] deep, are rejected. A `path` whose data holds a
+//! non-finite number or one larger than 1e6 in size (or an arc spanning
+//! more than 2e6) contributes no geometry. Arc conversion cost grows with
+//! the radius, so such paths are skipped.
 
 use std::str::FromStr;
 
 use roxmltree::Node;
 use svgtypes::{
-    Length, LengthUnit, PointsParser, SimplePathSegment, SimplifyingPathParser,
-    TransformListParser, TransformListToken, ViewBox, ViewBoxError,
+    Length, LengthUnit, PathParser, PathSegment, PointsParser, SimplePathSegment,
+    SimplifyingPathParser, TransformListParser, TransformListToken, ViewBox, ViewBoxError,
 };
 use thiserror::Error;
 
@@ -29,6 +33,15 @@ use crate::geometry::{
 /// Largest SVG source accepted, in bytes.
 pub const MAX_SVG_BYTES: usize = 1024 * 1024;
 
+/// Deepest element nesting accepted. The XML parser recurses once per
+/// level, using about 16 KB of stack per level in debug builds, so this
+/// keeps parsing within roughly 1 MB, safe on a 2 MB thread stack.
+pub const MAX_NESTING: usize = 64;
+
+/// Largest path number accepted. Bigger values (notably arc radii) make
+/// arc-to-curve conversion produce unbounded numbers of segments.
+const MAX_PATH_VALUE: f64 = 1e6;
+
 /// Why an SVG outline could not be used.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SvgError {
@@ -36,7 +49,7 @@ pub enum SvgError {
     Parse(String),
     #[error("The SVG contains no shapes to use as an outline.")]
     NoGeometry,
-    #[error("The SVG has no size: its viewBox, width or height is zero.")]
+    #[error("The SVG has no size: its viewBox, width or height is zero, or its outline is flat.")]
     ZeroSize,
     #[error("The SVG is larger than 1 MB.")]
     TooLarge,
@@ -49,6 +62,10 @@ pub fn parse_outline(src: &str) -> Result<Geometry, SvgError> {
     if src.len() > MAX_SVG_BYTES {
         return Err(SvgError::TooLarge);
     }
+    // roxmltree recurses once per nesting level with no limit of its own.
+    if nesting_exceeds(src, MAX_NESTING) {
+        return Err(SvgError::Parse("elements are nested too deeply".into()));
+    }
     let doc = roxmltree::Document::parse(src).map_err(|e| SvgError::Parse(e.to_string()))?;
     let root = doc.root_element();
     if root.tag_name().name() != "svg" {
@@ -56,7 +73,9 @@ pub fn parse_outline(src: &str) -> Result<Geometry, SvgError> {
     }
 
     let mut paths = Vec::new();
-    collect(root, Affine::IDENTITY, &mut paths);
+    collect(root, &mut paths);
+    // Huge numbers can overflow; drop such sub-paths before measuring.
+    paths.retain(|sp| sp.cmds.iter().all(cmd_is_finite));
     let raw = Geometry { paths };
 
     let (x, y, w, h) = match viewport(root)? {
@@ -70,12 +89,130 @@ pub fn parse_outline(src: &str) -> Result<Geometry, SvgError> {
         return Err(SvgError::ZeroSize);
     }
     let mut g = map_points(&raw, |(px, py)| ((px - x) / w, (py - y) / h));
-    // Huge or degenerate numbers can overflow; drop such sub-paths.
+    // A tiny viewport can overflow normalised values too.
     g.paths.retain(|sp| sp.cmds.iter().all(cmd_is_finite));
     if g.paths.is_empty() {
         return Err(SvgError::NoGeometry);
     }
     Ok(g)
+}
+
+/// Whether element nesting in `src` goes deeper than `max`, by a quick
+/// byte scan that runs before the recursive XML parser. Comments, CDATA,
+/// processing instructions and quoted attribute values are skipped; any
+/// miscount can only over-count, which merely rejects the file.
+fn nesting_exceeds(src: &str, max: usize) -> bool {
+    let b = src.as_bytes();
+    let skip_past = |from: usize, end: &[u8]| {
+        b[from..]
+            .windows(end.len())
+            .position(|w| w == end)
+            .map_or(b.len(), |j| from + j + end.len())
+    };
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let rest = &b[i..];
+        i = if rest.starts_with(b"<!--") {
+            skip_past(i + 4, b"-->")
+        } else if rest.starts_with(b"<![CDATA[") {
+            skip_past(i + 9, b"]]>")
+        } else if rest.starts_with(b"<?") {
+            skip_past(i + 2, b"?>")
+        } else if rest.starts_with(b"<!") {
+            skip_past(i + 2, b">")
+        } else if rest.starts_with(b"</") {
+            depth = depth.saturating_sub(1);
+            skip_past(i + 2, b">")
+        } else {
+            // A start tag: find its `>` outside quoted attribute values.
+            let mut j = i + 1;
+            let mut quote = None;
+            while j < b.len() {
+                match (quote, b[j]) {
+                    (Some(q), c) if c == q => quote = None,
+                    (Some(_), _) => {}
+                    (None, c @ (b'"' | b'\'')) => quote = Some(c),
+                    (None, b'>') => break,
+                    _ => {}
+                }
+                j += 1;
+            }
+            if j >= b.len() || b[j - 1] != b'/' {
+                depth += 1;
+                if depth > max {
+                    return true;
+                }
+            }
+            j + 1
+        };
+    }
+    false
+}
+
+/// Whether path data is safe to simplify: every number is finite and at
+/// most [`MAX_PATH_VALUE`] in size, and no arc spans more than twice that
+/// (radii grow to fit the chord). Only the part before any syntax error
+/// is checked, as only that part is used.
+fn path_is_reasonable(d: &str) -> bool {
+    let ok = |v: f64| v.is_finite() && v.abs() <= MAX_PATH_VALUE;
+    let (mut cur, mut start) = ((0.0f64, 0.0f64), (0.0f64, 0.0f64));
+    for seg in PathParser::from(d).map_while(Result::ok) {
+        let to = |abs: bool, x: f64, y: f64| if abs { (x, y) } else { (cur.0 + x, cur.1 + y) };
+        let (values, end): (&[f64], (f64, f64)) = match seg {
+            PathSegment::MoveTo { abs, x, y } => {
+                let end = to(abs, x, y);
+                start = end;
+                (&[x, y], end)
+            }
+            PathSegment::LineTo { abs, x, y } | PathSegment::SmoothQuadratic { abs, x, y } => {
+                (&[x, y], to(abs, x, y))
+            }
+            PathSegment::HorizontalLineTo { abs, x } => {
+                (&[x], (if abs { x } else { cur.0 + x }, cur.1))
+            }
+            PathSegment::VerticalLineTo { abs, y } => {
+                (&[y], (cur.0, if abs { y } else { cur.1 + y }))
+            }
+            PathSegment::CurveTo {
+                abs,
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => (&[x1, y1, x2, y2, x, y], to(abs, x, y)),
+            PathSegment::SmoothCurveTo { abs, x2, y2, x, y } => (&[x2, y2, x, y], to(abs, x, y)),
+            PathSegment::Quadratic { abs, x1, y1, x, y } => (&[x1, y1, x, y], to(abs, x, y)),
+            PathSegment::EllipticalArc {
+                abs,
+                rx,
+                ry,
+                x_axis_rotation,
+                x,
+                y,
+                ..
+            } => {
+                let end = to(abs, x, y);
+                let chord = ((end.0 - cur.0).powi(2) + (end.1 - cur.1).powi(2)).sqrt();
+                if !chord.is_finite() || chord > 2.0 * MAX_PATH_VALUE {
+                    return false;
+                }
+                (&[rx, ry, x_axis_rotation, x, y], end)
+            }
+            PathSegment::ClosePath { .. } => (&[], start),
+        };
+        if !values.iter().all(|&v| ok(v)) {
+            return false;
+        }
+        cur = end;
+    }
+    true
 }
 
 fn cmd_is_finite(cmd: &PathCmd) -> bool {
@@ -175,61 +312,22 @@ impl Affine {
     }
 }
 
-/// Appends the geometry of `node`'s children (in document order) to `out`.
-fn collect(node: Node, transform: Affine, out: &mut Vec<SubPath>) {
-    for child in node.children().filter(Node::is_element) {
-        let t = transform.with_attribute(child);
-        let shape = match child.tag_name().name() {
-            "svg" | "g" => {
-                collect(child, t, out);
-                continue;
+/// Appends the geometry under `root` (in document order) to `out`. Walks
+/// with an explicit stack rather than recursion; groups nested deeper
+/// than [`MAX_NESTING`] (root = 1) are skipped.
+fn collect(root: Node, out: &mut Vec<SubPath>) {
+    // (element, its parent's transform, its nesting level)
+    let mut stack: Vec<(Node, Affine, usize)> = Vec::new();
+    push_children(&mut stack, root, Affine::IDENTITY.with_attribute(root), 1);
+    while let Some((node, parent, depth)) = stack.pop() {
+        let t = parent.with_attribute(node);
+        if matches!(node.tag_name().name(), "svg" | "g") {
+            if depth <= MAX_NESTING {
+                push_children(&mut stack, node, t, depth);
             }
-            "path" => child
-                .attribute("d")
-                .map(path_cmds)
-                .map(|c| (c, FillRole::Shape)),
-            "rect" => {
-                let (w, h) = (num(child, "width"), num(child, "height"));
-                let (rx, ry) = match (length(child, "rx"), length(child, "ry")) {
-                    (Some(rx), Some(ry)) => (rx, ry),
-                    (Some(r), None) | (None, Some(r)) => (r, r),
-                    (None, None) => (0.0, 0.0),
-                };
-                (w > 0.0 && h > 0.0).then(|| {
-                    let (x, y) = (num(child, "x"), num(child, "y"));
-                    (rounded_rect_cmds(x, y, w, h, rx, ry), FillRole::Shape)
-                })
-            }
-            "circle" => {
-                let r = num(child, "r");
-                let c = (num(child, "cx"), num(child, "cy"));
-                (r > 0.0).then(|| (ellipse_cmds(c, r, r), FillRole::Shape))
-            }
-            "ellipse" => {
-                let (rx, ry) = match (length(child, "rx"), length(child, "ry")) {
-                    (Some(rx), Some(ry)) => (rx, ry),
-                    (Some(r), None) | (None, Some(r)) => (r, r),
-                    (None, None) => (0.0, 0.0),
-                };
-                let c = (num(child, "cx"), num(child, "cy"));
-                (rx > 0.0 && ry > 0.0).then(|| (ellipse_cmds(c, rx, ry), FillRole::Shape))
-            }
-            "line" => Some((
-                vec![
-                    PathCmd::MoveTo((num(child, "x1"), num(child, "y1"))),
-                    PathCmd::LineTo((num(child, "x2"), num(child, "y2"))),
-                ],
-                FillRole::None,
-            )),
-            "polyline" => child
-                .attribute("points")
-                .map(|p| (points_cmds(p, false), FillRole::None)),
-            "polygon" => child
-                .attribute("points")
-                .map(|p| (points_cmds(p, true), FillRole::Shape)),
-            _ => None,
-        };
-        if let Some((cmds, fill)) = shape {
+            continue;
+        }
+        if let Some((cmds, fill)) = element_cmds(node) {
             if cmds.iter().any(|c| !matches!(c, PathCmd::MoveTo(_))) {
                 let local = Geometry {
                     paths: vec![SubPath { cmds, fill }],
@@ -237,6 +335,69 @@ fn collect(node: Node, transform: Affine, out: &mut Vec<SubPath>) {
                 out.extend(map_points(&local, |p| t.apply(p)).paths);
             }
         }
+    }
+}
+
+/// Pushes `node`'s element children so they pop in document order.
+fn push_children<'a, 'i>(
+    stack: &mut Vec<(Node<'a, 'i>, Affine, usize)>,
+    node: Node<'a, 'i>,
+    t: Affine,
+    depth: usize,
+) {
+    let children = node.children().filter(Node::is_element).rev();
+    stack.extend(children.map(|c| (c, t, depth + 1)));
+}
+
+/// The local outline of one geometry element, if it is one and is usable.
+fn element_cmds(node: Node) -> Option<(Vec<PathCmd>, FillRole)> {
+    match node.tag_name().name() {
+        // Unreasonable path data is skipped whole (see `path_is_reasonable`).
+        "path" => node
+            .attribute("d")
+            .filter(|d| path_is_reasonable(d))
+            .map(path_cmds)
+            .map(|c| (c, FillRole::Shape)),
+        "rect" => {
+            let (w, h) = (num(node, "width"), num(node, "height"));
+            let (rx, ry) = match (length(node, "rx"), length(node, "ry")) {
+                (Some(rx), Some(ry)) => (rx, ry),
+                (Some(r), None) | (None, Some(r)) => (r, r),
+                (None, None) => (0.0, 0.0),
+            };
+            (w > 0.0 && h > 0.0).then(|| {
+                let (x, y) = (num(node, "x"), num(node, "y"));
+                (rounded_rect_cmds(x, y, w, h, rx, ry), FillRole::Shape)
+            })
+        }
+        "circle" => {
+            let r = num(node, "r");
+            let c = (num(node, "cx"), num(node, "cy"));
+            (r > 0.0).then(|| (ellipse_cmds(c, r, r), FillRole::Shape))
+        }
+        "ellipse" => {
+            let (rx, ry) = match (length(node, "rx"), length(node, "ry")) {
+                (Some(rx), Some(ry)) => (rx, ry),
+                (Some(r), None) | (None, Some(r)) => (r, r),
+                (None, None) => (0.0, 0.0),
+            };
+            let c = (num(node, "cx"), num(node, "cy"));
+            (rx > 0.0 && ry > 0.0).then(|| (ellipse_cmds(c, rx, ry), FillRole::Shape))
+        }
+        "line" => Some((
+            vec![
+                PathCmd::MoveTo((num(node, "x1"), num(node, "y1"))),
+                PathCmd::LineTo((num(node, "x2"), num(node, "y2"))),
+            ],
+            FillRole::None,
+        )),
+        "polyline" => node
+            .attribute("points")
+            .map(|p| (points_cmds(p, false), FillRole::None)),
+        "polygon" => node
+            .attribute("points")
+            .map(|p| (points_cmds(p, true), FillRole::Shape)),
+        _ => None,
     }
 }
 
@@ -376,5 +537,113 @@ mod tests {
         let padding = " ".repeat(MAX_SVG_BYTES);
         let src = format!(r#"<svg viewBox="0 0 1 1"><rect width="1" height="1"/>{padding}</svg>"#);
         assert_eq!(parse_outline(&src), Err(SvgError::TooLarge));
+    }
+
+    /// Runs `f` on a thread with a 512 KB stack.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        on_stack(512 * 1024, f)
+    }
+
+    fn on_stack<T: Send + 'static>(bytes: usize, f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(bytes)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    fn nested(depth: usize) -> String {
+        format!(
+            r#"<svg viewBox="0 0 1 1">{}<rect width="1" height="1"/>{}</svg>"#,
+            "<g>".repeat(depth),
+            "</g>".repeat(depth)
+        )
+    }
+
+    #[test]
+    fn deep_nesting_is_rejected_without_deep_recursion() {
+        let result = on_small_stack(|| parse_outline(&nested(10_000)));
+        assert!(matches!(result, Err(SvgError::Parse(_))), "{result:?}");
+        // Quotes, comments and self-closing tags do not fool the depth scan.
+        let tricky = format!(
+            r#"<svg viewBox="0 0 1 1">{}<rect width="1" height="1"/></svg>"#,
+            r#"<g a="/>"><!-- </g> --><g/>"#.repeat(10_000)
+        );
+        let result = on_small_stack(move || parse_outline(&tricky));
+        assert!(matches!(result, Err(SvgError::Parse(_))), "{result:?}");
+    }
+
+    #[test]
+    fn deepest_accepted_nesting_fits_a_2mb_stack() {
+        // The root svg plus MAX_NESTING - 1 groups (the rect is self-closing).
+        let g = on_stack(2 * 1024 * 1024, || parse_outline(&nested(MAX_NESTING - 1))).unwrap();
+        assert_eq!(g.paths.len(), 1);
+        let result = parse_outline(&nested(MAX_NESTING));
+        assert!(matches!(result, Err(SvgError::Parse(_))), "{result:?}");
+    }
+
+    #[test]
+    fn moderate_nesting_is_accepted() {
+        let g = on_small_stack(|| parse_outline(&nested(16))).unwrap();
+        assert_eq!(g.paths.len(), 1);
+    }
+
+    #[test]
+    fn huge_arc_is_skipped_quickly() {
+        let start = std::time::Instant::now();
+        let src = r#"<svg viewBox="0 0 10 10">
+                       <path d="M0 0 A1e36 1e36 0 1 1 1e35 0"/>
+                       <path d="M1e6 0 l1e6 0 l1e6 0 A1 1 0 0 1 0 0"/>
+                       <rect width="1" height="1"/>
+                     </svg>"#;
+        let g = parse_outline(src).unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        // The second path's numbers are in range, but relative moves carry
+        // the arc's start 3e6 from its end, beyond the chord limit.
+        assert_eq!(g.paths.len(), 1, "only the rect survives");
+    }
+
+    #[test]
+    fn arc_becomes_cubics() {
+        let g = parse_outline(r#"<svg viewBox="0 0 2 2"><path d="M0 1 A1 1 0 0 1 2 1Z"/></svg>"#)
+            .unwrap();
+        let cmds = &g.paths[0].cmds;
+        assert!(cmds.iter().any(|c| matches!(c, PathCmd::CubicTo { .. })));
+        assert!(cmds
+            .iter()
+            .all(|c| !matches!(c, PathCmd::LineTo(_) | PathCmd::QuadTo { .. })));
+        let b = bounds(&g).unwrap();
+        assert!((b.x - 0.0).abs() < 1e-3 && (b.w - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn no_size_falls_back_to_outline_bounds() {
+        let g =
+            parse_outline(r#"<svg><rect x="10" y="20" width="40" height="10"/></svg>"#).unwrap();
+        let b = bounds(&g).unwrap();
+        assert!(b.x.abs() < 1e-5 && b.y.abs() < 1e-5);
+        assert!((b.w - 1.0).abs() < 1e-5 && (b.h - 1.0).abs() < 1e-5);
+        // A lone horizontal line has no height to normalise by.
+        let src = r#"<svg><line x1="0" y1="5" x2="10" y2="5"/></svg>"#;
+        assert_eq!(parse_outline(src), Err(SvgError::ZeroSize));
+        // Non-finite sub-paths do not poison the fallback bounds.
+        let src = r#"<svg><path d="M0 0 L1e300 1e300"/><rect width="4" height="2"/></svg>"#;
+        let g = parse_outline(src).unwrap();
+        assert_eq!(g.paths.len(), 1);
+        let b = bounds(&g).unwrap();
+        assert!((b.w - 1.0).abs() < 1e-5 && (b.h - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rect_radii_clamp_per_axis() {
+        let g = parse_outline(
+            r#"<svg viewBox="0 0 100 20"><rect width="100" height="20" rx="30"/></svg>"#,
+        )
+        .unwrap();
+        let cmds = &g.paths[0].cmds;
+        // rx stays 30 (≤ w/2); ry is clamped to h/2 = 10.
+        assert_eq!(cmds[0], PathCmd::MoveTo((0.3, 0.0)));
+        assert!(matches!(cmds[2], PathCmd::CubicTo { to, .. } if to == (1.0, 0.5)));
     }
 }

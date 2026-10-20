@@ -106,7 +106,9 @@ pub fn primitive_geometry(
     let param = |key: &str| param(key).filter(|v| v.is_finite());
     match kind {
         Primitive::Rect => {
-            let radius = param("corner_radius").unwrap_or(0.0);
+            let radius = param("corner_radius")
+                .unwrap_or(0.0)
+                .clamp(0.0, (w.min(h) / 2.0).max(0.0));
             Geometry {
                 paths: vec![SubPath {
                     cmds: rounded_rect_cmds(0.0, 0.0, w, h, radius, radius),
@@ -201,11 +203,11 @@ fn radial_polygon(w: f32, h: f32, count: usize, radii: impl Fn(usize) -> (f32, f
 }
 
 /// Closed rectangle at `(x, y)` sized `w × h` with corner radii `rx`, `ry`
-/// (each clamped to `0..=min(w, h) / 2`; corners drawn as cubics).
+/// (clamped to `0..=w/2` and `0..=h/2` independently, as SVG does;
+/// corners drawn as cubics).
 pub(crate) fn rounded_rect_cmds(x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32) -> Vec<PathCmd> {
-    let limit = (w.min(h) / 2.0).max(0.0);
-    let rx = rx.clamp(0.0, limit);
-    let ry = ry.clamp(0.0, limit);
+    let rx = rx.clamp(0.0, (w / 2.0).max(0.0));
+    let ry = ry.clamp(0.0, (h / 2.0).max(0.0));
     let (r, b) = (x + w, y + h);
     if rx == 0.0 || ry == 0.0 {
         return vec![
@@ -780,6 +782,54 @@ mod tests {
         assert!(hit_test(&line, (50.0, 1.0), 3.0));
         assert!(!hit_test(&line, (50.0, 10.0), 3.0));
         assert!(!hit_test(&line, (200.0, 0.0), 3.0));
+    }
+
+    #[test]
+    fn hit_test_even_odd_hole() {
+        let square = |a: f32, b: f32| {
+            vec![
+                PathCmd::MoveTo((a, a)),
+                PathCmd::LineTo((b, a)),
+                PathCmd::LineTo((b, b)),
+                PathCmd::LineTo((a, b)),
+                PathCmd::Close,
+            ]
+        };
+        let mut cmds = square(0.0, 100.0);
+        cmds.extend(square(25.0, 75.0));
+        let g = Geometry {
+            paths: vec![SubPath {
+                cmds,
+                fill: FillRole::Shape,
+            }],
+        };
+        assert!(hit_test(&g, (10.0, 10.0), 0.0));
+        assert!(!hit_test(&g, (50.0, 50.0), 0.0));
+        assert!(hit_test(&g, (50.0, 26.0), 2.0), "near the hole's edge");
+    }
+
+    #[test]
+    fn hit_test_stroke_tolerance_on_curve() {
+        // Apex of this cubic is (50, 75).
+        let g = Geometry {
+            paths: vec![SubPath {
+                cmds: vec![
+                    PathCmd::MoveTo((0.0, 0.0)),
+                    PathCmd::CubicTo {
+                        c1: (0.0, 100.0),
+                        c2: (100.0, 100.0),
+                        to: (100.0, 0.0),
+                    },
+                ],
+                fill: FillRole::None,
+            }],
+        };
+        assert!(hit_test(&g, (50.0, 77.0), 3.0));
+        assert!(!hit_test(&g, (50.0, 85.0), 3.0));
+        assert!(
+            !hit_test(&g, (50.0, 50.0), 3.0),
+            "stroke-only is not filled"
+        );
     }
 
     #[test]
