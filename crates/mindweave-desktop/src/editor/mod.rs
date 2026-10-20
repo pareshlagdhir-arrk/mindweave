@@ -11,6 +11,7 @@ mod status_bar;
 pub mod tool;
 mod toolbar;
 
+use std::collections::HashSet;
 use std::future::Future;
 
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
@@ -18,7 +19,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::*;
-use mindweave_core::{format_hex_color, parse_hex_color, DocumentSession};
+use mindweave_core::{format_hex_color, parse_hex_color, DocumentSession, Viewport};
 
 use crate::actions::{
     Cancel, CloseWindow, Save, ToggleLayers, ToggleProperties, ToolArrow, ToolEllipse, ToolHand,
@@ -188,10 +189,14 @@ impl EditorWindow {
     pub fn update_session(&mut self, f: impl FnOnce(&mut DocumentSession), cx: &mut Context<Self>) {
         let scope = self.selection_scope();
         f(&mut self.session);
-        if self.selection_scope() != scope {
-            self.selection.clear();
-        }
-        self.prune_selection();
+        self.prune_selection(scope);
+        cx.notify();
+    }
+
+    /// Sets the active page's viewport and redraws. A view change leaves
+    /// the selection alone, so panning does no selection bookkeeping.
+    pub fn set_viewport(&mut self, viewport: Viewport, cx: &mut Context<Self>) {
+        self.session.set_viewport(viewport);
         cx.notify();
     }
 
@@ -205,16 +210,25 @@ impl EditorWindow {
         (page.id, layer)
     }
 
-    /// Drops selected shapes that are not on the active layer (after an
-    /// undo, say), and the whole selection when that layer is hidden.
-    fn prune_selection(&mut self) {
-        if !self.session.active_layer_selectable() {
-            self.selection.clear();
+    /// Brings the selection in line with the session after an edit made
+    /// in selection scope `before` (see [`pruned`]).
+    fn prune_selection(&mut self, before: (Uuid, Uuid)) {
+        if self.selection.is_empty() {
             return;
         }
-        let session = &self.session;
-        self.selection
-            .retain(|id| session.find_shape(*id).is_some());
+        let active: HashSet<Uuid> = self
+            .session
+            .shapes_on_active_layer()
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        self.selection = pruned(
+            std::mem::take(&mut self.selection),
+            before,
+            self.selection_scope(),
+            &active,
+            self.session.active_layer_selectable(),
+        );
     }
 
     /// Sets the pointer position shown in the status bar, in canvas
@@ -502,6 +516,24 @@ impl EditorWindow {
     }
 }
 
+/// The selection after a session edit: empty when the active page or
+/// layer changed (`before` → `after`) or the active layer is hidden,
+/// otherwise `selection` without ids missing from the active layer
+/// (`active`), in its order.
+fn pruned(
+    mut selection: Vec<Uuid>,
+    before: (Uuid, Uuid),
+    after: (Uuid, Uuid),
+    active: &HashSet<Uuid>,
+    layer_visible: bool,
+) -> Vec<Uuid> {
+    if before != after || !layer_visible {
+        return Vec::new();
+    }
+    selection.retain(|id| active.contains(id));
+    selection
+}
+
 /// Space with no modifiers.
 fn is_plain_space(keystroke: &Keystroke) -> bool {
     keystroke.key == "space" && !keystroke.modifiers.modified()
@@ -643,9 +675,29 @@ mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
         hex_to_hsla, hsla_to_hex, is_plain_space, letter_spaced, panel_group_id, parse_number,
-        row_click, RowClick,
+        pruned, row_click, RowClick,
     };
     use gpui_kit::Keystroke;
+    use std::collections::HashSet;
+    use uuid::Uuid;
+
+    #[test]
+    fn selection_is_cleared_or_pruned_after_session_edits() {
+        let [page, other_page, layer, other_layer, a, b, c] = [(); 7].map(|_| Uuid::new_v4());
+        let scope = (page, layer);
+        let active: HashSet<Uuid> = [a, b, c].into();
+        let sel = vec![c, a];
+
+        // Unchanged scope keeps the order.
+        assert_eq!(pruned(sel.clone(), scope, scope, &active, true), vec![c, a]);
+        // Removed ids are dropped.
+        let only_c: HashSet<Uuid> = [c].into();
+        assert_eq!(pruned(sel.clone(), scope, scope, &only_c, true), vec![c]);
+        // Page change, layer change and hidden layer clear it.
+        assert!(pruned(sel.clone(), scope, (other_page, layer), &active, true).is_empty());
+        assert!(pruned(sel.clone(), scope, (page, other_layer), &active, true).is_empty());
+        assert!(pruned(sel, scope, scope, &active, false).is_empty());
+    }
 
     #[test]
     fn only_unmodified_space_arms_panning() {

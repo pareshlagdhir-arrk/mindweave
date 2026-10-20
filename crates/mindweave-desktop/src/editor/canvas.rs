@@ -334,7 +334,7 @@ impl EditorWindow {
         let mut viewport = self.session.page().viewport;
         f(&mut viewport);
         if viewport != self.session.page().viewport {
-            self.update_session(|s| s.set_viewport(viewport), cx);
+            self.set_viewport(viewport, cx);
             self.refresh_cursor(cx);
         }
     }

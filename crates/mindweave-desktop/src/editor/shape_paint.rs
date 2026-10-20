@@ -312,6 +312,8 @@ impl<'a> ShapePainter<'a> {
     fn tessellate(&self, style: &Style, outline: &CanvasGeometry) -> Vec<(Path<Pixels>, Hsla)> {
         let mut paths = Vec::new();
         if outline.placeholder {
+            // Placeholders ignore the shape's style, opacity included, so a
+            // missing shape stays visible; only the preview factor applies.
             if let Some(color) = style_color(Some(PLACEHOLDER_COLOR), self.opacity) {
                 let mut builder = PathBuilder::stroke(px(1.)).dash_array(&PLACEHOLDER_DASH.map(px));
                 for sub in &outline.geometry.paths {
