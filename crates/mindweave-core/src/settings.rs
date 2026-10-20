@@ -68,6 +68,15 @@ impl AppSettings {
         self.recent.retain(|r| normalized(&r.path) != key);
     }
 
+    /// Points the recent entry for `old` at `new`, keeping its place in the
+    /// list and its `opened_at`.
+    pub fn rename_recent(&mut self, old: &Path, new: &Path) {
+        let key = normalized(old);
+        if let Some(entry) = self.recent.iter_mut().find(|r| normalized(&r.path) == key) {
+            entry.path = new.to_path_buf();
+        }
+    }
+
     pub fn recent_existing(&self) -> Vec<&RecentFile> {
         self.recent.iter().filter(|r| r.path.exists()).collect()
     }
@@ -155,6 +164,33 @@ mod tests {
         s.touch_recent(Path::new("/nonexistent/a"), 1);
         s.remove_recent(Path::new("/nonexistent/a"));
         assert!(s.recent.is_empty());
+    }
+
+    #[test]
+    fn rename_recent_keeps_position_and_opened_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = touch(dir.path(), "a.mindweave");
+        let mut s = AppSettings::default();
+        s.touch_recent(Path::new("/nonexistent/c"), 3);
+        s.touch_recent(&a, 2);
+        s.touch_recent(Path::new("/nonexistent/b"), 1);
+        // A roundabout spelling of `a` still matches its entry.
+        let renamed = dir.path().join("renamed.mindweave");
+        s.rename_recent(&dir.path().join(".").join("a.mindweave"), &renamed);
+        let paths: Vec<_> = s.recent.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/nonexistent/b"),
+                renamed,
+                PathBuf::from("/nonexistent/c")
+            ]
+        );
+        assert_eq!(s.recent[1].opened_at, 2);
+        // An unknown path changes nothing.
+        let before = s.recent.clone();
+        s.rename_recent(Path::new("/nonexistent/x"), Path::new("/nonexistent/y"));
+        assert_eq!(s.recent, before);
     }
 
     #[test]

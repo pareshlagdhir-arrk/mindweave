@@ -2,6 +2,7 @@
 
 pub mod color;
 pub mod document;
+pub mod files;
 pub mod format;
 pub mod session;
 pub mod settings;
@@ -9,6 +10,7 @@ pub mod viewport;
 
 pub use color::{format_hex_color, normalize_hex_color, parse_hex_color};
 pub use document::{BackgroundPattern, CanvasSettings, Document, Layer, Page, Viewport};
+pub use files::{rename_document, validate_new_stem, RenameError, MAX_STEM_LEN};
 pub use format::{load, save, FormatError, FORMAT_VERSION};
 pub use session::DocumentSession;
 pub use settings::{
