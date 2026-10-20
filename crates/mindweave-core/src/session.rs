@@ -1,6 +1,7 @@
 //! An open document: edit operations, undo history and dirty tracking.
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use uuid::Uuid;
@@ -474,6 +475,7 @@ impl DocumentSession {
     /// Removes the shapes with `ids` from every layer of the active page
     /// and returns them, back to front.
     pub fn remove_shapes(&mut self, ids: &[Uuid]) -> Vec<Shape> {
+        let ids: HashSet<Uuid> = ids.iter().copied().collect();
         let found = self
             .page()
             .layers
@@ -498,6 +500,7 @@ impl DocumentSession {
     /// Applies `f` to each shape with one of `ids` on the active layer and
     /// normalises the result, recording a step only if some shape changed.
     pub fn update_shapes(&mut self, ids: &[Uuid], mut f: impl FnMut(&mut Shape)) {
+        let ids: HashSet<Uuid> = ids.iter().copied().collect();
         let changed: Vec<(usize, Shape)> = self
             .shapes_on_active_layer()
             .iter()
@@ -1152,6 +1155,59 @@ mod tests {
         assert!(s.can_undo());
         assert!(s.undo());
         assert_eq!(s.page().layers[0].objects, vec![c]);
+    }
+
+    fn many_rects(n: usize) -> (Vec<Shape>, Vec<Uuid>) {
+        let shapes: Vec<Shape> = (0..n).map(|i| rect(i as f32)).collect();
+        let ids = shapes.iter().map(|s| s.id).collect();
+        (shapes, ids)
+    }
+
+    #[test]
+    fn update_shapes_changes_every_one_of_many_ids() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let (shapes, ids) = many_rects(2_000);
+        s.add_shapes(shapes);
+        s.update_shapes(&ids, |sh| sh.frame.y = 5.0);
+        assert!(s
+            .shapes_on_active_layer()
+            .iter()
+            .all(|sh| sh.frame.y == 5.0));
+        // One undo step for the whole batch.
+        assert!(s.undo());
+        assert!(s
+            .shapes_on_active_layer()
+            .iter()
+            .all(|sh| sh.frame.y == 0.0));
+        // A subset by id leaves the others alone.
+        s.redo();
+        s.update_shapes(&ids[..1_000], |sh| sh.frame.y = 9.0);
+        let layer = s.shapes_on_active_layer();
+        assert!(layer[..1_000].iter().all(|sh| sh.frame.y == 9.0));
+        assert!(layer[1_000..].iter().all(|sh| sh.frame.y == 5.0));
+        assert_eq!(s.remove_shapes(&ids[1_000..]).len(), 1_000);
+        assert_eq!(s.shapes_on_active_layer().len(), 1_000);
+    }
+
+    /// Coarse guard that id lookup is not O(selected × shapes): a drag of
+    /// 2,000 selected shapes updates them once per pointer move.
+    /// Run with `cargo test --release -p mindweave-core -- --ignored`.
+    #[test]
+    #[ignore = "timing guard; release builds only"]
+    fn update_shapes_of_two_thousand_is_fast() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let (shapes, ids) = many_rects(2_000);
+        s.add_shapes(shapes);
+        s.begin_gesture();
+        let start = std::time::Instant::now();
+        for i in 0..60 {
+            s.update_shapes(&ids, |sh| sh.frame.y = i as f32);
+        }
+        let per_move = start.elapsed() / 60;
+        assert!(
+            per_move < std::time::Duration::from_millis(1),
+            "update_shapes took {per_move:?} per call"
+        );
     }
 
     #[test]
