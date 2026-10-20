@@ -7,6 +7,9 @@ use thiserror::Error;
 const EXTENSION: &str = "mindweave";
 /// The longest file name stem accepted, in characters.
 pub const MAX_STEM_LEN: usize = 200;
+/// The longest stem in UTF-8 bytes: the 255-byte file name limit less
+/// ".mindweave".
+const MAX_STEM_BYTES: usize = 255 - EXTENSION.len() - 1;
 
 #[derive(Debug, Error)]
 pub enum RenameError {
@@ -29,7 +32,7 @@ pub fn validate_new_stem(stem: &str) -> Result<String, RenameError> {
         Err(RenameError::Empty)
     } else if stem.contains(['/', ':']) || stem.starts_with('.') {
         Err(RenameError::Invalid)
-    } else if stem.chars().count() > MAX_STEM_LEN {
+    } else if stem.chars().count() > MAX_STEM_LEN || stem.len() > MAX_STEM_BYTES {
         Err(RenameError::TooLong)
     } else {
         Ok(stem.to_string())
@@ -46,11 +49,50 @@ pub fn rename_document(path: &Path, new_stem: &str) -> Result<PathBuf, RenameErr
     if new_path == path {
         return Ok(new_path);
     }
-    if new_path.exists() && !is_same_file(path, &new_path) {
-        return Err(RenameError::Exists(stem));
+    // A link at the new name counts as a file there, even a dangling one.
+    if std::fs::symlink_metadata(&new_path).is_ok() {
+        if !is_same_file(path, &new_path) {
+            return Err(RenameError::Exists(stem));
+        }
+        // A change of case only: the "existing" file is this one.
+        std::fs::rename(path, &new_path)?;
+        return Ok(new_path);
     }
-    std::fs::rename(path, &new_path)?;
-    Ok(new_path)
+    // Exclusive, so a file created at the new name since the check above
+    // is not replaced.
+    match rename_exclusive(path, &new_path) {
+        Ok(()) => Ok(new_path),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(RenameError::Exists(stem))
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Renames `from` to `to`, failing with `AlreadyExists` when `to` exists.
+#[cfg(target_os = "macos")]
+fn rename_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+    let from = CString::new(from.as_os_str().as_bytes())?;
+    let to = CString::new(to.as_os_str().as_bytes())?;
+    // SAFETY: both arguments are valid NUL-terminated strings that outlive
+    // the call.
+    let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        // EEXIST maps to `ErrorKind::AlreadyExists`.
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Renames `from` to `to`, failing with `AlreadyExists` when `to` exists:
+/// a hard link (which never replaces) then removal of the old name.
+#[cfg(not(target_os = "macos"))]
+fn rename_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(from, to)?;
+    std::fs::remove_file(from)
 }
 
 /// Whether `a` and `b` name the same file, as `plan` and `Plan` do on a
@@ -58,7 +100,7 @@ pub fn rename_document(path: &Path, new_stem: &str) -> Result<PathBuf, RenameErr
 #[cfg(unix)]
 fn is_same_file(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt as _;
-    match (std::fs::metadata(a), std::fs::metadata(b)) {
+    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
         (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
         _ => false,
     }
@@ -125,8 +167,13 @@ mod tests {
             validate_new_stem(&"x".repeat(MAX_STEM_LEN + 1)),
             Err(RenameError::TooLong)
         ));
-        // Characters, not bytes, count towards the limit.
-        assert!(validate_new_stem(&"é".repeat(MAX_STEM_LEN)).is_ok());
+        // Within 200 characters, a name must also fit in 245 UTF-8 bytes
+        // (the 255-byte file name limit less ".mindweave").
+        assert!(validate_new_stem(&"é".repeat(122)).is_ok());
+        assert!(matches!(
+            validate_new_stem(&"é".repeat(123)),
+            Err(RenameError::TooLong)
+        ));
     }
 
     #[test]
@@ -171,6 +218,45 @@ mod tests {
             std::fs::read_to_string(dir.path().join("B.mindweave")).unwrap(),
             "B.mindweave"
         );
+    }
+
+    #[test]
+    fn exclusive_rename_never_replaces_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(dir.path(), "A.mindweave");
+        let b = write(dir.path(), "B.mindweave");
+        let err = rename_exclusive(&a, &b).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "A.mindweave");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "B.mindweave");
+    }
+
+    #[test]
+    fn exclusive_rename_moves_to_a_free_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(dir.path(), "A.mindweave");
+        rename_exclusive(&a, &dir.path().join("C.mindweave")).unwrap();
+        assert_eq!(names(dir.path()), ["C.mindweave"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_treats_a_symlink_at_the_new_name_as_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(dir.path(), "A.mindweave");
+        // A dangling link, and one pointing at the file being renamed.
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), dir.path().join("B.mindweave"))
+            .unwrap();
+        std::os::unix::fs::symlink(&a, dir.path().join("C.mindweave")).unwrap();
+        assert!(matches!(
+            rename_document(&a, "B"),
+            Err(RenameError::Exists(_))
+        ));
+        assert!(matches!(
+            rename_document(&a, "C"),
+            Err(RenameError::Exists(_))
+        ));
+        assert!(a.exists());
     }
 
     #[test]

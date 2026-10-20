@@ -72,9 +72,18 @@ impl AppSettings {
     /// list and its `opened_at`.
     pub fn rename_recent(&mut self, old: &Path, new: &Path) {
         let key = normalized(old);
-        if let Some(entry) = self.recent.iter_mut().find(|r| normalized(&r.path) == key) {
-            entry.path = new.to_path_buf();
-        }
+        let Some(ix) = self.recent.iter().position(|r| normalized(&r.path) == key) else {
+            return;
+        };
+        self.recent[ix].path = new.to_path_buf();
+        // Drop any other (stale) entry for the new path.
+        let new_key = normalized(new);
+        let mut i = 0;
+        self.recent.retain(|r| {
+            let keep = i == ix || normalized(&r.path) != new_key;
+            i += 1;
+            keep
+        });
     }
 
     pub fn recent_existing(&self) -> Vec<&RecentFile> {
@@ -182,7 +191,22 @@ mod tests {
             paths,
             [
                 PathBuf::from("/nonexistent/b"),
-                renamed,
+                renamed.clone(),
+                PathBuf::from("/nonexistent/c")
+            ]
+        );
+        assert_eq!(s.recent[1].opened_at, 2);
+        // A stale entry already holding the new path is dropped, leaving one
+        // entry for the file, where the renamed one was.
+        let again = dir.path().join("again.mindweave");
+        s.touch_recent(&again, 9);
+        s.rename_recent(&renamed, &again);
+        let paths: Vec<_> = s.recent.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/nonexistent/b"),
+                again.clone(),
                 PathBuf::from("/nonexistent/c")
             ]
         );

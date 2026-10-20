@@ -401,10 +401,14 @@ fn tile_menu(menu: PopupMenu, path: &Path, view: &WeakEntity<Dashboard>, cx: &Ap
     .item(
         PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
             let (path, view) = (rename_path.clone(), view.clone());
-            // Once the menu has closed, so focus stays in the rename field.
+            // The menu and its popover hand focus back as they close, in
+            // effects queued after this handler. Deferring twice starts the
+            // rename after those have run, so focus stays in its field.
             window.defer(cx, move |window, cx| {
-                view.update(cx, |dashboard, cx| dashboard.begin_rename(path, window, cx))
-                    .ok();
+                window.defer(cx, move |window, cx| {
+                    view.update(cx, |dashboard, cx| dashboard.begin_rename(path, window, cx))
+                        .ok();
+                });
             });
         }),
     )

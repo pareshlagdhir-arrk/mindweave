@@ -258,10 +258,16 @@ impl AppState {
             if !matches!(answer.await, Ok(0)) {
                 return;
             }
-            cx.update(|cx| match move_to_trash(&path) {
-                Ok(()) => forget_recent(&path, cx),
-                Err(err) => {
-                    notify_error(format!("Could not move the file to the Trash: {err}"), cx)
+            cx.update(|cx| {
+                // It may have been opened while the prompt was showing.
+                if Self::refuse_if_open(&path, "deleting", cx) {
+                    return;
+                }
+                match move_to_trash(&path) {
+                    Ok(()) => forget_recent(&path, cx),
+                    Err(err) => {
+                        notify_error(format!("Could not move the file to the Trash: {err}"), cx)
+                    }
                 }
             });
         })

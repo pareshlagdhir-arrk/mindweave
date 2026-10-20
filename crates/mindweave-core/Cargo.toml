@@ -11,5 +11,8 @@ uuid.workspace = true
 thiserror.workspace = true
 dirs.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
