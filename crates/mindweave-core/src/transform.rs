@@ -226,7 +226,9 @@ fn resized_size(
 /// frames scale their positions and sizes relative to [`selection_bounds`],
 /// keeping each rotation (Figma-style; no skew). Dragging past the
 /// opposite edge toggles `flip_x`/`flip_y`; a dragged side never drops
-/// below [`MIN_SIZE`] (an axis the handle does not move keeps its size).
+/// below [`MIN_SIZE`] (an axis the handle does not move keeps its size,
+/// and a zero-extent axis, as on a straight line, is never thickened by
+/// `keep_aspect` or by a group resize).
 pub fn resize(
     start: &[Frame],
     handle: Handle,
@@ -237,8 +239,13 @@ pub fn resize(
 ) -> Vec<Frame> {
     let d = (pointer.0 - start_pointer.0, pointer.1 - start_pointer.1);
     let (hx, hy) = handle.sides();
-    let affects_x = hx != 0.0 || keep_aspect;
-    let affects_y = hy != 0.0 || keep_aspect;
+    // Which axes a `w × h` box's gesture changes. Keeping the aspect ratio
+    // only couples the axes when both have extent; a zero-extent axis
+    // (a straight line) stays zero.
+    let affected = |w: f32, h: f32| {
+        let aspect = keep_aspect && w > 0.0 && h > 0.0;
+        (hx != 0.0 || aspect, hy != 0.0 || aspect)
+    };
     let side = |old: f32, signed: f32, affected: bool| {
         if affected {
             signed.abs().max(MIN_SIZE)
@@ -247,6 +254,7 @@ pub fn resize(
         }
     };
     if let [f] = start {
+        let (affects_x, affects_y) = affected(f.w, f.h);
         let (u, v) = axes(f);
         let local = (d.0 * u.0 + d.1 * u.1, d.0 * v.0 + d.1 * v.1);
         let (sw, sh) = resized_size(f.w, f.h, handle, local, keep_aspect, from_center);
@@ -272,6 +280,7 @@ pub fn resize(
     let Some(b) = selection_bounds(start) else {
         return Vec::new();
     };
+    let (affects_x, affects_y) = affected(b.w, b.h);
     let (sw, sh) = resized_size(b.w, b.h, handle, d, keep_aspect, from_center);
     let sx = if b.w > 0.0 && affects_x {
         sw / b.w
@@ -297,8 +306,9 @@ pub fn resize(
                 anchor.0 + (c.0 - anchor.0) * sx,
                 anchor.1 + (c.1 - anchor.1) * sy,
             );
-            let w = side(f.w, f.w * sx.abs(), affects_x);
-            let h = side(f.h, f.h * sy.abs(), affects_y);
+            // A shape with no extent on an axis (a straight line) keeps it.
+            let w = side(f.w, f.w * sx.abs(), affects_x && f.w > 0.0);
+            let h = side(f.h, f.h * sy.abs(), affects_y && f.h > 0.0);
             let mut out = recentred(f, center, w, h);
             out.flip_x ^= sx < 0.0;
             out.flip_y ^= sy < 0.0;
@@ -691,9 +701,10 @@ mod tests {
         assert!(close(r[0].rotation, 15.0), "{}", r[0].rotation);
         let r = rotate(&[f], c, (150.0, 50.0), p, false);
         assert!(close(r[0].rotation, 20.0));
-        // Counter-clockwise wraps into [0, 360).
+        // A small counter-clockwise drag snaps back to 0°.
         let r = rotate(&[f], c, (150.0, 50.0), (150.0, 40.0), true);
         assert!(close(r[0].rotation, 0.0));
+        // A quarter turn counter-clockwise wraps -90° to 270°.
         let r = rotate(&[f], c, (150.0, 50.0), (50.0, -50.0), false);
         assert!(close(r[0].rotation, 270.0));
         // A single shape rotating about its own centre does not move.
@@ -762,7 +773,8 @@ mod tests {
             rotation: 90.0,
             ..frame(0.0, 0.0, 100.0, 50.0)
         };
-        // Rotated 90° clockwise about (50, 25): top-left goes to top-right.
+        // Rotated 90° clockwise about (50, 25): the box's local top-left
+        // corner (NW handle) lands at the top-right of its canvas bounds.
         assert_pt(corner(&f, Handle::NW), (75.0, -25.0));
         assert_pt(corner(&f, Handle::E), (50.0, 75.0));
         // "Up" for this box points to +x on screen.
@@ -770,6 +782,98 @@ mod tests {
         let g = frame(0.0, 0.0, 100.0, 50.0);
         assert_pt(rotate_handle_position(&g, 20.0), (50.0, -20.0));
         assert_eq!(handle_positions(&g)[0].0, Handle::N);
+    }
+
+    fn horizontal_line() -> Frame {
+        frame(0.0, 50.0, 100.0, 0.0)
+    }
+
+    #[test]
+    fn group_resize_keeps_zero_height_line_flat() {
+        let line = horizontal_line();
+        let bx = frame(0.0, 0.0, 40.0, 40.0);
+        let b = selection_bounds(&[bx, line]).unwrap();
+        let se = (b.x + b.w, b.y + b.h);
+        for keep_aspect in [false, true] {
+            let r = resize(
+                &[bx, line],
+                Handle::SE,
+                se,
+                (se.0 + 50.0, se.1 + 30.0),
+                keep_aspect,
+                false,
+            );
+            assert_eq!(r[1].h, 0.0, "keep_aspect {keep_aspect}: {:?}", r[1]);
+            assert!(r[1].w > 100.0);
+        }
+    }
+
+    #[test]
+    fn keep_aspect_edge_drag_keeps_zero_height_line_flat() {
+        let line = horizontal_line();
+        for from_center in [false, true] {
+            let r = resize(
+                &[line],
+                Handle::E,
+                (100.0, 50.0),
+                (150.0, 50.0),
+                true,
+                from_center,
+            );
+            assert_eq!(r[0].h, 0.0, "from_center {from_center}: {:?}", r[0]);
+            assert!(close(r[0].y, 50.0));
+        }
+    }
+
+    #[test]
+    fn every_handle_keeps_its_opposite_fixed_on_rotated_flipped_frame() {
+        let f = Frame {
+            rotation: 37.0,
+            flip_x: true,
+            flip_y: true,
+            ..frame(20.0, 30.0, 80.0, 50.0)
+        };
+        let opposite =
+            |h: Handle| Handle::ALL[(Handle::ALL.iter().position(|&k| k == h).unwrap() + 4) % 8];
+        for h in Handle::ALL {
+            let from = corner(&f, h);
+            let r = resize(&[f], h, from, (from.0 + 13.0, from.1 - 7.0), false, false);
+            assert!(close(r[0].rotation, 37.0));
+            assert_pt(corner(&r[0], opposite(h)), corner(&f, opposite(h)));
+        }
+    }
+
+    #[test]
+    fn crossing_edge_on_rotated_shape_toggles_local_flip() {
+        let f = Frame {
+            rotation: 90.0,
+            ..frame(0.0, 0.0, 100.0, 50.0)
+        };
+        // Local +x points down the screen; drag the E handle up past W.
+        let e = corner(&f, Handle::E);
+        let r = resize(&[f], Handle::E, e, (e.0, e.1 - 130.0), false, false);
+        assert!(r[0].flip_x && !r[0].flip_y);
+        assert!(close(r[0].w, 30.0) && close(r[0].h, 50.0));
+        assert!(close(r[0].rotation, 90.0));
+        assert_pt(corner(&r[0], Handle::E), corner(&f, Handle::W));
+    }
+
+    #[test]
+    fn handles_ignore_flips() {
+        let f = Frame {
+            rotation: 20.0,
+            ..frame(5.0, 6.0, 70.0, 30.0)
+        };
+        let flipped = Frame {
+            flip_x: true,
+            flip_y: true,
+            ..f
+        };
+        assert_eq!(handle_positions(&f), handle_positions(&flipped));
+        assert_eq!(
+            rotate_handle_position(&f, 12.0),
+            rotate_handle_position(&flipped, 12.0)
+        );
     }
 
     #[test]
