@@ -1,6 +1,7 @@
 //! The infinite canvas: paints the active page's background pattern and
-//! shapes, turns scroll, pinch and drag input into viewport changes, and
-//! passes shape-tool drags to placement.
+//! shapes and selection, turns scroll, pinch and drag input into viewport
+//! changes, and passes left drags to placement or the Pointer tool's
+//! gestures.
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
@@ -9,8 +10,8 @@ use mindweave_core::{
     BackgroundPattern, CanvasSettings, Page, Viewport, ZOOM_STEP,
 };
 
-use super::interaction::{Gesture, PREVIEW_OPACITY};
-use super::shape_paint::{paint_preview, paint_shapes};
+use super::interaction::{marquee_rect, Gesture, PREVIEW_OPACITY, ROTATE_HANDLE_OFFSET_PX};
+use super::shape_paint::{paint_marquee, paint_preview, paint_selection, paint_shapes};
 use super::tool::Tool;
 use super::{hex_to_hsla, EditorWindow};
 use crate::actions::{ZoomIn, ZoomOut, ZoomReset};
@@ -35,13 +36,20 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
         move |bounds, hitbox, window, cx| {
             paint_background(bounds, &settings, &viewport, window, cx);
             editor.update(cx, |editor, cx| editor.paint_content(bounds, window, cx));
-            let (dragging, hand, crosshair) = {
+            let (dragging, hand, crosshair, pointer) = {
                 let editor = editor.read(cx);
+                let pointer = (editor.tools.tool == Tool::Pointer)
+                    .then(|| {
+                        let at = editor.pointer_local.map(|p| editor.to_canvas(p));
+                        editor.pointer_cursor(at)
+                    })
+                    .flatten();
                 (
                     editor.pan_drag.is_some(),
                     editor.left_drag_pans(),
                     matches!(editor.tools.tool, Tool::Shape { .. })
-                        || editor.gesture != Gesture::Idle,
+                        || matches!(editor.gesture, Gesture::Placing { .. }),
+                    pointer,
                 )
             };
             if dragging {
@@ -50,6 +58,8 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
                 window.set_cursor_style(CursorStyle::OpenHand, &hitbox);
             } else if crosshair {
                 window.set_cursor_style(CursorStyle::Crosshair, &hitbox);
+            } else if let Some(cursor) = pointer {
+                window.set_cursor_style(cursor, &hitbox);
             }
             register_input(editor, bounds, hitbox, window);
         },
@@ -186,7 +196,8 @@ fn register_input(
 
     // A click focuses the editor (so Space can pan); middle drag, or left
     // drag with Space held or the Hand tool, starts a pan; a left press
-    // with a shape tool starts placing a shape.
+    // with a shape tool starts placing a shape, and with the Pointer tool
+    // selects, moves, resizes or rotates.
     window.on_mouse_event({
         let editor = editor.clone();
         let hitbox = hitbox.clone();
@@ -206,13 +217,17 @@ fn register_input(
                     cx.notify();
                 } else if event.button == MouseButton::Left {
                     let at = editor.to_canvas(local(event.position, bounds));
-                    editor.begin_placing(at, event.modifiers, window, cx);
+                    match editor.tools.tool {
+                        Tool::Pointer => editor.begin_pointer_press(at, event.modifiers, cx),
+                        Tool::Shape { .. } => editor.begin_placing(at, event.modifiers, window, cx),
+                        Tool::Hand => {}
+                    }
                 }
             });
         }
     });
 
-    // Pointer movement: continues a pan or a placement (even outside the
+    // Pointer movement: continues a pan or a gesture (even outside the
     // canvas) and reports the pointer's canvas position to the status bar.
     window.on_mouse_event({
         let editor = editor.clone();
@@ -240,9 +255,10 @@ fn register_input(
                 if editor.gesture != Gesture::Idle {
                     let at = editor.to_canvas(local(event.position, bounds));
                     if event.pressed_button.is_some() {
-                        editor.update_placing(Some(at), event.modifiers, cx);
+                        editor.update_gesture(Some(at), event.modifiers, cx);
                     } else {
-                        editor.finish_placing(Some(at), event.modifiers, cx);
+                        // The button was released where we could not see it.
+                        editor.finish_gesture(Some(at), event.modifiers, cx);
                     }
                 }
                 editor.refresh_cursor(cx);
@@ -262,7 +278,7 @@ fn register_input(
                 }
                 if event.button == MouseButton::Left && editor.gesture != Gesture::Idle {
                     let at = editor.to_canvas(local(event.position, bounds));
-                    editor.finish_placing(Some(at), event.modifiers, cx);
+                    editor.finish_gesture(Some(at), event.modifiers, cx);
                 }
             });
         }
@@ -280,7 +296,8 @@ fn register_input(
 }
 
 impl EditorWindow {
-    /// Paints the active page's shapes and the shape being placed.
+    /// Paints the active page's shapes, the shape being placed, the
+    /// selection chrome and the marquee.
     fn paint_content(
         &mut self,
         bounds: Bounds<Pixels>,
@@ -310,10 +327,32 @@ impl EditorWindow {
                 PREVIEW_OPACITY,
             );
         }
+        let accent = cx.theme().primary;
+        if let Some(chrome) = self.selection_chrome() {
+            paint_selection(
+                window,
+                bounds,
+                &viewport,
+                &chrome,
+                ROTATE_HANDLE_OFFSET_PX,
+                accent,
+            );
+        }
+        if let Gesture::Marquee { start, current, .. } = self.gesture {
+            if self.press.dragged {
+                paint_marquee(
+                    window,
+                    bounds,
+                    &viewport,
+                    &marquee_rect(start, current),
+                    accent,
+                );
+            }
+        }
     }
 
     /// A point relative to the canvas origin, in canvas coordinates.
-    fn to_canvas(&self, local: (f32, f32)) -> (f32, f32) {
+    pub(super) fn to_canvas(&self, local: (f32, f32)) -> (f32, f32) {
         self.session.page().viewport.screen_to_canvas(local)
     }
 

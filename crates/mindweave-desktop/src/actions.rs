@@ -23,8 +23,18 @@ actions!(
         ToolEllipse,
         ToolLine,
         ToolArrow,
-        /// Escape in the editor: back to the Pointer tool.
+        /// Escape in the editor: aborts a gesture, else clears the
+        /// selection and goes back to the Pointer tool.
         Cancel,
+        /// Arrow keys: move the selection 1 unit; with Shift, 10.
+        NudgeLeft,
+        NudgeRight,
+        NudgeUp,
+        NudgeDown,
+        NudgeLeftFar,
+        NudgeRightFar,
+        NudgeUpFar,
+        NudgeDownFar,
         /// Stands in for menu items that are not built yet. Nothing handles
         /// it, so the native menu always shows such items disabled.
         NotImplemented,
@@ -61,6 +71,14 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("l", ToolLine, editor),
         KeyBinding::new("a", ToolArrow, editor),
         KeyBinding::new("escape", Cancel, editor),
+        KeyBinding::new("left", NudgeLeft, editor),
+        KeyBinding::new("right", NudgeRight, editor),
+        KeyBinding::new("up", NudgeUp, editor),
+        KeyBinding::new("down", NudgeDown, editor),
+        KeyBinding::new("shift-left", NudgeLeftFar, editor),
+        KeyBinding::new("shift-right", NudgeRightFar, editor),
+        KeyBinding::new("shift-up", NudgeUpFar, editor),
+        KeyBinding::new("shift-down", NudgeDownFar, editor),
     ]
 }
 
@@ -103,6 +121,14 @@ mod tests {
             ("l", "mindweave::ToolLine"),
             ("a", "mindweave::ToolArrow"),
             ("escape", "mindweave::Cancel"),
+            ("left", "mindweave::NudgeLeft"),
+            ("right", "mindweave::NudgeRight"),
+            ("up", "mindweave::NudgeUp"),
+            ("down", "mindweave::NudgeDown"),
+            ("shift-left", "mindweave::NudgeLeftFar"),
+            ("shift-right", "mindweave::NudgeRightFar"),
+            ("shift-up", "mindweave::NudgeUpFar"),
+            ("shift-down", "mindweave::NudgeDownFar"),
         ];
         let expected: Vec<(String, &str)> =
             expected.iter().map(|(k, a)| (k.to_string(), *a)).collect();
@@ -111,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_keys_apply_in_the_editor_but_not_in_text_fields() {
+    fn editor_keys_apply_in_the_editor_but_not_in_text_fields() {
         use gpui_kit::KeyContext;
         let context = |names: &[&str]| -> Vec<KeyContext> {
             names
@@ -121,9 +147,12 @@ mod tests {
         };
         let tool_bindings: Vec<KeyBinding> = key_bindings()
             .into_iter()
-            .filter(|b| b.action().name().contains("Tool") || b.action().name().ends_with("Cancel"))
+            .filter(|b| {
+                let name = b.action().name();
+                name.contains("Tool") || name.ends_with("Cancel") || name.contains("Nudge")
+            })
             .collect();
-        assert_eq!(tool_bindings.len(), 7);
+        assert_eq!(tool_bindings.len(), 15);
         for binding in &tool_bindings {
             let predicate = binding.predicate().expect("tool keys have a context");
             assert!(predicate.eval(&context(&["Root", EDITOR_CONTEXT])));

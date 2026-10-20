@@ -3740,6 +3740,7 @@ dependencies = [
  "mindweave-core",
  "rfd",
  "serde_json",
+ "tempfile",
  "trash",
  "uuid",
 ]

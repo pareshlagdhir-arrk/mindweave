@@ -7,7 +7,10 @@ use std::collections::{BTreeMap, HashMap};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{bounds, to_canvas, FillRole, Frame, Geometry, PathCmd, Pt, Rect};
-use mindweave_core::{frame_aabb, LibraryRegistry, Page, Shape, Style, Viewport};
+use mindweave_core::{
+    frame_aabb, handle_positions, rotate_handle_position, Handle, LibraryRegistry, Page, Shape,
+    Style, Viewport,
+};
 use uuid::Uuid;
 
 use super::hex_to_hsla;
@@ -19,6 +22,11 @@ const PLACEHOLDER_DASH: [f32; 2] = [4., 3.];
 const PLACEHOLDER_TEXT_SIZE: f32 = 11.;
 /// Thinnest stroke painted, in pixels, so zoomed-out outlines stay visible.
 const MIN_STROKE_PX: f32 = 0.5;
+/// Side of a square resize handle, and diameter of the rotate handle, in
+/// pixels.
+pub const HANDLE_SIZE_PX: f32 = 6.;
+/// Fill opacity of the marquee, times the accent colour.
+const MARQUEE_FILL_OPACITY: f32 = 0.08;
 
 /// A shape's outline in canvas coordinates.
 #[derive(Clone, Debug, PartialEq)]
@@ -114,9 +122,9 @@ impl GeometryCache {
         self.entries.retain(|_, e| e.used == frame);
     }
 
-    /// The canvas outline of `shape`, built on a miss or a change.
-    #[cfg(test)]
-    fn get(&mut self, shape: &Shape, libs: &LibraryRegistry) -> &CanvasGeometry {
+    /// The canvas outline of `shape`, built on a miss or a change. Hit
+    /// tests use it so a pointer move reuses the painted outlines.
+    pub fn outline(&mut self, shape: &Shape, libs: &LibraryRegistry) -> &CanvasGeometry {
         &self.entry(shape, libs).outline
     }
 
@@ -417,6 +425,105 @@ impl<'a> ShapePainter<'a> {
     }
 }
 
+/// Paints the selection chrome on `chrome` (canvas coordinates): a 1px
+/// `accent` box, eight square handles and the rotate handle
+/// `rotate_offset` pixels above the top edge, all white with an accent
+/// border.
+pub fn paint_selection(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    vp: &Viewport,
+    chrome: &Frame,
+    rotate_offset: f32,
+    accent: Hsla,
+) {
+    let to_window = |p: Pt| {
+        let (x, y) = vp.canvas_to_screen(p);
+        point(bounds.origin.x + px(x), bounds.origin.y + px(y))
+    };
+    let handles = handle_positions(chrome);
+    let corner = |h: Handle| {
+        to_window(
+            handles
+                .iter()
+                .find(|(k, _)| *k == h)
+                .map_or((0., 0.), |(_, p)| *p),
+        )
+    };
+    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        if chrome.rotation == 0. {
+            // Snapped to whole pixels so the 1px box stays crisp.
+            let (a, b) = (corner(Handle::NW), corner(Handle::SE));
+            let (x0, y0) = (f32::from(a.x).round(), f32::from(a.y).round());
+            let (x1, y1) = (f32::from(b.x).round(), f32::from(b.y).round());
+            let r = Bounds::new(
+                point(px(x0), px(y0)),
+                size_of((x1 - x0).max(1.), (y1 - y0).max(1.)),
+            );
+            window.paint_quad(outline(r, accent, BorderStyle::Solid));
+        } else {
+            let mut builder = PathBuilder::stroke(px(1.));
+            builder.move_to(corner(Handle::NW));
+            for h in [Handle::NE, Handle::SE, Handle::SW] {
+                builder.line_to(corner(h));
+            }
+            builder.close();
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, accent);
+            }
+        }
+        let rotate = to_window(rotate_handle_position(chrome, rotate_offset / vp.zoom));
+        let half = HANDLE_SIZE_PX / 2.;
+        let knob = |centre: Point<Pixels>, radius: f32| {
+            let origin = point(
+                px((f32::from(centre.x) - half).round()),
+                px((f32::from(centre.y) - half).round()),
+            );
+            quad(
+                Bounds::new(origin, size_of(HANDLE_SIZE_PX, HANDLE_SIZE_PX)),
+                px(radius),
+                gpui_kit::white(),
+                px(1.),
+                accent,
+                BorderStyle::Solid,
+            )
+        };
+        for (_, p) in handles {
+            window.paint_quad(knob(to_window(p), 0.));
+        }
+        window.paint_quad(knob(rotate, half));
+    });
+}
+
+/// Paints the marquee `rect` (canvas coordinates): a 1px `accent` border
+/// over an 8% accent fill.
+pub fn paint_marquee(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    vp: &Viewport,
+    rect: &Rect,
+    accent: Hsla,
+) {
+    let r = screen_rect(rect, vp, 0.);
+    let r = Bounds::new(
+        point(
+            bounds.origin.x + px(r.x.round()),
+            bounds.origin.y + px(r.y.round()),
+        ),
+        size_of(r.w.round().max(1.), r.h.round().max(1.)),
+    );
+    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        window.paint_quad(quad(
+            r,
+            px(0.),
+            accent.opacity(MARQUEE_FILL_OPACITY),
+            px(1.),
+            accent,
+            BorderStyle::Solid,
+        ));
+    });
+}
+
 fn size_of(w: f32, h: f32) -> Size<Pixels> {
     size(px(w), px(h))
 }
@@ -540,20 +647,20 @@ mod tests {
         let mut cache = GeometryCache::default();
 
         cache.begin_frame();
-        assert_eq!(cache.get(&a, &libs).aabb.w, 10.);
-        cache.get(&b, &libs);
+        assert_eq!(cache.outline(&a, &libs).aabb.w, 10.);
+        cache.outline(&b, &libs);
         cache.end_frame();
         assert_eq!(cache.len(), 2);
 
         a.frame.w = 30.;
         cache.begin_frame();
-        assert_eq!(cache.get(&a, &libs).aabb.w, 30.);
+        assert_eq!(cache.outline(&a, &libs).aabb.w, 30.);
         cache.end_frame();
         assert_eq!(cache.len(), 1);
 
         a.set_param("corner_radius", 4.);
         cache.begin_frame();
-        let rebuilt = cache.get(&a, &libs).clone();
+        let rebuilt = cache.outline(&a, &libs).clone();
         assert_eq!(rebuilt, shape_geometry(&a, &libs));
         cache.end_frame();
     }

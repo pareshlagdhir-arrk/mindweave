@@ -22,12 +22,13 @@ use gpui_kit::*;
 use mindweave_core::{format_hex_color, parse_hex_color, DocumentSession, Viewport};
 
 use crate::actions::{
-    Cancel, CloseWindow, Save, ToggleLayers, ToggleProperties, ToolArrow, ToolEllipse, ToolHand,
-    ToolLine, ToolPointer, ToolRectangle, EDITOR_CONTEXT,
+    Cancel, CloseWindow, NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight,
+    NudgeRightFar, NudgeUp, NudgeUpFar, Save, ToggleLayers, ToggleProperties, ToolArrow,
+    ToolEllipse, ToolHand, ToolLine, ToolPointer, ToolRectangle, EDITOR_CONTEXT,
 };
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
-use interaction::Gesture;
+use interaction::{Gesture, Press, NUDGE_FAR_STEP, NUDGE_STEP};
 use shape_paint::GeometryCache;
 use tool::{Tool, ToolState, BASIC_SHAPES};
 use uuid::Uuid;
@@ -131,6 +132,8 @@ pub struct EditorWindow {
     pub tools: ToolState,
     /// The pointer gesture in progress on the canvas.
     pub gesture: Gesture,
+    /// The left press behind a Pointer-tool gesture.
+    press: Press,
     /// Selected shapes, all on the active layer.
     pub selection: Vec<Uuid>,
     /// Canvas outlines of the shapes painted last frame.
@@ -171,6 +174,7 @@ impl EditorWindow {
             rename: None,
             tools: ToolState::default(),
             gesture: Gesture::Idle,
+            press: Press::default(),
             selection: Vec::new(),
             geometry_cache: GeometryCache::default(),
             properties,
@@ -466,10 +470,13 @@ impl EditorWindow {
         self.select_tool(Tool::shape(BASIC_SHAPES, "arrow"), cx);
     }
 
-    /// Escape: back to the Pointer tool, unlocked.
+    /// Escape: aborts the gesture in progress; otherwise clears the
+    /// selection and goes back to the Pointer tool, unlocked.
     fn on_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_gesture(cx);
-        self.tools.cancel();
+        if !self.cancel_gesture(cx) {
+            self.selection.clear();
+            self.tools.cancel();
+        }
         cx.notify();
     }
 
@@ -484,14 +491,15 @@ impl EditorWindow {
         }
     }
 
-    /// Shift and Alt change the shape being placed without a pointer move.
+    /// Shift and Alt change the shape being placed, resized or rotated
+    /// without a pointer move.
     fn on_modifiers_changed(
         &mut self,
         event: &ModifiersChangedEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.update_placing(None, event.modifiers, cx);
+        self.update_gesture(None, event.modifiers, cx);
     }
 
     fn on_key_up(&mut self, event: &KeyUpEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -653,6 +661,22 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_tool_line))
             .on_action(cx.listener(Self::on_tool_arrow))
             .on_action(cx.listener(Self::on_cancel))
+            .on_action(cx.listener(|this, _: &NudgeLeft, _, cx| this.nudge(-NUDGE_STEP, 0., cx)))
+            .on_action(cx.listener(|this, _: &NudgeRight, _, cx| this.nudge(NUDGE_STEP, 0., cx)))
+            .on_action(cx.listener(|this, _: &NudgeUp, _, cx| this.nudge(0., -NUDGE_STEP, cx)))
+            .on_action(cx.listener(|this, _: &NudgeDown, _, cx| this.nudge(0., NUDGE_STEP, cx)))
+            .on_action(
+                cx.listener(|this, _: &NudgeLeftFar, _, cx| this.nudge(-NUDGE_FAR_STEP, 0., cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NudgeRightFar, _, cx| this.nudge(NUDGE_FAR_STEP, 0., cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NudgeUpFar, _, cx| this.nudge(0., -NUDGE_FAR_STEP, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NudgeDownFar, _, cx| this.nudge(0., NUDGE_FAR_STEP, cx)),
+            )
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
