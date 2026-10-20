@@ -104,6 +104,10 @@ style = { fill = "#FFF4D6", stroke = "#C99A2E" }
 | `icon`        | string  | no       | `"shapes"` | The tab icon. See [Icons](#icons). |
 | `order`       | integer | no       | `0`        | Sort key among user libraries; lower comes first. Ties are sorted by `name`. |
 
+An optional field with the wrong type, or an `order` outside the 32-bit
+integer range, gives a warning and uses its default; the library still
+loads.
+
 ## `shapes.toml`
 
 The file holds one `[[shape]]` table per shape, at most 500 shapes. Shapes
@@ -150,6 +154,10 @@ of the shape's primitive.
 | `default` | number | no       | `min`              | The value of a newly placed shape. It is clamped to `min..max`. |
 
 Values in documents are clamped to `min..max` when the shape is drawn.
+A `min..max` range wider than the primitive's own limits (see
+[Primitives](#primitives)) is narrowed to those limits when the library
+loads, with a warning, so the sidebar never offers values the shape
+ignores.
 A parameter that a primitive reads but the shape does not declare is not
 shown in the sidebar and uses the primitive's own default. SVG shapes have
 no parameters in format 1.
@@ -166,7 +174,7 @@ no parameters in format 1.
 | `star`    | `points` (5; whole numbers from 3 to 20), `inner_ratio` (0.5; from 0.1 to 0.9) | A star; `inner_ratio` is the inner radius relative to the outer radius. |
 
 Mindweave also clamps every value to these limits, whatever a document
-or a parameter declaration says.
+says, and narrows a parameter declaration's range to them.
 
 ## SVG outlines
 
@@ -180,8 +188,9 @@ is used:
   and their contents. Nothing is executed or fetched.
 - Colours and other paint attributes are ignored. `line` and `polyline`
   are drawn as strokes only; every other element is filled with the
-  shape's fill colour. Overlapping areas use the even-odd rule, so an
-  inner contour cuts a hole.
+  shape's fill colour. Within one element, overlapping areas use the
+  even-odd rule, so an inner contour of a `path` cuts a hole. Separate
+  elements are filled one over another and never cut holes in each other.
 - Of `transform`, only `translate` and `scale` are applied; `rotate`,
   `skewX`, `skewY` and `matrix` are skipped. Bake other transforms into
   the path before you save.
@@ -190,7 +199,8 @@ is used:
 
 Limits: each file is at most 1 MB; documents with a DTD or with elements
 nested more than 64 deep are rejected; path numbers larger than 1,000,000
-make that path contribute nothing.
+make that path contribute nothing. A file used by several shapes or icons
+is read once.
 
 An SVG that cannot be used gives a warning and skips only that shape.
 
@@ -204,23 +214,28 @@ An `icon` value is either:
   `"shapes/decision.svg"`. It follows the same rules as
   [SVG outlines](#svg-outlines) and is drawn as a monochrome icon.
 
-An invalid icon gives a warning and the default icon is used.
+An invalid icon gives a warning and the default icon is used. So does a
+well-formed Lucide name that this version of Mindweave does not bundle.
 
 ## Compatibility and errors
 
 - `format` must be `1`. A library that declares a higher format is skipped
   with the notice "needs a newer version of Mindweave". A missing or
   invalid `format` skips the library too.
-- Unknown fields are ignored with a warning, so a library written for a
-  later Mindweave can still load when it only adds fields.
+- Unknown fields are ignored, so a library written for a later Mindweave
+  can still load when it only adds fields. They are written to the log
+  (standard error) once per launch rather than shown as a notice.
 - Problems in one shape (unknown primitive, unusable SVG, duplicate shape
   `id`, missing `id` or `name`) skip only that shape, with a warning.
   Problems in one parameter skip only that parameter.
 - These problems skip the whole library: a missing `library.toml` or
-  `shapes.toml`, a file larger than 1 MB, invalid TOML, a missing or
-  invalid required field in `library.toml`, more than 500 shapes, or an
-  `id` that another loaded library already uses. Built-in libraries keep
-  their ids.
+  `shapes.toml`, a file larger than 1 MB, files that add up to more than
+  16 MB, invalid TOML, a missing or invalid required field in
+  `library.toml`, more than 500 shapes, or an `id` that another loaded
+  library already uses. Built-in libraries keep their ids.
+- At most 100 library folders are loaded, in folder name order; one
+  notice counts the folders that were skipped.
+- Notices quote at most 60 characters of any value from your files.
 
 ## Worked example: Basic Shapes
 
