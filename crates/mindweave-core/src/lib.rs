@@ -1,5 +1,6 @@
 //! Mindweave core: pure-Rust document model and file format.
 
+pub mod clipboard;
 pub mod color;
 pub mod document;
 pub mod files;
@@ -14,6 +15,10 @@ pub mod svg;
 pub mod transform;
 pub mod viewport;
 
+pub use clipboard::{
+    duplicate, from_clipboard, prepare_paste, to_clipboard, CLIPBOARD_MARKER, CLIPBOARD_VERSION,
+    MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_SHAPES,
+};
 pub use color::{format_hex_color, normalize_hex_color, parse_hex_color};
 pub use document::{BackgroundPattern, CanvasSettings, Document, Layer, Page, Viewport};
 pub use files::{rename_document, validate_new_stem, RenameError, MAX_STEM_LEN};
