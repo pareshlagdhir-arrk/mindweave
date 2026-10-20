@@ -9,6 +9,9 @@ pub const ZOOM_STEP: f32 = 1.25;
 /// Minimum on-screen distance between grid lines, in pixels.
 const MIN_SPACING_PX: f32 = 8.0;
 
+/// Hard cap on lines per axis, so huge extents cannot allocate unboundedly.
+const MAX_LINES_PER_AXIS: f64 = 10_000.0;
+
 impl Viewport {
     /// Canvas point under the given screen point.
     pub fn screen_to_canvas(&self, p: (f32, f32)) -> (f32, f32) {
@@ -29,6 +32,13 @@ impl Viewport {
     /// Multiplies zoom by `factor` (clamped), keeping the canvas point under
     /// `screen_anchor` fixed on screen.
     pub fn zoom_at(&mut self, factor: f32, screen_anchor: (f32, f32)) {
+        if !factor.is_finite()
+            || factor <= 0.0
+            || !screen_anchor.0.is_finite()
+            || !screen_anchor.1.is_finite()
+        {
+            return;
+        }
         let anchor = self.screen_to_canvas(screen_anchor);
         self.zoom = (self.zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
         self.x = anchor.0 - screen_anchor.0 / self.zoom;
@@ -81,17 +91,16 @@ pub fn grid_lines(vp: &Viewport, size: (f32, f32), grid_size: f32) -> GridLines 
     let alpha = ((spacing_px - MIN_SPACING_PX) / 8.0).clamp(0.3, 1.0);
 
     let lines = |origin: f32, extent: f32| {
-        let mut out = Vec::new();
-        let mut i = (origin / canvas_spacing).ceil();
-        loop {
-            let screen = (i * canvas_spacing - origin) * vp.zoom;
-            if screen > extent {
-                break;
-            }
-            out.push(screen);
-            i += 1.0;
+        let spacing = f64::from(spacing_px);
+        let first = (f64::from(origin) / f64::from(canvas_spacing)).ceil();
+        let start = (first * f64::from(canvas_spacing) - f64::from(origin)) * f64::from(vp.zoom);
+        if start > f64::from(extent) {
+            return Vec::new();
         }
-        out
+        let count = (((f64::from(extent) - start) / spacing).floor() + 1.0).min(MAX_LINES_PER_AXIS);
+        (0..count as usize)
+            .map(|k| (start + k as f64 * spacing) as f32)
+            .collect()
     };
 
     GridLines {
@@ -181,6 +190,37 @@ mod tests {
         assert!(g.xs.is_empty() && g.ys.is_empty());
         let g = grid_lines(&vp(0.0, 0.0, 1.0), (f32::INFINITY, 100.0), 20.0);
         assert!(g.xs.is_empty() && g.ys.is_empty());
+    }
+
+    #[test]
+    fn grid_lines_terminates_at_huge_offset() {
+        let g = grid_lines(&vp(1e9, 1e9, 1.0), (1000.0, 800.0), 20.0);
+        assert!(g.xs.len() <= 1000 / 8 + 2);
+        assert!(g.ys.len() <= 800 / 8 + 2);
+        assert!(!g.xs.is_empty());
+    }
+
+    #[test]
+    fn grid_lines_capped_for_huge_size() {
+        let g = grid_lines(&vp(0.0, 0.0, 1.0), (1e9, 1e9), 20.0);
+        assert!(g.xs.len() <= 10_000 && g.ys.len() <= 10_000);
+        assert_eq!(g.xs.len(), 10_000);
+    }
+
+    #[test]
+    fn zoom_at_ignores_invalid_input() {
+        let mut v = vp(3.0, 4.0, 1.5);
+        for (f, a) in [
+            (f32::NAN, (0.0, 0.0)),
+            (0.0, (0.0, 0.0)),
+            (-2.0, (0.0, 0.0)),
+            (f32::INFINITY, (0.0, 0.0)),
+            (2.0, (f32::NAN, 0.0)),
+            (2.0, (0.0, f32::INFINITY)),
+        ] {
+            v.zoom_at(f, a);
+            assert_eq!(v, vp(3.0, 4.0, 1.5));
+        }
     }
 
     #[test]
