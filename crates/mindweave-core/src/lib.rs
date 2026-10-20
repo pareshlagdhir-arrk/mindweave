@@ -4,8 +4,10 @@ pub mod color;
 pub mod document;
 pub mod files;
 pub mod format;
+pub mod geometry;
 pub mod session;
 pub mod settings;
+pub mod svg;
 pub mod viewport;
 
 pub use color::{format_hex_color, normalize_hex_color, parse_hex_color};
