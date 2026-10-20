@@ -1,11 +1,13 @@
-//! The editor window for one document: Layers panel, canvas, page tabs,
-//! Properties panel and status bar.
+//! The editor window for one document: toolbar, Layers panel, canvas, page
+//! tabs, Properties panel and status bar.
 
 mod canvas;
 mod layers_panel;
 mod page_tabs;
 mod properties_panel;
 mod status_bar;
+pub mod tool;
+mod toolbar;
 
 use std::future::Future;
 
@@ -16,9 +18,13 @@ use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _
 use gpui_kit::*;
 use mindweave_core::{format_hex_color, parse_hex_color, DocumentSession};
 
-use crate::actions::{CloseWindow, Save, ToggleLayers, ToggleProperties};
+use crate::actions::{
+    Cancel, CloseWindow, Save, ToggleLayers, ToggleProperties, ToolArrow, ToolEllipse, ToolHand,
+    ToolLine, ToolPointer, ToolRectangle, EDITOR_CONTEXT,
+};
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
+use tool::{Tool, ToolState, BASIC_SHAPES};
 
 const TEXT_SIZE: f32 = 13.;
 const SMALL_TEXT_SIZE: f32 = 12.;
@@ -115,6 +121,8 @@ pub struct EditorWindow {
     /// The pointer position at the last step of a pan drag in progress.
     pan_drag: Option<Point<Pixels>>,
     rename: Option<Rename>,
+    /// The active tool and the toolbar tab being shown.
+    pub tools: ToolState,
     properties: properties_panel::PropertyFields,
     /// The title last given to the window.
     window_title: String,
@@ -149,6 +157,7 @@ impl EditorWindow {
             space_held: false,
             pan_drag: None,
             rename: None,
+            tools: ToolState::default(),
             properties,
             window_title,
             _subscriptions,
@@ -371,6 +380,42 @@ impl EditorWindow {
         AppState::update_settings(cx, |s| s.show_properties = !s.show_properties);
     }
 
+    /// Makes `tool` the active (unlocked) tool, from its key.
+    fn select_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
+        self.tools.select(tool, false);
+        cx.notify();
+    }
+
+    fn on_tool_pointer(&mut self, _: &ToolPointer, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::Pointer, cx);
+    }
+
+    fn on_tool_hand(&mut self, _: &ToolHand, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::Hand, cx);
+    }
+
+    fn on_tool_rectangle(&mut self, _: &ToolRectangle, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::shape(BASIC_SHAPES, "rectangle"), cx);
+    }
+
+    fn on_tool_ellipse(&mut self, _: &ToolEllipse, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::shape(BASIC_SHAPES, "ellipse"), cx);
+    }
+
+    fn on_tool_line(&mut self, _: &ToolLine, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::shape(BASIC_SHAPES, "line"), cx);
+    }
+
+    fn on_tool_arrow(&mut self, _: &ToolArrow, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::shape(BASIC_SHAPES, "arrow"), cx);
+    }
+
+    /// Escape: back to the Pointer tool, unlocked.
+    fn on_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        self.tools.cancel();
+        cx.notify();
+    }
+
     /// Space held over a focused editor turns left drags into pans.
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if is_plain_space(&event.keystroke)
@@ -507,6 +552,7 @@ impl Render for EditorWindow {
 
         v_flex()
             .size_full()
+            .key_context(EDITOR_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_close_window))
@@ -515,6 +561,13 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_zoom_in))
             .on_action(cx.listener(Self::on_zoom_out))
             .on_action(cx.listener(Self::on_zoom_reset))
+            .on_action(cx.listener(Self::on_tool_pointer))
+            .on_action(cx.listener(Self::on_tool_hand))
+            .on_action(cx.listener(Self::on_tool_rectangle))
+            .on_action(cx.listener(Self::on_tool_ellipse))
+            .on_action(cx.listener(Self::on_tool_line))
+            .on_action(cx.listener(Self::on_tool_arrow))
+            .on_action(cx.listener(Self::on_cancel))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .bg(cx.theme().background)
@@ -525,6 +578,7 @@ impl Render for EditorWindow {
                 Some(self.window_title.clone().into()),
                 cx,
             ))
+            .child(toolbar::render(self, cx))
             .child(div().flex_1().min_h_0().child(panels))
             .child(status_bar::render(self, cx))
     }

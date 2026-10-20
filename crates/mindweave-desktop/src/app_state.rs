@@ -17,6 +17,7 @@ use mindweave_core::{
 use crate::actions::{self, NewFile, OpenFile, Quit, ShowDashboard, ToggleThemePicker};
 use crate::dashboard::{file_stem, Dashboard};
 use crate::editor::{prompt_to_save, EditorWindow, SaveChoice};
+use crate::libraries;
 use crate::menu_bar::{native_menus, WindowKind};
 use crate::theme_picker::open_theme_picker;
 use crate::themes::apply_theme;
@@ -72,7 +73,8 @@ impl Global for AppState {}
 
 impl AppState {
     /// Loads settings, applies the theme, registers actions, key bindings and
-    /// the native menu, then opens the dashboard.
+    /// the native menu, loads the shape libraries, then opens the dashboard
+    /// (showing any library notices there).
     pub fn init(cx: &mut App) {
         let settings_path = settings_path();
         let settings = load_settings(&settings_path);
@@ -98,7 +100,9 @@ impl AppState {
 
         cx.on_window_closed(|cx, id| Self::window_closed(id, cx))
             .detach();
+        let notices = libraries::init(cx);
         Self::show_dashboard(cx);
+        show_library_notices(notices, cx);
     }
 
     /// Called when the Dock icon is clicked: with no windows open, brings
@@ -524,6 +528,34 @@ fn activate(handle: AnyWindowHandle, cx: &mut App) {
         handle
             .update(cx, |_, window, _| window.activate_window())
             .ok();
+    });
+}
+
+/// Shows the notices from loading the shape libraries as warnings in the
+/// dashboard, once the current update has finished.
+fn show_library_notices(notices: Vec<String>, cx: &mut App) {
+    if notices.is_empty() {
+        return;
+    }
+    cx.defer(move |cx| {
+        let dashboard = cx.global::<AppState>().dashboard.as_ref().map(|d| d.handle);
+        let shown = dashboard.and_then(|handle| {
+            handle
+                .update(cx, |_, window, cx| {
+                    for notice in &notices {
+                        window.push_notification(
+                            Notification::warning(notice.clone()).title("Shape library"),
+                            cx,
+                        );
+                    }
+                })
+                .ok()
+        });
+        if shown.is_none() {
+            for notice in &notices {
+                eprintln!("Mindweave: shape library: {notice}");
+            }
+        }
     });
 }
 

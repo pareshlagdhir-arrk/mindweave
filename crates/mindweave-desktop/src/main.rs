@@ -2,6 +2,7 @@ mod actions;
 mod app_state;
 mod dashboard;
 mod editor;
+mod libraries;
 mod menu_bar;
 mod theme_picker;
 mod themes;
@@ -9,7 +10,8 @@ mod themes;
 use app_state::AppState;
 
 fn main() {
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    // The full icon set: user libraries may name any Lucide icon.
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     app.on_reopen(AppState::reopened);
     app.run(|cx| {
         gpui_kit::init(cx);

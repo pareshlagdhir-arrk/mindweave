@@ -8,6 +8,7 @@ use mindweave_core::{
     BackgroundPattern, CanvasSettings, Page, Viewport, ZOOM_STEP,
 };
 
+use super::tool::Tool;
 use super::{hex_to_hsla, EditorWindow};
 use crate::actions::{ZoomIn, ZoomOut, ZoomReset};
 
@@ -29,13 +30,13 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
         },
         move |bounds, hitbox, window, cx| {
             paint_background(bounds, &settings, &viewport, window, cx);
-            let (dragging, space_held) = {
+            let (dragging, hand) = {
                 let editor = editor.read(cx);
-                (editor.pan_drag.is_some(), editor.space_held)
+                (editor.pan_drag.is_some(), editor.left_drag_pans())
             };
             if dragging {
                 window.set_cursor_style(CursorStyle::ClosedHand, &hitbox);
-            } else if space_held {
+            } else if hand {
                 window.set_cursor_style(CursorStyle::OpenHand, &hitbox);
             }
             register_input(editor, bounds, hitbox, window);
@@ -172,7 +173,7 @@ fn register_input(
     });
 
     // A click focuses the editor (so Space can pan); middle drag, or left
-    // drag with Space held, starts a pan.
+    // drag with Space held or the Hand tool, starts a pan.
     window.on_mouse_event({
         let editor = editor.clone();
         let hitbox = hitbox.clone();
@@ -184,7 +185,7 @@ fn register_input(
                 editor.focus_handle.focus(window, cx);
                 let pans = match event.button {
                     MouseButton::Middle => true,
-                    MouseButton::Left => editor.space_held,
+                    MouseButton::Left => editor.left_drag_pans(),
                     _ => false,
                 };
                 if pans {
@@ -251,6 +252,12 @@ fn register_input(
 }
 
 impl EditorWindow {
+    /// Whether a left drag on the canvas pans: with Space held or the Hand
+    /// tool active.
+    fn left_drag_pans(&self) -> bool {
+        self.space_held || self.tools.tool == Tool::Hand
+    }
+
     /// Applies `f` to a copy of the active page's viewport and stores the
     /// result when it changed. Viewport changes never mark the document
     /// dirty.
