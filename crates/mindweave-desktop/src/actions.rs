@@ -117,6 +117,9 @@ pub const TEXT_EDITING_CONTEXT: &str = "TextEditing";
 /// `Input` context) has focus or text on the canvas is being edited, so
 /// typing is not taken as a tool or shape key.
 const EDITOR_NOT_TYPING: &str = "Editor && !Input && !TextEditing";
+/// Everywhere but while text on the canvas is being edited, for global
+/// keys that the text editor uses.
+const NOT_EDITING_TEXT: &str = "!TextEditing";
 /// Where the canvas text editor's keys apply: while editing, but not in a
 /// text field that has focus meanwhile.
 const TEXT_EDITING: &str = "TextEditing && !Input";
@@ -132,7 +135,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-k cmd-t", ToggleThemePicker, None),
-        KeyBinding::new("cmd-b", ToggleLayers, None),
+        // Cmd+B is bold while editing text.
+        KeyBinding::new("cmd-b", ToggleLayers, Some(NOT_EDITING_TEXT)),
         KeyBinding::new("cmd-alt-b", ToggleProperties, None),
         KeyBinding::new("cmd-=", ZoomIn, None),
         KeyBinding::new("cmd--", ZoomOut, None),
@@ -366,7 +370,30 @@ mod tests {
         assert_eq!(first("cmd-b", &shapes), Some("mindweave::ToggleLayers"));
         // A text field focused while editing keeps its keys.
         let field = stack(&["Root", "Editor TextEditing", "Input"]);
-        assert_eq!(first("cmd-b", &field), Some("mindweave::ToggleLayers"));
         assert_eq!(first("left", &field), None);
+        // Cmd+B is bold while editing, with no other binding competing
+        // (not even in a field focused meanwhile); elsewhere it toggles the
+        // Layers panel, in every window.
+        let (found, _) = keymap.bindings_for_input(&key("cmd-b"), &editing);
+        assert_eq!(names(&found), ["mindweave::TextBold"]);
+        assert_eq!(first("cmd-b", &field), None);
+        assert_eq!(
+            first("cmd-b", &stack(&["Root"])),
+            Some("mindweave::ToggleLayers")
+        );
+        // No binding without a context shares a key with a text key.
+        let text_keys: Vec<String> = text
+            .iter()
+            .map(|b| format!("{:?}", b.keystrokes()))
+            .collect();
+        for b in key_bindings() {
+            if b.predicate().is_none() {
+                assert!(
+                    !text_keys.contains(&format!("{:?}", b.keystrokes())),
+                    "{}",
+                    b.action().name()
+                );
+            }
+        }
     }
 }

@@ -116,6 +116,47 @@ pub(crate) fn row_click(renaming: bool, click_count: usize) -> RowClick {
     }
 }
 
+/// What opened the session's gesture (the undo step being gathered).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GestureOwner {
+    /// A move, resize or rotate on the canvas.
+    Pointer,
+    /// A colour picker drag in the Properties panel.
+    Color,
+    /// A text-editing session.
+    Text,
+}
+
+/// Who holds the session's gesture: only the part of the editor that
+/// opened it ends it, so, for example, a colour picker closed while text
+/// is being edited does not split the editing session's undo step.
+#[derive(Debug, Default)]
+pub(crate) struct SessionGesture(Option<GestureOwner>);
+
+impl SessionGesture {
+    /// Opens the session's gesture for `owner` unless one is open; returns
+    /// whether it did.
+    pub(crate) fn begin(&mut self, session: &mut DocumentSession, owner: GestureOwner) -> bool {
+        if self.0.is_some() {
+            return false;
+        }
+        session.begin_gesture();
+        self.0 = Some(owner);
+        true
+    }
+
+    /// Ends the session's gesture if `owner` opened it; returns whether it
+    /// did.
+    pub(crate) fn end(&mut self, session: &mut DocumentSession, owner: GestureOwner) -> bool {
+        if self.0 != Some(owner) {
+            return false;
+        }
+        session.end_gesture();
+        self.0 = None;
+        true
+    }
+}
+
 /// An inline rename in progress.
 struct Rename {
     target: RenameTarget,
@@ -157,6 +198,8 @@ pub struct EditorWindow {
     text_layouts: TextLayoutCache,
     /// Glyph outlines for drawing rotated text.
     glyph_outlines: GlyphOutlines,
+    /// What holds the session's gesture, if anything.
+    session_gesture: SessionGesture,
     /// The text being edited on the canvas, if any.
     pub text_edit: Option<TextEditor>,
     /// Caret blink, drag selection and placement of the text being edited.
@@ -185,6 +228,12 @@ impl EditorWindow {
                 }
             }),
             cx.on_blur(&focus_handle, window, |this, _, cx| this.release_space(cx)),
+            // The caret blinks again when typing comes back to the canvas.
+            cx.on_focus(&focus_handle, window, |this, window, cx| {
+                if this.text_edit.is_some() {
+                    this.restart_blink(window, cx);
+                }
+            }),
             ribbon_subscription,
         ]);
         let window_title = session.title();
@@ -205,6 +254,7 @@ impl EditorWindow {
             geometry_cache: GeometryCache::default(),
             text_layouts: TextLayoutCache::default(),
             glyph_outlines: GlyphOutlines::default(),
+            session_gesture: SessionGesture::default(),
             text_edit: None,
             text_ui: TextEditUi::default(),
             properties,
@@ -570,11 +620,20 @@ impl EditorWindow {
         self.refresh_cursor(cx);
     }
 
+    /// Undo; while text is being edited, undoes typing in it (the Edit
+    /// menu item, like Cmd+Z).
     fn on_undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
+        if self.forward_to_canvas_text(TextCommand::Undo, window, cx) {
+            return;
+        }
         self.step_history(true, window, cx);
     }
 
+    /// Redo; while text is being edited, redoes typing in it.
     fn on_redo(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
+        if self.forward_to_canvas_text(TextCommand::Redo, window, cx) {
+            return;
+        }
         self.step_history(false, window, cx);
     }
 
@@ -1013,13 +1072,14 @@ mod tests {
     use super::{
         clipboard_text, hex_to_hsla, hsla_to_hex, in_text_field, is_plain_space, key_context,
         letter_spaced, panel_group_id, parse_number, pruned, row_click, selectable_ids,
-        selectable_in_order, RowClick,
+        selectable_in_order, GestureOwner, RowClick, SessionGesture,
     };
     use gpui_kit::Keystroke;
     use mindweave_core::geometry::Frame;
     use mindweave_core::{
         builtin_libraries, from_clipboard, LibraryRegistry, Shape, MAX_CLIPBOARD_SHAPES,
     };
+    use mindweave_core::{DocumentSession, RichText, RunStyle};
     use std::collections::HashSet;
     use uuid::Uuid;
 
@@ -1099,6 +1159,44 @@ mod tests {
         assert!(in_text_field(&stack(&["Root", "Editor", "Input"])));
         assert!(!in_text_field(&stack(&["Root", "Editor"])));
         assert!(!in_text_field(&[]));
+    }
+
+    #[test]
+    fn a_colour_change_while_editing_text_stays_in_the_one_session_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("g.mindweave")).unwrap();
+        let shape = Shape::new_text_box((0., 0.));
+        let id = shape.id;
+        s.add_shapes(vec![shape]);
+        let set_text = |s: &mut DocumentSession, t: &str| {
+            s.update_shapes(&[id], |sh| {
+                let label = sh.label.as_mut().unwrap();
+                label.text = RichText::new(RunStyle::default(), Default::default());
+                label.text.insert(0, t, &RunStyle::default());
+            })
+        };
+        let mut g = SessionGesture::default();
+        assert!(g.begin(&mut s, GestureOwner::Text));
+        set_text(&mut s, "a");
+        // A colour picker used while editing does not own the gesture, so
+        // closing it does not end the editing session's step.
+        assert!(!g.begin(&mut s, GestureOwner::Color));
+        s.update_shapes(&[id], |sh| sh.style.fill = Some("#FF0000".into()));
+        assert!(!g.end(&mut s, GestureOwner::Color));
+        set_text(&mut s, "ab");
+        assert!(g.end(&mut s, GestureOwner::Text));
+        // One step back is the state before the session…
+        assert!(s.undo());
+        let shape = s.find_shape(id).unwrap();
+        assert!(shape.label.as_ref().unwrap().text.is_empty());
+        assert_eq!(shape.style.fill, None);
+        // …and the next one is adding the box.
+        assert!(s.undo());
+        assert!(s.find_shape(id).is_none());
+        // Nothing is left open.
+        assert!(!g.end(&mut s, GestureOwner::Text));
+        assert!(g.begin(&mut s, GestureOwner::Pointer));
+        assert!(g.end(&mut s, GestureOwner::Pointer));
     }
 
     #[test]

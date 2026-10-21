@@ -26,7 +26,7 @@ use super::text_paint::{
     canvas_background, paint_polygon, text_color, text_frame, text_wrap, TextFrame,
     LINE_LABEL_PADDING,
 };
-use super::EditorWindow;
+use super::{EditorWindow, GestureOwner};
 use crate::actions::*;
 
 /// Value of the `"mindweave"` key that marks a rich-text clipboard payload.
@@ -120,6 +120,50 @@ fn capped(text: &str) -> &str {
         .nth(MAX_PASTE_CHARS)
         .map_or(text.len(), |(i, _)| i);
     &text[..end]
+}
+
+/// `at` moved back to a grapheme boundary of `text` (the end past it).
+fn floor_boundary(text: &RichText, at: usize) -> usize {
+    if at >= text.len() {
+        text.len()
+    } else {
+        text.prev_grapheme(text.next_grapheme(at))
+    }
+}
+
+/// What a press on the canvas hits while editing, from `current` (inside
+/// the target's area, and the caret position, by its current layout) or,
+/// before the text is laid out, whether the last `painted` area holds it:
+/// `None` outside the text, else the caret position when known.
+pub fn press_hit(current: Option<(bool, usize)>, painted: bool) -> Option<Option<usize>> {
+    match current {
+        Some((inside, offset)) => inside.then_some(Some(offset)),
+        None => painted.then_some(None),
+    }
+}
+
+/// The line geometry caret moves follow: a text layout.
+pub trait Lines {
+    /// The caret's x at `offset`, in canvas units from the text's left.
+    fn caret_x(&self, offset: usize) -> f32;
+    /// See [`TextLayout::vertical`].
+    fn vertical(&self, offset: usize, x: f32, down: bool) -> Option<usize>;
+    /// See [`TextLayout::line_range`].
+    fn line_range(&self, offset: usize) -> Option<Range<usize>>;
+}
+
+impl Lines for TextLayout {
+    fn caret_x(&self, offset: usize) -> f32 {
+        self.caret_rect(offset).x
+    }
+
+    fn vertical(&self, offset: usize, x: f32, down: bool) -> Option<usize> {
+        TextLayout::vertical(self, offset, x, down)
+    }
+
+    fn line_range(&self, offset: usize) -> Option<Range<usize>> {
+        TextLayout::line_range(self, offset)
+    }
 }
 
 /// How typing `s` groups for undo: spaces and breaks start a step, other
@@ -309,8 +353,11 @@ impl TextEditor {
             };
             text.style_at(at)
         });
-        text.delete(range.clone());
-        let start = range.start.min(text.len());
+        // Where the text model really cuts: `delete` widens the range to
+        // grapheme boundaries and `insert` snaps back to one.
+        let start = floor_boundary(text, range.start);
+        text.delete(range);
+        let start = floor_boundary(text, start);
         let before = text.len();
         let caret = text.insert(start, s, &style);
         let inserted = start..start + (text.len() - before);
@@ -418,11 +465,21 @@ impl TextEditor {
         Some(copied)
     }
 
-    /// Replaces the selection with `rich`, keeping its styles.
+    /// Replaces the selection with `rich` (at most [`MAX_PASTE_CHARS`]
+    /// graphemes of it), keeping its styles.
     pub fn paste_rich(&mut self, text: &mut RichText, rich: &RichText) {
         if rich.is_empty() {
             return;
         }
+        let plain = rich.plain();
+        let capped = capped(&plain).len();
+        let cut;
+        let rich = if capped < plain.len() {
+            cut = rich.slice(0..capped);
+            &cut
+        } else {
+            rich
+        };
         let before = self.snapshot(text);
         let sel = self.selection();
         text.delete(sel.clone());
@@ -572,7 +629,7 @@ impl TextEditor {
 
     /// Moves the caret; `layout` (the text's current layout) places line
     /// moves.
-    fn motion(&mut self, text: &RichText, layout: Option<&TextLayout>, m: Motion, extend: bool) {
+    fn motion(&mut self, text: &RichText, layout: Option<&dyn Lines>, m: Motion, extend: bool) {
         let sel = self.selection();
         let collapse = !extend && !sel.is_empty();
         let from = match m {
@@ -591,7 +648,7 @@ impl TextEditor {
             Motion::WordRight => text.next_word(from),
             Motion::Up | Motion::Down => {
                 let down = m == Motion::Down;
-                let goal = self.goal_x.or_else(|| layout.map(|l| l.caret_rect(from).x));
+                let goal = self.goal_x.or_else(|| layout.map(|l| l.caret_x(from)));
                 let to = layout
                     .zip(goal)
                     .and_then(|(l, x)| l.vertical(from, x, down))
@@ -618,7 +675,7 @@ impl TextEditor {
 
     /// Runs an editing key's command (clipboard and exit are the
     /// window's).
-    fn command(&mut self, text: &mut RichText, layout: Option<&TextLayout>, c: TextCommand) {
+    fn command(&mut self, text: &mut RichText, layout: Option<&dyn Lines>, c: TextCommand) {
         match c {
             TextCommand::Move(m, extend) => self.motion(text, layout, m, extend),
             TextCommand::Backspace(word) => self.delete_backward(text, word),
@@ -721,23 +778,31 @@ impl EditorWindow {
         else {
             return;
         };
-        // A pointer gesture would share (and end) the session's gesture.
+        // The session's gesture must be the editing session's alone: a
+        // pointer gesture is put back, a colour drag's step ended.
         self.cancel_gesture(cx);
-        self.session.begin_gesture();
+        self.finish_color_edit(cx);
+        self.session_gesture
+            .begin(&mut self.session, GestureOwner::Text);
         self.text_edit = Some(TextEditor::new(target, &text, is_new));
         self.focus_handle.focus(window, cx);
-        self.restart_blink(cx);
+        self.restart_blink(window, cx);
         cx.notify();
     }
 
     /// Stops editing text: the session's edits become one undo step (none
     /// when nothing changed) and the keys go back to the shapes.
     pub fn end_text_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A composition in progress is kept, as its own undo step.
+        if self.text_edit.as_ref().is_some_and(|e| e.marked.is_some()) {
+            self.with_text(window, cx, |ed, text, _| ed.unmark(text));
+        }
         if self.text_edit.take().is_none() {
             return;
         }
         self.text_ui = TextEditUi::default();
-        self.session.end_gesture();
+        self.session_gesture
+            .end(&mut self.session, GestureOwner::Text);
         self.focus_handle.focus(window, cx);
         cx.notify();
     }
@@ -747,6 +812,7 @@ impl EditorWindow {
     /// changed. `None` when not editing or the target is gone.
     fn with_text<R>(
         &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut TextEditor, &mut RichText, Option<&TextLayout>) -> R,
     ) -> Option<R> {
@@ -775,7 +841,7 @@ impl EditorWindow {
                 cx,
             );
         }
-        self.restart_blink(cx);
+        self.restart_blink(window, cx);
         cx.notify();
         Some(result)
     }
@@ -796,6 +862,7 @@ impl EditorWindow {
                 let cut = command == TextCommand::Cut;
                 let copied = self
                     .with_text(
+                        window,
                         cx,
                         |ed, text, _| {
                             if cut {
@@ -819,30 +886,36 @@ impl EditorWindow {
                 else {
                     return;
                 };
-                self.with_text(cx, |ed, text, _| match &content {
+                self.with_text(window, cx, |ed, text, _| match &content {
                     Pasted::Rich(rich) => ed.paste_rich(text, rich),
                     Pasted::Plain(plain) => ed.paste_plain(text, plain),
                 });
             }
             _ => {
-                self.with_text(cx, |ed, text, layout| ed.command(text, layout, command));
+                self.with_text(window, cx, |ed, text, layout| {
+                    ed.command(text, layout.map(|l| l as &dyn Lines), command)
+                });
             }
         }
     }
 
     /// Shows the caret and restarts its blink, so it stays on while typing.
-    fn restart_blink(&mut self, cx: &mut Context<Self>) {
+    /// While the editor does not have focus (a Properties field has it)
+    /// the caret is hidden and the blink, with its repaints, stops; it
+    /// starts again when the editor gets focus back.
+    pub(super) fn restart_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.text_ui.caret_visible = true;
-        self.text_ui.blink = Some(cx.spawn(async move |this, cx| loop {
+        self.text_ui.blink = Some(cx.spawn_in(window, async move |this, cx| loop {
             cx.background_executor().timer(CARET_BLINK).await;
             let blinking = this
-                .update(cx, |this, cx| {
+                .update_in(cx, |this, window, cx| {
                     if this.text_edit.is_none() {
                         return false;
                     }
-                    this.text_ui.caret_visible = !this.text_ui.caret_visible;
+                    let focused = this.focus_handle.is_focused(window);
+                    this.text_ui.caret_visible = focused && !this.text_ui.caret_visible;
                     cx.notify();
-                    true
+                    focused
                 })
                 .unwrap_or(false);
             if !blinking {
@@ -886,24 +959,22 @@ impl EditorWindow {
         at: Pt,
         clicks: usize,
         shift: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let hit = self
+        let current = self
             .edit_layout()
             .map(|(g, layout)| (g.area.contains(at), layout.offset_at(g.frame.to_local(at))));
-        let (inside, offset) = match hit {
-            Some((inside, offset)) => (inside, Some(offset)),
-            None => (self.over_edited_text(at), None),
-        };
-        if !inside {
+        let painted = self.over_edited_text(at);
+        let Some(offset) = press_hit(current, painted) else {
             return false;
-        }
+        };
         let unit = match clicks {
             0 | 1 => Unit::Grapheme,
             2 => Unit::Word,
             _ => Unit::Paragraph,
         };
-        self.text_ui.drag = self.with_text(cx, |ed, text, _| {
+        self.text_ui.drag = self.with_text(window, cx, |ed, text, _| {
             let offset = offset.unwrap_or(ed.caret);
             let origin = match unit {
                 Unit::Grapheme if shift => ed.anchor..ed.anchor,
@@ -919,12 +990,17 @@ impl EditorWindow {
 
     /// Continues a drag selection to canvas point `at`; `false` when none
     /// is in progress.
-    pub(super) fn text_drag_to(&mut self, at: Pt, cx: &mut Context<Self>) -> bool {
+    pub(super) fn text_drag_to(
+        &mut self,
+        at: Pt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(drag) = self.text_ui.drag.clone() else {
             return false;
         };
         if let Some(offset) = self.text_offset_at(at) {
-            self.with_text(cx, |ed, text, _| {
+            self.with_text(window, cx, |ed, text, _| {
                 ed.drag_select(text, &drag.origin, drag.unit, offset)
             });
         }
@@ -1008,7 +1084,7 @@ impl EditorWindow {
                 paint(window, bar, color);
             }
         }
-        if sel.is_empty() && self.text_ui.caret_visible {
+        if sel.is_empty() && self.text_ui.caret_visible && self.focus_handle.is_focused(window) {
             let r = layout.caret_rect(edit.caret);
             let w = CARET_PX / zoom;
             let caret = Rect {
@@ -1132,19 +1208,19 @@ impl EntityInputHandler for EditorWindow {
         Some(byte_to_utf16(&plain, marked.start)..byte_to_utf16(&plain, marked.end))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.with_text(cx, |ed, text, _| ed.unmark(text));
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.with_text(window, cx, |ed, text, _| ed.unmark(text));
     }
 
     fn replace_text_in_range(
         &mut self,
         range_utf16: Option<Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let range = range_utf16.and_then(|r| self.bytes_of(r));
-        self.with_text(cx, |ed, rich, _| ed.replace_text(rich, range, text));
+        self.with_text(window, cx, |ed, rich, _| ed.replace_text(rich, range, text));
     }
 
     fn replace_and_mark_text_in_range(
@@ -1152,13 +1228,13 @@ impl EntityInputHandler for EditorWindow {
         range_utf16: Option<Range<usize>>,
         new_text: &str,
         new_selected_range: Option<Range<usize>>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let range = range_utf16.and_then(|r| self.bytes_of(r));
         let selected = new_selected_range
             .map(|r| utf16_to_byte(new_text, r.start)..utf16_to_byte(new_text, r.end));
-        self.with_text(cx, |ed, rich, _| {
+        self.with_text(window, cx, |ed, rich, _| {
             ed.replace_and_mark(rich, range, new_text, selected)
         });
     }
@@ -1222,10 +1298,11 @@ impl EntityInputHandler for EditorWindow {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        byte_to_utf16, parse_text_payload, pasted, target_area, text_payload, utf16_to_byte,
-        Pasted, TextEditor, Toggle, Unit,
+        byte_to_utf16, parse_text_payload, pasted, press_hit, target_area, text_payload,
+        utf16_to_byte, Lines, Motion, Pasted, TextEditor, Toggle, Unit,
     };
     use mindweave_core::{HAlign, RichText, RunStyle, Shape, StyleChange, MAX_PASTE_CHARS};
+    use std::ops::Range;
     use uuid::Uuid;
 
     fn plain(s: &str) -> RichText {
@@ -1495,5 +1572,142 @@ mod tests {
         assert!((corner.0 - 126.).abs() < 1e-3 && (corner.1 - 44.).abs() < 1e-3);
         let back = frame.to_local(corner);
         assert!(back.0.abs() < 1e-3 && back.1.abs() < 1e-3);
+    }
+
+    #[test]
+    fn rich_paste_capped() {
+        let rich = plain(&"x".repeat(MAX_PASTE_CHARS + 5));
+        let mut text = plain("");
+        let mut ed = editor(&text);
+        ed.paste_rich(&mut text, &rich);
+        assert_eq!(text.len(), MAX_PASTE_CHARS);
+        assert_eq!(ed.caret, MAX_PASTE_CHARS);
+    }
+
+    #[test]
+    fn marked_text_follows_grapheme_snapping() {
+        // "e" + combining acute (2 bytes) + "x": a range starting inside
+        // the grapheme is widened to it by the text model.
+        let mut text = plain("e\u{301}x");
+        let mut ed = editor(&text);
+        ed.replace_and_mark(&mut text, Some(1..3), "に", None);
+        assert_eq!(text.plain(), "にx");
+        assert_eq!(ed.marked, Some(0..3));
+        assert_eq!(ed.caret, 3);
+    }
+
+    /// Lines of a monospace text, one unit per byte: the lines of
+    /// `text.plain()` split at paragraph breaks.
+    struct Mono(Vec<Range<usize>>);
+
+    impl Mono {
+        fn of(text: &RichText) -> Self {
+            let plain = text.plain();
+            let mut start = 0;
+            let mut lines = Vec::new();
+            for part in plain.split('\n') {
+                lines.push(start..start + part.len());
+                start += part.len() + 1;
+            }
+            Mono(lines)
+        }
+
+        fn index(&self, offset: usize) -> usize {
+            self.0.iter().rposition(|l| l.start <= offset).unwrap_or(0)
+        }
+    }
+
+    impl Lines for Mono {
+        fn caret_x(&self, offset: usize) -> f32 {
+            (offset - self.0[self.index(offset)].start) as f32
+        }
+
+        fn vertical(&self, offset: usize, x: f32, down: bool) -> Option<usize> {
+            let i = self.index(offset);
+            let j = if down { i + 1 } else { i.checked_sub(1)? };
+            let line = self.0.get(j)?;
+            Some((line.start + x as usize).min(line.end))
+        }
+
+        fn line_range(&self, offset: usize) -> Option<Range<usize>> {
+            self.0.get(self.index(offset)).cloned()
+        }
+    }
+
+    #[test]
+    fn up_and_down_keep_the_goal_column() {
+        let text = plain("abcdef\nab\nabcdef");
+        let lines = Mono::of(&text);
+        let mut ed = editor(&text);
+        ed.select(5, 5);
+        let go = |ed: &mut TextEditor, m: Motion, extend: bool| {
+            ed.motion(&text, Some(&lines), m, extend);
+            (ed.anchor, ed.caret)
+        };
+        // Through a short line and back out at the same column.
+        assert_eq!(go(&mut ed, Motion::Down, false), (9, 9));
+        assert_eq!(go(&mut ed, Motion::Down, false), (15, 15));
+        assert_eq!(go(&mut ed, Motion::Up, false), (9, 9));
+        assert_eq!(go(&mut ed, Motion::Up, false), (5, 5));
+        // Past the first line: the start.
+        assert_eq!(go(&mut ed, Motion::Up, false), (0, 0));
+        // A sideways move sets a new column.
+        ed.select(9, 9);
+        assert_eq!(go(&mut ed, Motion::Left, false), (8, 8));
+        assert_eq!(go(&mut ed, Motion::Down, false), (11, 11));
+        // Shift extends from the anchor.
+        assert_eq!(go(&mut ed, Motion::Up, true), (11, 8));
+    }
+
+    #[test]
+    fn moves_with_a_selection_start_from_its_ends() {
+        let text = plain("ab\ncd\nef");
+        let lines = Mono::of(&text);
+        let mut ed = editor(&text);
+        let mut from_selection = |m: Motion, layout: bool| {
+            ed.select(4, 1);
+            let lines: Option<&dyn Lines> = if layout { Some(&lines) } else { None };
+            ed.motion(&text, lines, m, false);
+            ed.caret
+        };
+        for layout in [true, false] {
+            // Cmd+Left and Cmd+Up: from the selection's start.
+            assert_eq!(from_selection(Motion::LineStart, layout), 0);
+            assert_eq!(from_selection(Motion::DocStart, layout), 0);
+            // Cmd+Right: from its end.
+            assert_eq!(from_selection(Motion::LineEnd, layout), 5);
+            assert_eq!(from_selection(Motion::Left, layout), 1);
+            assert_eq!(from_selection(Motion::Right, layout), 4);
+        }
+        // Up from a selection starts at its start (line 1, column 1).
+        assert_eq!(from_selection(Motion::Up, true), 0);
+        assert_eq!(from_selection(Motion::Down, true), 7);
+    }
+
+    #[test]
+    fn word_moves() {
+        let text = plain("one two, three");
+        let mut ed = editor(&text);
+        let go = |ed: &mut TextEditor, m: Motion, extend: bool| {
+            ed.motion(&text, None, m, extend);
+            (ed.anchor, ed.caret)
+        };
+        assert_eq!(go(&mut ed, Motion::WordLeft, false), (9, 9));
+        assert_eq!(go(&mut ed, Motion::WordLeft, false), (4, 4));
+        assert_eq!(go(&mut ed, Motion::WordRight, false), (7, 7));
+        assert_eq!(go(&mut ed, Motion::WordRight, true), (7, 14));
+        // A selection collapses towards the move, then moves a word.
+        assert_eq!(go(&mut ed, Motion::WordLeft, false), (4, 4));
+    }
+
+    #[test]
+    fn presses_use_the_current_layout_before_any_paint() {
+        // Laid out but never painted: the current layout decides.
+        assert_eq!(press_hit(Some((true, 7)), false), Some(Some(7)));
+        // A stale painted area does not keep a press outside the text.
+        assert_eq!(press_hit(Some((false, 7)), true), None);
+        // Not laid out yet: the painted area, without an offset.
+        assert_eq!(press_hit(None, true), Some(None));
+        assert_eq!(press_hit(None, false), None);
     }
 }

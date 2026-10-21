@@ -14,7 +14,10 @@ use gpui_kit::*;
 use mindweave_core::{BackgroundPattern, CanvasSettings, DocumentSession};
 
 use super::shape_properties::{self, ShapeFields};
-use super::{hex_to_hsla, hsla_to_hex, parse_number, section_label, EditorWindow, SMALL_TEXT_SIZE};
+use super::{
+    hex_to_hsla, hsla_to_hex, parse_number, section_label, EditorWindow, GestureOwner,
+    SMALL_TEXT_SIZE,
+};
 
 const PATTERNS: [(BackgroundPattern, &str); 3] = [
     (BackgroundPattern::Lines, "Lines"),
@@ -334,15 +337,22 @@ impl EditorWindow {
     /// step of its own.
     pub(super) fn begin_color_edit(&mut self, open: bool) {
         if open && !self.properties.color_edit {
-            self.session.begin_gesture();
+            // While text is being edited its session holds the gesture,
+            // and the change joins it.
+            self.session_gesture
+                .begin(&mut self.session, GestureOwner::Color);
             self.properties.color_edit = true;
         }
     }
 
     /// Ends the undo step of a colour picker drag, if one is open.
     pub(super) fn finish_color_edit(&mut self, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.properties.color_edit) {
-            self.update_session(|s| s.end_gesture(), cx);
+        if std::mem::take(&mut self.properties.color_edit)
+            && self
+                .session_gesture
+                .end(&mut self.session, GestureOwner::Color)
+        {
+            self.update_session(|_| {}, cx);
         }
     }
 

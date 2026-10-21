@@ -261,7 +261,7 @@ fn register_input(
                 // what it would have done.
                 if !pans && event.button == MouseButton::Left && editor.text_edit.is_some() {
                     let at = editor.to_canvas(local(event.position, bounds));
-                    if editor.text_press(at, event.click_count, event.modifiers.shift, cx) {
+                    if editor.text_press(at, event.click_count, event.modifiers.shift, window, cx) {
                         return;
                     }
                     editor.end_text_edit(window, cx);
@@ -304,7 +304,7 @@ fn register_input(
                 editor.pointer_local = pointer;
                 if event.pressed_button == Some(MouseButton::Left) {
                     let at = editor.to_canvas(local(event.position, bounds));
-                    editor.text_drag_to(at, cx);
+                    editor.text_drag_to(at, window, cx);
                 } else {
                     // The button was released where we could not see it.
                     editor.end_text_drag();

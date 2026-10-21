@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use super::shape_paint::{shape_geometry, CanvasGeometry};
 use super::tool::Tool;
-use super::EditorWindow;
+use super::{EditorWindow, GestureOwner};
 use crate::libraries::Libraries;
 
 /// Opacity of the shape previewed while placing, times its own.
@@ -473,7 +473,9 @@ impl EditorWindow {
         if let Some(originals) = gesture.originals() {
             let originals = originals.clone();
             self.apply_frames(originals, cx);
-            self.update_session(|s| s.end_gesture(), cx);
+            self.session_gesture
+                .end(&mut self.session, GestureOwner::Pointer);
+            self.update_session(|_| {}, cx);
         }
         self.press = Press::default();
         cx.notify();
@@ -571,7 +573,10 @@ impl EditorWindow {
         };
         match self.gesture.originals() {
             Some(o) if o.is_empty() => self.gesture = Gesture::Idle,
-            Some(_) => self.session.begin_gesture(),
+            Some(_) => {
+                self.session_gesture
+                    .begin(&mut self.session, GestureOwner::Pointer);
+            }
             None => {}
         }
         cx.notify();
@@ -643,7 +648,9 @@ impl EditorWindow {
                 };
             }
             Gesture::Moving { .. } | Gesture::Resizing { .. } | Gesture::Rotating { .. } => {
-                self.update_session(|s| s.end_gesture(), cx);
+                self.session_gesture
+                    .end(&mut self.session, GestureOwner::Pointer);
+                self.update_session(|_| {}, cx);
                 if !press.dragged {
                     if let Some(selection) = press.on_click {
                         self.selection = selection;
