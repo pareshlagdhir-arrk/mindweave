@@ -743,7 +743,16 @@ impl EditorWindow {
 
     /// The shape being placed, for the preview.
     pub(super) fn placement_preview(&self, libs: &LibraryRegistry) -> Option<Shape> {
-        placement_shape(&self.gesture, libs)
+        preview_shape(&self.gesture, libs)
+    }
+}
+
+/// The preview of the shape `gesture` places: nothing until the pointer
+/// has dragged, so a press doesn't flash the default size under the cursor.
+fn preview_shape(gesture: &Gesture, libs: &LibraryRegistry) -> Option<Shape> {
+    match gesture {
+        Gesture::Placing { dragged: true, .. } => placement_shape(gesture, libs),
+        _ => None,
     }
 }
 
@@ -820,7 +829,8 @@ mod tests {
     use super::{
         chrome_frame, handle_at, hit_shape, is_drag, is_line_like, marquee_rect, marquee_selection,
         move_placement, placement_frame, placement_shape, press_kind, press_selection,
-        press_target, resize_cursor, transformed, visible_handles, Gesture, HandleHit, PressKind,
+        press_target, preview_shape, resize_cursor, transformed, visible_handles, Gesture,
+        HandleHit, PressKind,
     };
     use gpui_kit::CursorStyle;
     use mindweave_core::geometry::Frame;
@@ -887,6 +897,21 @@ mod tests {
         assert_eq!((shape.frame.w, shape.frame.h), (30., 20.));
         assert!(placement_shape(&placing("no-such-shape"), &libs).is_none());
         assert!(placement_shape(&Gesture::Idle, &libs).is_none());
+    }
+
+    #[test]
+    fn no_preview_until_the_pointer_drags() {
+        let libs = registry();
+        let mut gesture = start_placing((100., 100.));
+        // A press alone shows nothing: no default-size flash under the cursor.
+        assert!(preview_shape(&gesture, &libs).is_none());
+        // Once dragged, the preview grows from the press point.
+        move_placement(&mut gesture, Some((130., 120.)), false, false, 1.0);
+        let shape = preview_shape(&gesture, &libs).unwrap();
+        assert_eq!((shape.frame.w, shape.frame.h), (30., 20.));
+        // A click (no drag) still places the default size on release.
+        let click = start_placing((100., 100.));
+        assert!(placement_shape(&click, &libs).is_some());
     }
 
     fn start_placing(at: (f32, f32)) -> Gesture {
