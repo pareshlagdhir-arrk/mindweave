@@ -670,6 +670,12 @@ impl EditorWindow {
                 return;
             }
             self.press.dragged = true;
+            // Resized text boxes stop growing with their text, once.
+            let widths: Vec<(Uuid, bool)> = text_box_widths_off(&self.gesture)
+                .into_iter()
+                .map(|id| (id, false))
+                .collect();
+            self.set_auto_widths(&widths, cx);
         }
         if let Gesture::Marquee { current, .. } = &mut self.gesture {
             if *current != p {
@@ -678,11 +684,6 @@ impl EditorWindow {
             }
         } else if let Some(frames) = transformed(&self.gesture, p, modifiers.shift, modifiers.alt) {
             self.apply_frames(frames, cx);
-            let widths: Vec<(Uuid, bool)> = text_box_widths_off(&self.gesture)
-                .into_iter()
-                .map(|id| (id, false))
-                .collect();
-            self.set_auto_widths(&widths, cx);
         }
     }
 

@@ -285,7 +285,7 @@ fn register_input(
                     // A double click (with any tool but Hand, which pans)
                     // edits text: the first click did what it does.
                     if event.click_count == 2 {
-                        editor.double_click_text(at, window, cx);
+                        editor.edit_text_at(at, window, cx);
                         return;
                     }
                     match editor.tools.tool {

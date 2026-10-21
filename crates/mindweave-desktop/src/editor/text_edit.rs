@@ -693,7 +693,7 @@ impl TextEditor {
     }
 }
 
-/// What a double click edits.
+/// What a Text-tool click or a double click edits.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TextTarget {
     /// The label of a shape, or a text box.
@@ -702,10 +702,10 @@ pub enum TextTarget {
     NewBox(Pt),
 }
 
-/// What a double click at canvas point `at` edits, given the shape `hit`
-/// there (the topmost unlocked shape of the visible active layer): that
-/// shape's text, else a new text box at the point.
-pub fn double_click_target(hit: Option<Uuid>, at: Pt) -> TextTarget {
+/// What a Text-tool click or a double click at canvas point `at` edits,
+/// given the shape `hit` there (the topmost unlocked shape of the visible
+/// active layer): that shape's text, else a new text box at the point.
+pub fn text_target_at(hit: Option<Uuid>, at: Pt) -> TextTarget {
     match hit {
         Some(id) => TextTarget::Existing(id),
         None => TextTarget::NewBox(at),
@@ -730,7 +730,8 @@ pub fn start_new_text_box(
     gesture: &mut SessionGesture,
     at: Pt,
 ) -> Uuid {
-    gesture.begin(session, GestureOwner::Text);
+    let began = gesture.begin(session, GestureOwner::Text);
+    debug_assert!(began, "the gesture is free when a new text box is added");
     let shape = Shape::new_text_box(at);
     let id = shape.id;
     session.add_shapes(vec![shape]);
@@ -750,7 +751,12 @@ pub fn start_text_session(
         return false;
     };
     let needs_label = shape.label.is_none();
-    gesture.begin(session, GestureOwner::Text);
+    let began = gesture.begin(session, GestureOwner::Text);
+    // A new text box's session opened the gesture already.
+    debug_assert!(
+        began || gesture.owner() == Some(GestureOwner::Text),
+        "a text session's gesture is its own"
+    );
     if needs_label {
         session.set_label(target, Some(Label::new_shape_label()));
     }
@@ -897,31 +903,27 @@ impl EditorWindow {
         self.begin_text_edit(id, window, cx);
     }
 
-    /// A click with the Text tool at canvas point `at`: a new text box
-    /// there, being edited; the tool then goes back to Pointer unless
-    /// locked. A refused box (hidden layer) leaves the tool as it is.
+    /// A click with the Text tool at canvas point `at`: edits the text of
+    /// the shape there, like a double click, else adds a text box there;
+    /// the tool then goes back to Pointer unless locked. A refused box
+    /// (hidden layer) leaves the tool as it is.
     pub(super) fn place_text_box(&mut self, at: Pt, window: &mut Window, cx: &mut Context<Self>) {
-        self.begin_new_text_box(at, window, cx);
+        self.edit_text_at(at, window, cx);
         if self.text_edit.is_some() {
             self.tools.after_place();
         }
         cx.notify();
     }
 
-    /// A double click at canvas point `at`: edits the text of the shape
-    /// there (the caret at the click when it lands on the text), else adds
-    /// a new text box there.
-    pub(super) fn double_click_text(
-        &mut self,
-        at: Pt,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// A double click or Text-tool click at canvas point `at`: edits the
+    /// text of the shape there (the caret at the click when it lands on
+    /// the text), else adds a new text box there.
+    pub(super) fn edit_text_at(&mut self, at: Pt, window: &mut Window, cx: &mut Context<Self>) {
         // A move begun by the first click whose mouse-up was missed is put
         // back before hit-testing.
         self.cancel_gesture(cx);
         let hit = self.shape_at(at, cx);
-        match double_click_target(hit, at) {
+        match text_target_at(hit, at) {
             TextTarget::NewBox(at) => self.begin_new_text_box(at, window, cx),
             TextTarget::Existing(id) => {
                 self.begin_text_edit(id, window, cx);
@@ -1458,8 +1460,8 @@ impl EntityInputHandler for EditorWindow {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        byte_to_utf16, double_click_target, enter_target, finish_text_session, parse_text_payload,
-        pasted, press_hit, start_new_text_box, start_text_session, target_area, text_payload,
+        byte_to_utf16, enter_target, finish_text_session, parse_text_payload, pasted, press_hit,
+        start_new_text_box, start_text_session, target_area, text_payload, text_target_at,
         utf16_to_byte, Lines, Motion, Pasted, TextEditor, TextTarget, Toggle, Unit,
     };
     use crate::editor::interaction::hit_shape;
@@ -1889,12 +1891,11 @@ mod tests {
     }
 
     #[test]
-    fn double_click_target_resolution() {
+    fn text_target_at_resolution() {
         let libs = LibraryRegistry::new(builtin_libraries(), None).0;
         let (_dir, mut s) = session();
-        let target = |s: &DocumentSession, at: (f32, f32)| {
-            double_click_target(hit_shape(s, &libs, at, 1.), at)
-        };
+        let target =
+            |s: &DocumentSession, at: (f32, f32)| text_target_at(hit_shape(s, &libs, at, 1.), at);
         // Empty canvas: a new box at the point.
         assert_eq!(target(&s, (500., 500.)), TextTarget::NewBox((500., 500.)));
         // A shape: its label.
@@ -1907,6 +1908,22 @@ mod tests {
         assert_eq!(target(&s, (50., 25.)), TextTarget::Existing(shape_id));
         // A text box: itself.
         assert_eq!(target(&s, (230., 10.)), TextTarget::Existing(box_id));
+        // A line: its label.
+        let def = libs.shape("basic-shapes", "line").unwrap();
+        let line = Shape::new(
+            def,
+            "basic-shapes",
+            Frame {
+                x: 0.,
+                y: 300.,
+                w: 100.,
+                h: 0.,
+                ..Frame::default()
+            },
+        );
+        let line_id = line.id;
+        s.add_shapes(vec![line]);
+        assert_eq!(target(&s, (50., 300.)), TextTarget::Existing(line_id));
         // Locked: a new box.
         s.update_shapes(&[shape_id], |sh| sh.locked = true);
         assert_eq!(target(&s, (50., 25.)), TextTarget::NewBox((50., 25.)));

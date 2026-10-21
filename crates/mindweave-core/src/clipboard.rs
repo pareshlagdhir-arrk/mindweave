@@ -109,6 +109,30 @@ pub fn plain_text_box(text: &str, at: Pt) -> Option<Shape> {
     Some(shape)
 }
 
+/// Whether `text` is Mindweave clipboard JSON (a JSON object with the
+/// `"mindweave"` key near its start), readable by this build or not. Text
+/// that is but that [`from_clipboard`] rejects (newer version, too large,
+/// malformed) must not be pasted as plain text.
+pub fn is_mindweave_payload(text: &str) -> bool {
+    looks_like_payload(text)
+}
+
+/// Whether `text` is a shapes payload of a version newer than this build
+/// reads. Text too large to read is not checked.
+pub fn is_newer_payload(text: &str) -> bool {
+    if text.len() > MAX_CLIPBOARD_BYTES || !looks_like_payload(text) {
+        return false;
+    }
+    let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    obj.get("mindweave").and_then(Value::as_str) == Some(CLIPBOARD_MARKER)
+        && obj
+            .get("version")
+            .and_then(Value::as_u64)
+            .is_some_and(|v| v > CLIPBOARD_VERSION)
+}
+
 /// Whether `text` starts like a shapes payload: a JSON object with the
 /// `"mindweave"` key near its start. Cheap, so foreign text is not parsed.
 fn looks_like_payload(text: &str) -> bool {
@@ -164,6 +188,29 @@ pub fn duplicate(shapes: &[Shape]) -> Vec<Shape> {
 mod tests {
     use super::*;
     use crate::text::RunStyle;
+
+    #[test]
+    fn mindweave_payloads_are_recognised_even_when_unreadable() {
+        let current = to_clipboard(&[Shape::new_text_box((0., 0.))]);
+        assert!(is_mindweave_payload(&current));
+        assert!(!is_newer_payload(&current));
+        let newer = current.replace("\"version\":2", "\"version\":99");
+        assert!(from_clipboard(&newer).is_none());
+        assert!(is_mindweave_payload(&newer));
+        assert!(is_newer_payload(&newer));
+        // Too large to read: still a payload, not known to be newer.
+        let big = format!(
+            "{{\"mindweave\":\"shapes\",\"version\":2,\"pad\":\"{}\"}}",
+            "x".repeat(MAX_CLIPBOARD_BYTES)
+        );
+        assert!(from_clipboard(&big).is_none());
+        assert!(is_mindweave_payload(&big));
+        assert!(!is_newer_payload(&big));
+        // Other text is not.
+        assert!(!is_mindweave_payload("hello"));
+        assert!(!is_mindweave_payload("{\"other\":1}"));
+        assert!(!is_newer_payload("hello"));
+    }
 
     fn shape(x: f32, y: f32, w: f32, h: f32) -> Shape {
         let def = crate::library::builtin_libraries()[0].shapes[0].clone();

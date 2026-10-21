@@ -24,9 +24,11 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::*;
+use mindweave_core::geometry::Rect;
 use mindweave_core::{
-    duplicate, format_hex_color, from_clipboard, parse_hex_color, plain_text_box, prepare_paste,
-    to_clipboard, DocumentSession, Shape, Viewport, MAX_CLIPBOARD_SHAPES,
+    duplicate, format_hex_color, from_clipboard, is_mindweave_payload, is_newer_payload,
+    parse_hex_color, plain_text_box, prepare_paste, to_clipboard, DocumentSession, Shape, Viewport,
+    MAX_CLIPBOARD_SHAPES,
 };
 
 // `Copy` is used by path: importing it would hide the derivable trait.
@@ -154,6 +156,11 @@ impl SessionGesture {
         session.end_gesture();
         self.0 = None;
         true
+    }
+
+    /// What holds the gesture, if anything.
+    pub(crate) fn owner(&self) -> Option<GestureOwner> {
+        self.0
     }
 }
 
@@ -787,16 +794,13 @@ impl EditorWindow {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
-        let view = self.visible_canvas();
-        let shapes = match from_clipboard(&text) {
-            Some(shapes) => prepare_paste(shapes, &view),
-            None => {
-                let centre = (view.x + view.w / 2., view.y + view.h / 2.);
-                plain_text_box(&text, centre).into_iter().collect()
-            }
-        };
-        if !shapes.is_empty() {
-            self.add_and_select(shapes, window, cx);
+        match paste_plan(&text, &self.visible_canvas()) {
+            PastePlan::Shapes(shapes) => self.add_and_select(shapes, window, cx),
+            PastePlan::Newer => window.push_notification(
+                Notification::warning("This was copied from a newer version of Mindweave."),
+                cx,
+            ),
+            PastePlan::Nothing => {}
         }
     }
 
@@ -896,6 +900,38 @@ fn pruned(
     }
     selection.retain(|id| active.contains(id));
     selection
+}
+
+/// What Paste does with clipboard text (not while editing text).
+#[derive(Debug, PartialEq)]
+enum PastePlan {
+    /// Adds these shapes.
+    Shapes(Vec<Shape>),
+    /// Refuses a payload from a newer Mindweave.
+    Newer,
+    Nothing,
+}
+
+/// What pasting clipboard `text` into `view` (the visible canvas area)
+/// does: shapes copied in Mindweave, ready to paste; else, for text from
+/// another application, a new text box at the view centre. Mindweave
+/// clipboard text this build cannot read (a newer version, too large,
+/// malformed) is never pasted as text.
+fn paste_plan(text: &str, view: &Rect) -> PastePlan {
+    if let Some(shapes) = from_clipboard(text) {
+        return PastePlan::Shapes(prepare_paste(shapes, view));
+    }
+    if is_newer_payload(text) {
+        return PastePlan::Newer;
+    }
+    if is_mindweave_payload(text) {
+        return PastePlan::Nothing;
+    }
+    let centre = (view.x + view.w / 2., view.y + view.h / 2.);
+    match plain_text_box(text, centre) {
+        Some(shape) => PastePlan::Shapes(vec![shape]),
+        None => PastePlan::Nothing,
+    }
 }
 
 /// Ids of the unlocked shapes in `shapes`, in order; none when their
@@ -1108,8 +1144,8 @@ mod tests {
     use super::properties_panel::begin_color_step;
     use super::{
         clipboard_text, hex_to_hsla, hsla_to_hex, in_text_field, is_plain_space, key_context,
-        letter_spaced, panel_group_id, parse_number, pruned, row_click, selectable_ids,
-        selectable_in_order, GestureOwner, RowClick, SessionGesture,
+        letter_spaced, panel_group_id, parse_number, paste_plan, pruned, row_click, selectable_ids,
+        selectable_in_order, GestureOwner, PastePlan, RowClick, SessionGesture,
     };
     use gpui_kit::Keystroke;
     use mindweave_core::geometry::Frame;
@@ -1274,6 +1310,37 @@ mod tests {
         begin_color_step(&mut g, &mut s, false, &mut closed);
         assert!(!closed);
         assert!(g.begin(&mut s, GestureOwner::Pointer));
+    }
+
+    #[test]
+    fn unreadable_mindweave_payloads_are_not_pasted_as_text() {
+        use mindweave_core::geometry::Rect;
+        use mindweave_core::MAX_CLIPBOARD_BYTES;
+        let view = Rect {
+            x: 0.,
+            y: 0.,
+            w: 200.,
+            h: 100.,
+        };
+        let payload = mindweave_core::to_clipboard(&[Shape::new_text_box((10., 10.))]);
+        assert!(matches!(paste_plan(&payload, &view), PastePlan::Shapes(s) if s.len() == 1));
+        let newer = payload.replace("\"version\":2", "\"version\":99");
+        assert_eq!(paste_plan(&newer, &view), PastePlan::Newer);
+        let big = format!(
+            "{{\"mindweave\":\"shapes\",\"version\":2,\"pad\":\"{}\"}}",
+            "x".repeat(MAX_CLIPBOARD_BYTES)
+        );
+        assert_eq!(paste_plan(&big, &view), PastePlan::Nothing);
+        // Text from another application: a text box at the view centre.
+        match paste_plan("hello", &view) {
+            PastePlan::Shapes(s) => {
+                assert!(s[0].is_text_box());
+                assert_eq!((s[0].frame.x, s[0].frame.y), (100., 50.));
+                assert_eq!(s[0].label.as_ref().unwrap().text.plain(), "hello");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(paste_plan("   ", &view), PastePlan::Nothing);
     }
 
     #[test]
