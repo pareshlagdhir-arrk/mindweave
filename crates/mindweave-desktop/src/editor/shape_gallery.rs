@@ -1,8 +1,7 @@
 //! The More gallery of the ribbon: every shape of a library, filtered by a
 //! search field.
 
-use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input};
@@ -17,6 +16,7 @@ use mindweave_core::{Library, ShapeDef};
 
 use super::toolbar::{button_icon, lock_dot, shape_button, ToolButton, MORE_BUTTON_WIDTH};
 use super::EditorWindow;
+use crate::libraries::Libraries;
 
 /// The gallery's width and height limits, padding included.
 const GALLERY_WIDTH: f32 = 360.;
@@ -28,8 +28,10 @@ const SECTION_GAP: f32 = 8.;
 const CELL_SIZE: f32 = 64.;
 const CELL_LABEL_SIZE: f32 = 11.;
 /// How long a single click waits for a second one before closing the
-/// gallery, so a double click can still lock the tool.
-const CLOSE_DELAY: Duration = Duration::from_millis(300);
+/// gallery, so a double click can still lock the tool: macOS's default
+/// double-click interval. gpui does not expose the user's setting, and no
+/// Objective-C bindings are among this crate's dependencies.
+pub(super) const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// The More button and its gallery of `library`'s shapes. A click on a
 /// shape selects its tool, a double click also locks it; either closes the
@@ -42,13 +44,9 @@ pub(super) fn more_button(
     cx: &mut Context<EditorWindow>,
 ) -> impl IntoElement {
     let search = editor.ribbon.search.clone();
-    let query = search.read(cx).value();
-    let cells: Vec<ToolButton> = filter_shapes(&library.shapes, &query)
-        .into_iter()
-        .enumerate()
-        .map(|(ix, shape)| shape_button(&library.id, ("gallery-shape", ix), shape, cx))
-        .collect();
-    let cells = Rc::new(cells);
+    let libraries = cx.global::<Libraries>().0.clone();
+    let library_id = library.id.clone();
+    let opening = editor.ribbon.gallery_opening.clone();
     let selected = editor.tools.tool.clone();
     let locked = editor.tools.locked;
     let this = cx.entity().downgrade();
@@ -60,6 +58,7 @@ pub(super) fn more_button(
         .track_focus(&search_focus)
         .on_open_change(move |open, window, cx| {
             if *open {
+                opening.set(opening.get() + 1);
                 clear.update(cx, |input, cx| input.set_value("", window, cx));
             }
         })
@@ -75,6 +74,18 @@ pub(super) fn more_button(
                 .tooltip("All Shapes"),
         )
         .content(move |_, _, cx| {
+            // Built only while the gallery is open.
+            let query = search.read(cx).value();
+            let shapes = libraries
+                .libraries()
+                .iter()
+                .find(|l| l.id == library_id)
+                .map_or(&[][..], |l| &l.shapes[..]);
+            let cells: Vec<ToolButton> = filter_shapes(shapes, &query)
+                .into_iter()
+                .enumerate()
+                .map(|(ix, shape)| shape_button(&library_id, ("gallery-shape", ix), shape, cx))
+                .collect();
             let popover = cx.entity().downgrade();
             let theme = cx.theme();
             let muted = theme.muted_foreground;
@@ -85,11 +96,10 @@ pub(super) fn more_button(
                 }
             };
             let grid: Vec<AnyElement> = cells
-                .iter()
+                .into_iter()
                 .map(|cell| {
                     let on = selected == cell.tool;
-                    gallery_cell(cell.clone(), on, on && locked, &this, &popover, cx)
-                        .into_any_element()
+                    gallery_cell(cell, on, on && locked, &this, &popover, cx).into_any_element()
                 })
                 .collect();
             v_flex()
@@ -177,13 +187,20 @@ fn gallery_cell(
                 close(&editor, &popover, window, cx);
                 return;
             }
-            // Wait for a possible second click before closing.
+            // Wait for a possible second click before closing, and then
+            // only if the gallery has not been closed and opened again.
+            let Ok(opening) = editor.read_with(cx, |e, _| e.ribbon.gallery_opening.clone()) else {
+                return;
+            };
+            let scheduled_in = opening.get();
             let (editor, popover) = (editor.clone(), popover.clone());
             window
                 .spawn(cx, async move |cx| {
-                    cx.background_executor().timer(CLOSE_DELAY).await;
-                    cx.update(|window, cx| close(&editor, &popover, window, cx))
-                        .ok();
+                    cx.background_executor().timer(DOUBLE_CLICK_INTERVAL).await;
+                    if opening.get() == scheduled_in {
+                        cx.update(|window, cx| close(&editor, &popover, window, cx))
+                            .ok();
+                    }
                 })
                 .detach();
         })
@@ -208,10 +225,18 @@ fn close(
         .ok();
     editor
         .update(cx, |editor, cx| {
+            editor.ribbon.gallery_closed_at = Some(Instant::now());
             editor.focus_handle.focus(window, cx);
             cx.notify();
         })
         .ok();
+}
+
+/// Whether a press with `click_count` that lands on the canvas `since`
+/// after the gallery closed is the second click of a double click begun on
+/// a gallery shape, which must not place a shape.
+pub(super) fn is_stray_second_click(click_count: usize, since: Option<Duration>) -> bool {
+    click_count >= 2 && since.is_some_and(|since| since < DOUBLE_CLICK_INTERVAL)
 }
 
 /// The shapes whose name contains `query`, ignoring case and surrounding
@@ -226,9 +251,10 @@ fn filter_shapes<'a>(shapes: &'a [ShapeDef], query: &str) -> Vec<&'a ShapeDef> {
 
 #[cfg(test)]
 mod tests {
-    use super::filter_shapes;
+    use super::{filter_shapes, is_stray_second_click, DOUBLE_CLICK_INTERVAL};
     use mindweave_core::geometry::Primitive;
     use mindweave_core::{Icon, ShapeDef, ShapeSource, StyleDefaults};
+    use std::time::Duration;
 
     fn shape(name: &str) -> ShapeDef {
         ShapeDef {
@@ -271,5 +297,16 @@ mod tests {
         );
         assert_eq!(names(&filter_shapes(&shapes, "ow")), ["Right Arrow"]);
         assert!(filter_shapes(&shapes, "hexagon").is_empty());
+    }
+
+    #[test]
+    fn second_click_just_after_closing_is_stray() {
+        let soon = Some(Duration::from_millis(100));
+        assert!(is_stray_second_click(2, soon));
+        assert!(is_stray_second_click(3, soon));
+        // A fresh click, a late one, or one with no gallery closed places.
+        assert!(!is_stray_second_click(1, soon));
+        assert!(!is_stray_second_click(2, Some(DOUBLE_CLICK_INTERVAL)));
+        assert!(!is_stray_second_click(2, None));
     }
 }

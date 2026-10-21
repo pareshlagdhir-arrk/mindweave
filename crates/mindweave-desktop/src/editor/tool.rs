@@ -1,6 +1,6 @@
-//! The editor's active tool and the toolbar tab being shown.
+//! The editor's active tool and the ribbon tab being shown.
 
-/// The toolbar tab holding Pointer and Hand.
+/// The ribbon tab holding Pointer and Hand.
 pub const HOME_TAB: &str = "home";
 /// The built-in library whose tools have their own keys.
 pub const BASIC_SHAPES: &str = "basic-shapes";
@@ -33,7 +33,7 @@ impl Tool {
         }
     }
 
-    /// The toolbar tab showing this tool's button.
+    /// The ribbon tab showing this tool's button.
     pub fn tab(&self) -> &str {
         match self {
             Tool::Pointer | Tool::Hand => HOME_TAB,
@@ -54,7 +54,7 @@ pub fn shape_key(library: &str, shape: &str) -> Option<&'static str> {
 }
 
 /// The active tool, whether it stays active after placing a shape, and the
-/// toolbar tab being shown.
+/// ribbon tab being shown.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolState {
     pub tool: Tool,

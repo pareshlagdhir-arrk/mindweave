@@ -15,6 +15,7 @@ use super::interaction::{
     marquee_rect, visible_handles, Gesture, HANDLE_GRAB_PX, PREVIEW_OPACITY,
     ROTATE_HANDLE_OFFSET_PX,
 };
+use super::shape_gallery;
 use super::shape_paint::{paint_marquee, paint_preview, paint_selection, paint_shapes};
 use super::tool::Tool;
 use super::{hex_to_hsla, EditorWindow};
@@ -241,6 +242,13 @@ fn register_input(
                     let at = editor.to_canvas(local(event.position, bounds));
                     match editor.tools.tool {
                         Tool::Pointer => editor.begin_pointer_press(at, event.modifiers, cx),
+                        // The second click of a double click on a gallery
+                        // shape, which closed the gallery, places nothing.
+                        Tool::Shape { .. }
+                            if shape_gallery::is_stray_second_click(
+                                event.click_count,
+                                editor.ribbon.gallery_closed_at.map(|at| at.elapsed()),
+                            ) => {}
                         Tool::Shape { .. } => editor.begin_placing(at, event.modifiers, window, cx),
                         Tool::Hand => {}
                     }

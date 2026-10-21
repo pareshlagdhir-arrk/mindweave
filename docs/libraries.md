@@ -14,7 +14,7 @@ Copy the library folder into:
 ~/Library/Application Support/Mindweave/libraries/
 ```
 
-Then restart Mindweave. Each library appears as a tab in the toolbar.
+Then restart Mindweave. Each library appears as a tab in the ribbon.
 Built-in libraries come first, followed by your libraries sorted by `order`
 and then by `name`.
 
@@ -97,7 +97,7 @@ style = { fill = "#FFF4D6", stroke = "#C99A2E" }
 |---------------|---------|----------|------------|---------|
 | `format`      | integer | yes      | none       | The library format. It must be `1`. |
 | `id`          | string  | yes      | none       | A stable, unique identifier. Documents store it, so never change it after you publish the library. 1 to 64 characters: lowercase letters, digits, `-`, `_` and `.`, starting with a letter or digit. Example: `"acme.flowchart"`. |
-| `name`        | string  | yes      | none       | The tab name shown in the toolbar (at most 100 characters). |
+| `name`        | string  | yes      | none       | The tab name shown in the ribbon (at most 100 characters). |
 | `version`     | string  | yes      | none       | Your library's own version, for example `"1.2.0"`. |
 | `author`      | string  | no       | none       | Who made the library. |
 | `description` | string  | no       | none       | One sentence about the library. |
@@ -111,13 +111,13 @@ loads.
 ## `shapes.toml`
 
 The file holds one `[[shape]]` table per shape, at most 500 shapes. Shapes
-appear in the toolbar in the order they are written.
+appear in the ribbon in the order they are written.
 
 | Field          | Type             | Required        | Default      | Meaning |
 |----------------|------------------|-----------------|--------------|---------|
 | `id`           | string           | yes             | none         | Unique within the library. Documents store it, so never change it after you publish. Same character rules as the library `id`. |
 | `name`         | string           | yes             | none         | Shown in tooltips and in the sidebar (at most 100 characters). |
-| `icon`         | string           | no              | see below    | The toolbar icon. See [Icons](#icons). Without one, an SVG shape uses its own outline and a primitive shape uses `"shapes"`. |
+| `icon`         | string           | no              | see below    | The ribbon icon. See [Icons](#icons). Without one, an SVG shape uses its own outline and a primitive shape uses `"shapes"`. |
 | `default_size` | `[width, height]`| no              | `[120, 80]`  | The size, in canvas units, of a shape placed with a single click. Each value is from 1 to 10000. |
 | `primitive`    | string           | one of these two| none         | A built-in shape. See [Primitives](#primitives). |
 | `svg`          | string           | one of these two| none         | Path of an SVG outline file, for example `"shapes/cloud.svg"`. See [SVG outlines](#svg-outlines). |

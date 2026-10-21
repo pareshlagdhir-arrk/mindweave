@@ -2,8 +2,10 @@
 //! library), and under it the tools of the shown tab. Tools that do not fit
 //! give way to a More button that opens the shape gallery.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -22,8 +24,8 @@ use crate::libraries::{lucide_icon_path, Libraries};
 const TAB_ROW_HEIGHT: f32 = 26.;
 const TOOL_ROW_HEIGHT: f32 = 34.;
 const ROW_PADDING: f32 = 8.;
-pub(super) const BUTTON_SIZE: f32 = 28.;
-pub(super) const ICON_SIZE: f32 = 16.;
+const BUTTON_SIZE: f32 = 28.;
+const ICON_SIZE: f32 = 16.;
 /// Stroke width of an outline icon.
 const OUTLINE_STROKE: f32 = 1.25;
 /// Space between an outline icon's unit box and the 16px icon box, like
@@ -72,6 +74,12 @@ pub(super) struct Ribbon {
     tool_row_width: Option<Pixels>,
     /// The shape gallery's search field.
     pub search: Entity<InputState>,
+    /// Counts the gallery's openings, so a close scheduled by a click only
+    /// closes the opening it was made in.
+    pub gallery_opening: Rc<Cell<u64>>,
+    /// When the gallery last closed, to keep the second click of a double
+    /// click on a gallery shape from placing a shape.
+    pub gallery_closed_at: Option<Instant>,
 }
 
 impl Ribbon {
@@ -88,6 +96,8 @@ impl Ribbon {
             scrolled_to: HOME_TAB.to_string(),
             tool_row_width: None,
             search,
+            gallery_opening: Rc::default(),
+            gallery_closed_at: None,
         };
         (ribbon, subscription)
     }
@@ -217,8 +227,7 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
         // Not measured yet: show them all, cut off by the row.
         None => buttons.len(),
     };
-    // More stands in for the active tool when its button is cut off.
-    let active_hidden = buttons[shown..].iter().any(|b| b.tool == editor.tools.tool);
+    let active_hidden = active_tool_hidden(&buttons, shown, &editor.tools.tool);
     let more = library
         .filter(|_| shown < buttons.len())
         .map(|library| shape_gallery::more_button(editor, library, active_hidden, cx));
@@ -238,15 +247,20 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
             .child(
                 // Measures the row; a new width fits the buttons again.
                 canvas(
-                    move |bounds, _, cx| {
+                    move |bounds, window, cx| {
                         let width = bounds.size.width;
-                        this.update(cx, |this, cx| {
-                            if this.ribbon.tool_row_width != Some(width) {
+                        let changed = this
+                            .update(cx, |this, _| {
+                                let changed = this.ribbon.tool_row_width != Some(width);
                                 this.ribbon.tool_row_width = Some(width);
-                                cx.notify();
-                            }
-                        })
-                        .ok();
+                                changed
+                            })
+                            .unwrap_or(false);
+                        // A notify while drawing is dropped; ask for another
+                        // frame, which renders with the new width.
+                        if changed {
+                            window.request_animation_frame();
+                        }
                     },
                     |_, _, _, _| {},
                 )
@@ -467,10 +481,17 @@ fn visible_count(row_width: f32, button: f32, gap: f32, more_button: f32, total:
     ((room / (button + gap)).floor() as usize).min(total)
 }
 
+/// Whether `active` is the tool of a button after the first `shown`, which
+/// the row has no room for; More then stands in for it.
+fn active_tool_hidden(buttons: &[ToolButton], shown: usize, active: &Tool) -> bool {
+    buttons.iter().skip(shown).any(|b| b.tool == *active)
+}
+
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
-    use super::{outline_icon_path, visible_count, ICON_SIZE};
+    use super::{active_tool_hidden, home_buttons, outline_icon_path, visible_count, ICON_SIZE};
+    use crate::editor::tool::Tool;
     use gpui_kit::px;
     use mindweave_core::geometry::Geometry;
     use mindweave_core::{builtin_libraries, ShapeSource};
@@ -507,5 +528,23 @@ mod tests {
         assert_eq!(visible_count(60., 28., 2., 60., 10), 0);
         assert_eq!(visible_count(10., 28., 2., 60., 10), 0);
         assert_eq!(visible_count(-5., 28., 2., 60., 10), 0);
+    }
+
+    #[test]
+    fn more_stands_in_for_a_hidden_active_tool() {
+        // Home: Pointer, then Hand.
+        let buttons = home_buttons();
+        assert!(!active_tool_hidden(&buttons, 2, &Tool::Hand));
+        assert!(active_tool_hidden(&buttons, 1, &Tool::Hand));
+        assert!(!active_tool_hidden(&buttons, 1, &Tool::Pointer));
+        assert!(active_tool_hidden(&buttons, 0, &Tool::Pointer));
+        // A tool of another tab is not hidden here.
+        assert!(!active_tool_hidden(
+            &buttons,
+            0,
+            &Tool::shape("basic-shapes", "star")
+        ));
+        // A count past the end is treated as all shown.
+        assert!(!active_tool_hidden(&buttons, 5, &Tool::Hand));
     }
 }

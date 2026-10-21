@@ -135,7 +135,7 @@ pub struct EditorWindow {
     /// The pointer position at the last step of a pan drag in progress.
     pan_drag: Option<Point<Pixels>>,
     rename: Option<Rename>,
-    /// The active tool and the toolbar tab being shown.
+    /// The active tool and the ribbon tab being shown.
     pub tools: ToolState,
     /// The ribbon's scroll position, measured width and gallery search.
     ribbon: toolbar::Ribbon,
