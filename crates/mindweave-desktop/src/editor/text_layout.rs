@@ -27,11 +27,9 @@ const DECORATION_THICKNESS: f32 = 1. / 16.;
 /// Line height as a multiple of the largest font size on the line.
 pub const LINE_HEIGHT: f32 = 1.25;
 /// Width of the caret, in pixels.
-#[allow(dead_code)] // Caret geometry is for the text editor.
 const CARET_WIDTH_PX: f32 = 1.;
 /// Width added to a selection that continues past the end of a line, as a
 /// fraction of the line height.
-#[allow(dead_code)] // Caret geometry is for the text editor.
 const LINE_END_SELECTION: f32 = 0.25;
 
 /// Text of one font size on one line, shaped by gpui.
@@ -50,7 +48,6 @@ impl Piece {
         self.start + self.shaped.len()
     }
 
-    #[allow(dead_code)] // Caret geometry is for the text editor.
     fn width(&self) -> f32 {
         f32::from(self.shaped.width())
     }
@@ -66,11 +63,9 @@ impl Piece {
 pub(super) struct Line {
     /// Bytes on the line, in `plain()`. A soft-wrapped line ends where the
     /// next one starts; a hard one before its line or paragraph break.
-    #[allow(dead_code)] // Caret geometry is for the text editor.
     pub range: Range<usize>,
     /// The last caret position on the line a click can give: `range.end`,
     /// or for a soft-wrapped line the start of its last character.
-    #[allow(dead_code)] // Caret geometry is for the text editor.
     click_end: usize,
     /// Alignment offset from the layout's left edge.
     pub x: f32,
@@ -86,7 +81,6 @@ pub(super) struct Line {
 }
 
 impl Line {
-    #[allow(dead_code)] // Caret geometry is for the text editor.
     /// Pen position of byte `offset` from the layout's left edge.
     fn x_of(&self, offset: usize) -> f32 {
         let piece = self.pieces.iter().rev().find(|p| p.start <= offset);
@@ -246,7 +240,6 @@ impl TextLayout {
 const GREEK_BAR: f32 = 0.4;
 
 /// Caret geometry, for the text editor.
-#[allow(dead_code)]
 impl TextLayout {
     /// The line showing caret position `offset`: at a soft wrap, the
     /// later line.
@@ -286,6 +279,26 @@ impl TextLayout {
             rects.push(self.rect(x0, line.y, x1 - x0, line.height));
         }
         rects
+    }
+
+    /// The caret positions on the line showing `offset`: from its start to
+    /// the last one a click on it gives (`None` when there are no lines).
+    pub fn line_range(&self, offset: usize) -> Option<Range<usize>> {
+        self.line_of(offset).map(|l| l.range.start..l.click_end)
+    }
+
+    /// The caret position on the line above (or, with `down`, below) the
+    /// one showing `offset`, nearest `x` (canvas units from the text's left
+    /// edge); `None` from the first (or last) line.
+    pub fn vertical(&self, offset: usize, x: f32, down: bool) -> Option<usize> {
+        let i = self
+            .lines
+            .iter()
+            .rposition(|l| l.range.start <= offset)
+            .unwrap_or(0);
+        let j = if down { i + 1 } else { i.checked_sub(1)? };
+        let line = self.lines.get(j)?;
+        Some(self.offset_at((x, (line.y + line.height / 2.) / self.zoom)))
     }
 
     /// The caret position nearest `p` (canvas units from the text's

@@ -96,16 +96,25 @@ pub fn paint_shape_text(
         let (x, y) = vp.canvas_to_screen(p);
         point(bounds.origin.x + px(x), bounds.origin.y + px(y))
     };
-    let opacity = shape.style.opacity;
-    let centre = to_window((f.x + f.w / 2., f.y + f.h / 2.));
     let greek = should_greek(max_font_size(&label.text), zoom);
+    let color = text_color(shape, text.canvas);
+    // The placement of a layout `size` canvas units big, in pixels.
+    let place = |size: (f32, f32), clip: Option<(f32, f32)>, mask: Option<Bounds<Pixels>>| {
+        let frame = text_frame(shape, size);
+        Placement {
+            centre: to_window(frame.centre),
+            offset: (frame.offset.0 * zoom, frame.offset.1 * zoom),
+            angle: frame.angle,
+            clip,
+            mask,
+        }
+    };
     if shape.is_line_like_label() {
-        let color = auto_color(text.canvas, opacity);
         let (w, h) = text
             .layouts
             .size(window, shape.id, &label.text, None, color);
-        let (mid, angle) = line_label_placement(f);
-        let centre = to_window(mid);
+        let placement = place((w, h), None, None);
+        let centre = placement.centre;
         let reach = ((w * w + h * h).sqrt() / 2. + LINE_LABEL_PADDING) * zoom;
         let r = Bounds::new(
             point(centre.x - px(reach), centre.y - px(reach)),
@@ -121,16 +130,9 @@ pub fn paint_shape_text(
             (w / 2. + pad, h / 2. + pad),
             (-w / 2. - pad, h / 2. + pad),
         ]
-        .map(|(x, y)| rotated(centre, (x * zoom, y * zoom), angle));
-        let background = rgb_hsla(text.canvas).opacity(opacity);
+        .map(|(x, y)| rotated(centre, (x * zoom, y * zoom), placement.angle));
+        let background = rgb_hsla(text.canvas).opacity(shape.style.opacity);
         paint_polygon(window, &patch, background);
-        let placement = Placement {
-            centre,
-            offset: (-w / 2. * zoom, -h / 2. * zoom),
-            angle,
-            clip: None,
-            mask: None,
-        };
         let job = TextJob {
             id: shape.id,
             text: &label.text,
@@ -146,60 +148,133 @@ pub fn paint_shape_text(
         text.layouts.keep(shape.id);
         return;
     }
-    let background = text_background(shape.style.fill.as_deref(), text.canvas);
-    let color = auto_color(background, opacity);
+    let wrap = text_wrap(shape);
     if shape.is_text_box() {
-        let pad = TEXT_BOX_PADDING;
-        let placement = Placement {
-            centre,
-            offset: ((pad - f.w / 2.) * zoom, (pad - f.h / 2.) * zoom),
-            angle: f.rotation,
-            clip: None,
-            mask: None,
-        };
+        // A text box's frame fits its text: the size is not needed.
+        let placement = place((0., 0.), None, None);
         let job = TextJob {
             id: shape.id,
             text: &label.text,
-            wrap: text_box_wrap(shape),
+            wrap,
             zoom,
             color,
             greek,
         };
         draw(window, cx, text, &job, &placement);
     } else {
-        let (_, wrap) = label_origin(f.w, f.h, LABEL_PADDING, 0., label.valign);
         let th = if greek {
             // No layout just for bars: only one already cached.
-            match text.layouts.cached(shape.id, &label.text, Some(wrap)) {
+            match text.layouts.cached(shape.id, &label.text, wrap) {
                 Some(layout) => layout.size().1,
                 None => return,
             }
         } else {
             let sized = text
                 .layouts
-                .size(window, shape.id, &label.text, Some(wrap), color);
+                .size(window, shape.id, &label.text, wrap, color);
             sized.1
         };
-        let ((x, y), _) = label_origin(f.w, f.h, LABEL_PADDING, th, label.valign);
+        let ((_, y), _) = label_origin(f.w, f.h, LABEL_PADDING, th, label.valign);
         let top_left = to_window((f.x, f.y));
-        let placement = Placement {
-            centre,
-            offset: ((x - f.w / 2.) * zoom, (y - f.h / 2.) * zoom),
-            angle: f.rotation,
-            // The frame, from the text's top-left corner.
-            clip: Some((-y * zoom, (f.h - y) * zoom)),
-            mask: Some(Bounds::new(top_left, size(px(f.w * zoom), px(f.h * zoom)))),
-        };
+        // The frame, from the text's top-left corner.
+        let clip = Some((-y * zoom, (f.h - y) * zoom));
+        let mask = Some(Bounds::new(top_left, size(px(f.w * zoom), px(f.h * zoom))));
+        let placement = place((0., th), clip, mask);
         let job = TextJob {
             id: shape.id,
             text: &label.text,
-            wrap: Some(wrap),
+            wrap,
             zoom,
             color,
             greek,
         };
         draw(window, cx, text, &job, &placement);
     }
+}
+
+/// Where an object's text sits on the canvas: its top-left corner
+/// `offset` canvas units from `centre`, turned by `angle` degrees about
+/// `centre`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextFrame {
+    pub centre: Pt,
+    pub offset: Pt,
+    pub angle: f32,
+}
+
+impl TextFrame {
+    /// The canvas point of `p`, in canvas units from the text's top-left
+    /// corner.
+    pub fn to_canvas(self, (x, y): Pt) -> Pt {
+        let (sin, cos) = self.angle.to_radians().sin_cos();
+        let (x, y) = (x + self.offset.0, y + self.offset.1);
+        (
+            self.centre.0 + x * cos - y * sin,
+            self.centre.1 + x * sin + y * cos,
+        )
+    }
+
+    /// Canvas point `p` in canvas units from the text's top-left corner.
+    pub fn to_local(self, (x, y): Pt) -> Pt {
+        let (sin, cos) = self.angle.to_radians().sin_cos();
+        let (dx, dy) = (x - self.centre.0, y - self.centre.1);
+        (
+            dx * cos + dy * sin - self.offset.0,
+            -dx * sin + dy * cos - self.offset.1,
+        )
+    }
+}
+
+/// The width `shape`'s text wraps at, in canvas units: none for line
+/// labels and growing text boxes.
+pub fn text_wrap(shape: &Shape) -> Option<f32> {
+    let f = &shape.frame;
+    if shape.is_line_like_label() {
+        None
+    } else if shape.is_text_box() {
+        text_box_wrap(shape)
+    } else {
+        Some(label_origin(f.w, f.h, LABEL_PADDING, 0., VAlign::Top).1)
+    }
+}
+
+/// Where `shape`'s text, laid out `size` canvas units big, sits: a line
+/// label centred on its line and along it, a text box's text inside its
+/// padding, a shape label placed by its vertical alignment; all turned
+/// with the shape.
+pub fn text_frame(shape: &Shape, (w, h): (f32, f32)) -> TextFrame {
+    let f = &shape.frame;
+    if shape.is_line_like_label() {
+        let (centre, angle) = line_label_placement(f);
+        return TextFrame {
+            centre,
+            offset: (-w / 2., -h / 2.),
+            angle,
+        };
+    }
+    let centre = (f.x + f.w / 2., f.y + f.h / 2.);
+    let (x, y) = if shape.is_text_box() {
+        (TEXT_BOX_PADDING, TEXT_BOX_PADDING)
+    } else {
+        let valign = shape.label.as_ref().map_or(VAlign::Middle, |l| l.valign);
+        label_origin(f.w, f.h, LABEL_PADDING, h, valign).0
+    };
+    TextFrame {
+        centre,
+        offset: (x - f.w / 2., y - f.h / 2.),
+        angle: f.rotation,
+    }
+}
+
+/// The colour of `shape`'s Auto text, with its opacity: contrasting with
+/// the canvas `canvas` for line labels, else with its fill.
+pub fn text_color(shape: &Shape, canvas: (u8, u8, u8)) -> Hsla {
+    let background = if shape.is_line_like_label() {
+        canvas
+    } else {
+        text_background(shape.style.fill.as_deref(), canvas)
+    };
+    auto_color(background, shape.style.opacity)
 }
 
 /// One object's text to paint.
@@ -289,7 +364,7 @@ fn rotated(centre: Point<Pixels>, (x, y): (f32, f32), angle: f32) -> Point<Pixel
 }
 
 /// Fills the polygon `corners` (window coordinates) with `color`.
-fn paint_polygon(window: &mut Window, corners: &[Point<Pixels>], color: Hsla) {
+pub(super) fn paint_polygon(window: &mut Window, corners: &[Point<Pixels>], color: Hsla) {
     let mut builder = PathBuilder::fill();
     builder.add_polygon(corners, true);
     if let Ok(path) = builder.build() {
@@ -667,8 +742,11 @@ pub fn label_origin(w: f32, h: f32, padding: f32, text_height: f32, valign: VAli
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
-    use super::{canvas_background, label_origin, text_background};
-    use mindweave_core::{auto_text_color, VAlign};
+    use super::{canvas_background, label_origin, text_background, text_frame, text_wrap};
+    use mindweave_core::geometry::Frame;
+    use mindweave_core::{
+        auto_text_color, builtin_libraries, Label, LibraryRegistry, RichText, Shape, VAlign,
+    };
 
     #[test]
     fn auto_colour_backgrounds() {
@@ -707,5 +785,43 @@ mod tests {
         // evenly, to be clipped).
         let (origin, _) = label_origin(100., 20., 8., 40., VAlign::Middle);
         assert_eq!(origin, (8., -10.));
+    }
+
+    #[test]
+    fn text_frames_place_labels_and_line_labels() {
+        let libs = LibraryRegistry::new(builtin_libraries(), None).0;
+        let frame = Frame {
+            x: 10.,
+            y: 20.,
+            w: 100.,
+            h: 60.,
+            ..Frame::default()
+        };
+        let rect = libs.shape("basic-shapes", "rectangle").unwrap();
+        let mut label = Shape::new(rect, "basic-shapes", frame);
+        label.label = Some(Label {
+            text: RichText::new(Default::default(), Default::default()),
+            valign: VAlign::Middle,
+        });
+        // Inside the padding, centred vertically, from the frame's centre.
+        let f = text_frame(&label, (50., 20.));
+        assert_eq!(
+            (f.centre, f.offset, f.angle),
+            ((60., 50.), (-42., -10.), 0.)
+        );
+        assert_eq!(text_wrap(&label), Some(84.));
+        assert_eq!(f.to_canvas((0., 0.)), (18., 40.));
+
+        // A line label is centred on the line's middle, along it.
+        let line = libs.shape("basic-shapes", "line").unwrap();
+        let line = Shape::new(line, "basic-shapes", frame);
+        let f = text_frame(&line, (40., 16.));
+        assert_eq!(f.offset, (-20., -8.));
+        assert_eq!(f.centre, (60., 50.));
+        assert!((f.angle - 30.963_757).abs() < 1e-3);
+        assert_eq!(text_wrap(&line), None);
+        let p = f.to_canvas((3., 4.));
+        let back = f.to_local(p);
+        assert!((back.0 - 3.).abs() < 1e-3 && (back.1 - 4.).abs() < 1e-3);
     }
 }

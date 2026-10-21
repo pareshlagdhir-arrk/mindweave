@@ -56,8 +56,11 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
         move |bounds, hitbox, window, cx| {
             paint_background(bounds, &settings, &viewport, window, cx);
             editor.update(cx, |editor, cx| editor.paint_content(bounds, window, cx));
-            let (dragging, hand, crosshair, pointer) = {
+            let (dragging, hand, ibeam, crosshair, pointer) = {
                 let editor = editor.read(cx);
+                let ibeam = editor
+                    .pointer_local
+                    .is_some_and(|p| editor.over_edited_text(editor.to_canvas(p)));
                 let pointer = (editor.tools.tool == Tool::Pointer)
                     .then(|| {
                         let at = editor.pointer_local.map(|p| editor.to_canvas(p));
@@ -67,6 +70,7 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
                 (
                     editor.pan_drag.is_some(),
                     editor.left_drag_pans(),
+                    ibeam,
                     matches!(editor.tools.tool, Tool::Shape { .. })
                         || matches!(editor.gesture, Gesture::Placing { .. }),
                     pointer,
@@ -76,10 +80,24 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
                 window.set_cursor_style(CursorStyle::ClosedHand, &hitbox);
             } else if hand {
                 window.set_cursor_style(CursorStyle::OpenHand, &hitbox);
+            } else if ibeam {
+                window.set_cursor_style(CursorStyle::IBeam, &hitbox);
             } else if crosshair {
                 window.set_cursor_style(CursorStyle::Crosshair, &hitbox);
             } else if let Some(cursor) = pointer {
                 window.set_cursor_style(cursor, &hitbox);
+            }
+            // Typing and input methods reach the text being edited while
+            // the editor has focus.
+            let input_focus = {
+                let editor = editor.read(cx);
+                editor
+                    .text_edit
+                    .is_some()
+                    .then(|| editor.focus_handle.clone())
+            };
+            if let Some(focus) = input_focus {
+                window.handle_input(&focus, ElementInputHandler::new(bounds, editor.clone()), cx);
             }
             register_input(editor, bounds, hitbox, window);
         },
@@ -238,6 +256,16 @@ fn register_input(
                     MouseButton::Left => editor.left_drag_pans(),
                     _ => false,
                 };
+                // While editing text, a left press on it places the caret
+                // or selects; anywhere else it stops editing and then does
+                // what it would have done.
+                if !pans && event.button == MouseButton::Left && editor.text_edit.is_some() {
+                    let at = editor.to_canvas(local(event.position, bounds));
+                    if editor.text_press(at, event.click_count, event.modifiers.shift, cx) {
+                        return;
+                    }
+                    editor.end_text_edit(window, cx);
+                }
                 if pans {
                     editor.pan_drag = Some(event.position);
                     cx.notify();
@@ -274,6 +302,13 @@ fn register_input(
                 .then(|| local(event.position, bounds));
             editor.update(cx, |editor, cx| {
                 editor.pointer_local = pointer;
+                if event.pressed_button == Some(MouseButton::Left) {
+                    let at = editor.to_canvas(local(event.position, bounds));
+                    editor.text_drag_to(at, cx);
+                } else {
+                    // The button was released where we could not see it.
+                    editor.end_text_drag();
+                }
                 if let Some(last) = editor.pan_drag {
                     if event.pressed_button.is_some() {
                         let d = event.position - last;
@@ -308,6 +343,9 @@ fn register_input(
             editor.update(cx, |editor, cx| {
                 if editor.pan_drag.take().is_some() {
                     cx.notify();
+                }
+                if event.button == MouseButton::Left {
+                    editor.end_text_drag();
                 }
                 if event.button == MouseButton::Left && editor.gesture != Gesture::Idle {
                     let at = editor.to_canvas(local(event.position, bounds));
@@ -361,6 +399,7 @@ impl EditorWindow {
             &mut self.geometry_cache,
             &mut text,
         );
+        self.paint_text_edit(bounds, window, cx);
         self.text_layouts.end_frame();
         if let Some(shape) = self.placement_preview(&libs) {
             paint_preview(

@@ -10,6 +10,7 @@ mod shape_gallery;
 mod shape_paint;
 mod shape_properties;
 mod status_bar;
+mod text_edit;
 mod text_layout;
 mod text_paint;
 pub mod tool;
@@ -33,12 +34,13 @@ use crate::actions::{
     self, Cancel, CloseWindow, Cut, Delete, Duplicate, NudgeDown, NudgeDownFar, NudgeLeft,
     NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp, NudgeUpFar, Paste, Redo, Save, SelectAll,
     ToggleLayers, ToggleProperties, ToolArrow, ToolEllipse, ToolHand, ToolLine, ToolPointer,
-    ToolRectangle, Undo, EDITOR_CONTEXT,
+    ToolRectangle, Undo, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
 };
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
 use interaction::{Gesture, Press, NUDGE_FAR_STEP, NUDGE_STEP};
 use shape_paint::GeometryCache;
+use text_edit::{TextCommand, TextEditUi, TextEditor};
 use text_layout::TextLayoutCache;
 use text_paint::GlyphOutlines;
 use tool::{Tool, ToolState, BASIC_SHAPES};
@@ -155,6 +157,10 @@ pub struct EditorWindow {
     text_layouts: TextLayoutCache,
     /// Glyph outlines for drawing rotated text.
     glyph_outlines: GlyphOutlines,
+    /// The text being edited on the canvas, if any.
+    pub text_edit: Option<TextEditor>,
+    /// Caret blink, drag selection and placement of the text being edited.
+    text_ui: TextEditUi,
     properties: properties_panel::PropertyFields,
     /// The title last given to the window.
     window_title: String,
@@ -199,6 +205,8 @@ impl EditorWindow {
             geometry_cache: GeometryCache::default(),
             text_layouts: TextLayoutCache::default(),
             glyph_outlines: GlyphOutlines::default(),
+            text_edit: None,
+            text_ui: TextEditUi::default(),
             properties,
             window_title,
             _subscriptions,
@@ -310,12 +318,14 @@ impl EditorWindow {
         .detach();
     }
 
-    /// Ends a colour picker's undo step, then applies edits that otherwise
-    /// wait for Enter or blur: an open rename and a Properties number being
-    /// typed (each its own undo step). Undo, Redo, Save, Close, Quit, the
-    /// edit actions and page and layer switches call this first, so
-    /// keyboard shortcuts and clicks do not skip or misplace them.
+    /// Ends text editing (its undo step), ends a colour picker's undo
+    /// step, then applies edits that otherwise wait for Enter or blur: an
+    /// open rename and a Properties number being typed (each its own undo
+    /// step). Undo, Redo, Save, Close, Quit, the edit actions and page and
+    /// layer switches call this first, so keyboard shortcuts and clicks do
+    /// not skip or misplace them.
     pub fn commit_pending_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_text_edit(window, cx);
         self.finish_color_edit(cx);
         if self.rename.is_some() {
             self.finish_rename(true, cx);
@@ -638,8 +648,26 @@ impl EditorWindow {
         typing
     }
 
+    /// Sends an Edit menu item to the text being edited on the canvas, if
+    /// any, and returns whether it did: while editing, these edit the
+    /// text, not the shapes.
+    fn forward_to_canvas_text(
+        &mut self,
+        command: TextCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let editing = self.text_edit.is_some();
+        if editing {
+            self.text_command(command, window, cx);
+        }
+        editing
+    }
+
     fn on_copy(&mut self, _: &actions::Copy, window: &mut Window, cx: &mut Context<Self>) {
-        if self.forward_to_text_field(input::Copy, window, cx) {
+        if self.forward_to_text_field(input::Copy, window, cx)
+            || self.forward_to_canvas_text(TextCommand::Copy, window, cx)
+        {
             return;
         }
         self.begin_edit_action(window, cx);
@@ -647,7 +675,9 @@ impl EditorWindow {
     }
 
     fn on_cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if self.forward_to_text_field(input::Cut, window, cx) {
+        if self.forward_to_text_field(input::Cut, window, cx)
+            || self.forward_to_canvas_text(TextCommand::Cut, window, cx)
+        {
             return;
         }
         self.begin_edit_action(window, cx);
@@ -660,7 +690,9 @@ impl EditorWindow {
     /// layer: in place when that is in view, else centred in view.
     /// Clipboard text that is not a shapes payload is ignored.
     fn on_paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if self.forward_to_text_field(input::Paste, window, cx) {
+        if self.forward_to_text_field(input::Paste, window, cx)
+            || self.forward_to_canvas_text(TextCommand::Paste, window, cx)
+        {
             return;
         }
         self.begin_edit_action(window, cx);
@@ -684,7 +716,9 @@ impl EditorWindow {
     }
 
     fn on_delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
-        if self.forward_to_text_field(input::Delete, window, cx) {
+        if self.forward_to_text_field(input::Delete, window, cx)
+            || self.forward_to_canvas_text(TextCommand::Delete(false), window, cx)
+        {
             return;
         }
         self.begin_edit_action(window, cx);
@@ -694,7 +728,9 @@ impl EditorWindow {
     /// Selects every unlocked shape of the active layer (none when it is
     /// hidden).
     fn on_select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
-        if self.forward_to_text_field(input::SelectAll, window, cx) {
+        if self.forward_to_text_field(input::SelectAll, window, cx)
+            || self.forward_to_canvas_text(TextCommand::SelectAll, window, cx)
+        {
             return;
         }
         self.begin_edit_action(window, cx);
@@ -705,9 +741,11 @@ impl EditorWindow {
         cx.notify();
     }
 
-    /// Space held over a focused editor turns left drags into pans.
+    /// Space held over a focused editor turns left drags into pans (but
+    /// types a space while editing text).
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if is_plain_space(&event.keystroke)
+            && self.text_edit.is_none()
             && !self.space_held
             && self.focus_handle.is_focused(window)
         {
@@ -795,6 +833,17 @@ fn selectable_ids(shapes: &[Shape]) -> HashSet<Uuid> {
 /// in a text field (gpui's `Input` context).
 fn in_text_field(contexts: &[KeyContext]) -> bool {
     contexts.iter().any(|c| c.contains("Input"))
+}
+
+/// The editor root's key context: [`EDITOR_CONTEXT`], plus
+/// [`TEXT_EDITING_CONTEXT`] while text is being edited on the canvas.
+fn key_context(editing_text: bool) -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add(EDITOR_CONTEXT);
+    if editing_text {
+        context.add(TEXT_EDITING_CONTEXT);
+    }
+    context
 }
 
 /// Space with no modifiers.
@@ -898,10 +947,11 @@ impl Render for EditorWindow {
             );
         }
 
-        v_flex()
+        let root = v_flex()
             .size_full()
-            .key_context(EDITOR_CONTEXT)
-            .track_focus(&self.focus_handle)
+            .key_context(key_context(self.text_edit.is_some()))
+            .track_focus(&self.focus_handle);
+        text_edit::on_text_actions(root, cx)
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_close_window))
             .on_action(cx.listener(Self::on_toggle_layers))
@@ -961,9 +1011,9 @@ impl Render for EditorWindow {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        clipboard_text, hex_to_hsla, hsla_to_hex, in_text_field, is_plain_space, letter_spaced,
-        panel_group_id, parse_number, pruned, row_click, selectable_ids, selectable_in_order,
-        RowClick,
+        clipboard_text, hex_to_hsla, hsla_to_hex, in_text_field, is_plain_space, key_context,
+        letter_spaced, panel_group_id, parse_number, pruned, row_click, selectable_ids,
+        selectable_in_order, RowClick,
     };
     use gpui_kit::Keystroke;
     use mindweave_core::geometry::Frame;
@@ -1049,6 +1099,14 @@ mod tests {
         assert!(in_text_field(&stack(&["Root", "Editor", "Input"])));
         assert!(!in_text_field(&stack(&["Root", "Editor"])));
         assert!(!in_text_field(&[]));
+    }
+
+    #[test]
+    fn the_root_context_says_when_text_is_being_edited() {
+        let editing = key_context(true);
+        assert!(editing.contains("Editor") && editing.contains("TextEditing"));
+        let not = key_context(false);
+        assert!(not.contains("Editor") && !not.contains("TextEditing"));
     }
 
     #[test]

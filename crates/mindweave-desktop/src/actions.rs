@@ -52,18 +52,80 @@ actions!(
     ]
 );
 
+// Keys of the on-canvas text editor, bound only while text is being
+// edited (see `TEXT_EDITING_CONTEXT`).
+actions!(
+    mindweave,
+    [
+        /// Caret one character left or right, one line up or down.
+        TextLeft,
+        TextRight,
+        TextUp,
+        TextDown,
+        /// Caret to the previous word's start or the next word's end.
+        TextWordLeft,
+        TextWordRight,
+        /// Caret to the start or end of its line.
+        TextLineStart,
+        TextLineEnd,
+        /// Caret to the start or end of the text.
+        TextDocStart,
+        TextDocEnd,
+        /// The moves above, extending the selection.
+        TextSelectLeft,
+        TextSelectRight,
+        TextSelectUp,
+        TextSelectDown,
+        TextSelectWordLeft,
+        TextSelectWordRight,
+        TextSelectLineStart,
+        TextSelectLineEnd,
+        TextSelectDocStart,
+        TextSelectDocEnd,
+        /// Deletes the selection, else the character (or with Alt the
+        /// word) before or after the caret.
+        TextBackspace,
+        TextDelete,
+        TextBackspaceWord,
+        TextDeleteWord,
+        /// Return: a new paragraph; Shift+Return: a line break in it.
+        TextNewParagraph,
+        TextLineBreak,
+        TextSelectAll,
+        /// Style toggles: the selection, or what typing uses next.
+        TextBold,
+        TextItalic,
+        TextUnderline,
+        TextStrike,
+        TextCopy,
+        TextCut,
+        TextPaste,
+        /// Undo and redo typing, in word-sized steps.
+        TextUndo,
+        TextRedo,
+        /// Escape: stops editing.
+        TextExit,
+    ]
+);
+
 /// The key context of the editor window's root.
 pub const EDITOR_CONTEXT: &str = "Editor";
+/// Added to the editor root's key context while text on the canvas is
+/// being edited.
+pub const TEXT_EDITING_CONTEXT: &str = "TextEditing";
 /// Where tool keys apply: in the editor, but not while a text field (gpui's
-/// `Input` context) has focus, so typing a name or number is not taken as a
-/// tool key.
-const EDITOR_NOT_TYPING: &str = "Editor && !Input";
+/// `Input` context) has focus or text on the canvas is being edited, so
+/// typing is not taken as a tool or shape key.
+const EDITOR_NOT_TYPING: &str = "Editor && !Input && !TextEditing";
+/// Where the canvas text editor's keys apply: while editing, but not in a
+/// text field that has focus meanwhile.
+const TEXT_EDITING: &str = "TextEditing && !Input";
 
 /// The default keymap. Most bindings have no key context, so they apply in
 /// every window; the tool and edit keys apply only in the editor.
 pub fn key_bindings() -> Vec<KeyBinding> {
     let editor = Some(EDITOR_NOT_TYPING);
-    vec![
+    let mut bindings = vec![
         KeyBinding::new("cmd-n", NewFile, None),
         KeyBinding::new("cmd-o", OpenFile, None),
         KeyBinding::new("cmd-s", Save, None),
@@ -99,6 +161,53 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("backspace", Delete, editor),
         KeyBinding::new("delete", Delete, editor),
         KeyBinding::new("cmd-a", SelectAll, editor),
+    ];
+    bindings.extend(text_key_bindings());
+    bindings
+}
+
+/// The canvas text editor's keys.
+fn text_key_bindings() -> Vec<KeyBinding> {
+    let text = Some(TEXT_EDITING);
+    vec![
+        KeyBinding::new("left", TextLeft, text),
+        KeyBinding::new("right", TextRight, text),
+        KeyBinding::new("up", TextUp, text),
+        KeyBinding::new("down", TextDown, text),
+        KeyBinding::new("alt-left", TextWordLeft, text),
+        KeyBinding::new("alt-right", TextWordRight, text),
+        KeyBinding::new("cmd-left", TextLineStart, text),
+        KeyBinding::new("cmd-right", TextLineEnd, text),
+        KeyBinding::new("cmd-up", TextDocStart, text),
+        KeyBinding::new("cmd-down", TextDocEnd, text),
+        KeyBinding::new("shift-left", TextSelectLeft, text),
+        KeyBinding::new("shift-right", TextSelectRight, text),
+        KeyBinding::new("shift-up", TextSelectUp, text),
+        KeyBinding::new("shift-down", TextSelectDown, text),
+        KeyBinding::new("alt-shift-left", TextSelectWordLeft, text),
+        KeyBinding::new("alt-shift-right", TextSelectWordRight, text),
+        KeyBinding::new("cmd-shift-left", TextSelectLineStart, text),
+        KeyBinding::new("cmd-shift-right", TextSelectLineEnd, text),
+        KeyBinding::new("cmd-shift-up", TextSelectDocStart, text),
+        KeyBinding::new("cmd-shift-down", TextSelectDocEnd, text),
+        KeyBinding::new("backspace", TextBackspace, text),
+        KeyBinding::new("shift-backspace", TextBackspace, text),
+        KeyBinding::new("delete", TextDelete, text),
+        KeyBinding::new("alt-backspace", TextBackspaceWord, text),
+        KeyBinding::new("alt-delete", TextDeleteWord, text),
+        KeyBinding::new("enter", TextNewParagraph, text),
+        KeyBinding::new("shift-enter", TextLineBreak, text),
+        KeyBinding::new("cmd-a", TextSelectAll, text),
+        KeyBinding::new("cmd-b", TextBold, text),
+        KeyBinding::new("cmd-i", TextItalic, text),
+        KeyBinding::new("cmd-u", TextUnderline, text),
+        KeyBinding::new("cmd-shift-x", TextStrike, text),
+        KeyBinding::new("cmd-c", TextCopy, text),
+        KeyBinding::new("cmd-x", TextCut, text),
+        KeyBinding::new("cmd-v", TextPaste, text),
+        KeyBinding::new("cmd-z", TextUndo, text),
+        KeyBinding::new("cmd-shift-z", TextRedo, text),
+        KeyBinding::new("escape", TextExit, text),
     ]
 }
 
@@ -116,6 +225,7 @@ mod tests {
     fn keymap_matches_the_spec() {
         let bindings: Vec<(String, &str)> = key_bindings()
             .iter()
+            .filter(|b| !b.action().name().starts_with("mindweave::Text"))
             .map(|b| {
                 let keys: Vec<String> = b.keystrokes().iter().map(|k| k.unparse()).collect();
                 (keys.join(" "), b.action().name())
@@ -202,10 +312,61 @@ mod tests {
             let predicate = binding.predicate().expect("tool keys have a context");
             assert!(predicate.eval(&context(&["Root", EDITOR_CONTEXT])));
             assert!(!predicate.eval(&context(&["Root", EDITOR_CONTEXT, "Input"])));
+            assert!(!predicate.eval(&context(&["Root", "Editor TextEditing"])));
             assert!(predicate
                 .depth_of(&context(&["Root", EDITOR_CONTEXT, "Input"]))
                 .is_none());
             assert!(!predicate.eval(&context(&["Root"])));
         }
+    }
+
+    fn names(bindings: &[KeyBinding]) -> Vec<&'static str> {
+        bindings.iter().map(|b| b.action().name()).collect()
+    }
+
+    #[test]
+    fn text_keys_win_while_editing_and_other_keys_type() {
+        use gpui_kit::{KeyContext, Keymap, Keystroke};
+        let stack = |names: &[&str]| -> Vec<KeyContext> {
+            names
+                .iter()
+                .map(|n| KeyContext::parse(n).unwrap())
+                .collect()
+        };
+        let key = |s: &str| [Keystroke::parse(s).unwrap()];
+        let keymap = Keymap::new(key_bindings());
+        let editing = stack(&["Root", "Editor TextEditing"]);
+        let text = text_key_bindings();
+        assert_eq!(text.len(), 38);
+        for binding in &text {
+            let (found, pending) = keymap.bindings_for_input(binding.keystrokes(), &editing);
+            assert!(!pending);
+            // The first binding is the one dispatched.
+            assert_eq!(
+                names(&found).first(),
+                Some(&binding.action().name()),
+                "{:?}",
+                binding.keystrokes()
+            );
+        }
+        // Tool keys and other letters are typed, not taken as commands.
+        for k in ["v", "h", "r", "o", "l", "a", "space", "shift-a", "cmd-d"] {
+            let (found, _) = keymap.bindings_for_input(&key(k), &editing);
+            assert!(found.is_empty(), "{k}: {:?}", names(&found));
+        }
+        // Not editing: the shape keys.
+        let shapes = stack(&["Root", "Editor"]);
+        let first = |k: &str, ctx: &[KeyContext]| {
+            names(&keymap.bindings_for_input(&key(k), ctx).0)
+                .first()
+                .copied()
+        };
+        assert_eq!(first("cmd-z", &shapes), Some("mindweave::Undo"));
+        assert_eq!(first("left", &shapes), Some("mindweave::NudgeLeft"));
+        assert_eq!(first("cmd-b", &shapes), Some("mindweave::ToggleLayers"));
+        // A text field focused while editing keeps its keys.
+        let field = stack(&["Root", "Editor TextEditing", "Input"]);
+        assert_eq!(first("cmd-b", &field), Some("mindweave::ToggleLayers"));
+        assert_eq!(first("left", &field), None);
     }
 }
