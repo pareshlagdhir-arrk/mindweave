@@ -1,7 +1,9 @@
 //! Lays out rich text with gpui's text shaping.
 //!
-//! gpui shapes a line at a single font size, so each line is shaped in
-//! pieces of equal size and wrapped here: break opportunities follow
+//! gpui shapes a line at a single font size, so each hard line is shaped
+//! in segments of equal size, measured by binary search over their glyphs
+//! and wrapped here (lines take pieces cut from the segments, so a layout
+//! stays linear in the text's length): break opportunities follow
 //! whitespace, and a word wider than the wrap width breaks between
 //! graphemes. Layouts are computed in screen pixels at a zoom and report
 //! geometry in canvas units, relative to the text's top-left corner.
@@ -189,12 +191,16 @@ impl TextLayout {
                 styles.push((start..plain.len(), &run.style));
             }
             for hard in hard_lines(&plain) {
+                // The runs touching the line (styles are in order).
+                let lo = styles.partition_point(|(r, _)| r.end < hard.start);
+                let hi = lo + styles[lo..].partition_point(|(r, _)| r.start <= hard.end);
+                let styles = &styles[lo..hi];
                 // An empty line is as tall as the text before its break.
                 let style_before = styles
                     .iter()
                     .find(|(r, _)| r.start < hard.start && hard.start <= r.end)
                     .map_or(&paragraph.style, |(_, s)| *s);
-                builder.hard_line(&plain, hard, &styles, style_before, offset, paragraph.align);
+                builder.hard_line(&plain, hard, styles, style_before, offset, paragraph.align);
             }
             offset += plain.len() + 1;
         }
@@ -364,8 +370,52 @@ struct Segment {
     size: f32,
     runs: Vec<TextRun>,
     shaped: ShapedLine,
+    /// Pen positions within `shaped`.
+    pen: PenIndex,
     /// Pen position of its start from the hard line's start.
     x: f32,
+}
+
+/// The pen positions of a shaped line by byte, as gpui's
+/// `ShapedLine::x_for_index` gives them (the first glyph in shaped order at
+/// or after the byte, else the width), found by binary search instead of a
+/// scan from the first glyph.
+pub(super) struct PenIndex {
+    /// Each glyph's byte index, as a running maximum: glyphs of
+    /// right-to-left text are out of byte order, and the first glyph at or
+    /// after a byte is the first whose running maximum reaches it.
+    reach: Vec<usize>,
+    x: Vec<f32>,
+    width: f32,
+}
+
+impl PenIndex {
+    /// From the glyphs' byte indices and pen positions, in shaped order.
+    pub(super) fn new(glyphs: impl Iterator<Item = (usize, f32)>, width: f32) -> Self {
+        let (mut reach, mut x) = (Vec::new(), Vec::new());
+        let mut max = 0;
+        for (index, gx) in glyphs {
+            max = max.max(index);
+            reach.push(max);
+            x.push(gx);
+        }
+        PenIndex { reach, x, width }
+    }
+
+    fn of(shaped: &ShapedLine) -> Self {
+        let glyphs = shaped
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter())
+            .map(|g| (g.index, f32::from(g.position.x)));
+        PenIndex::new(glyphs, f32::from(shaped.width()))
+    }
+
+    /// The pen position of byte `index`.
+    pub(super) fn x(&self, index: usize) -> f32 {
+        let k = self.reach.partition_point(|&r| r < index);
+        self.x.get(k).copied().unwrap_or(self.width)
+    }
 }
 
 impl Builder<'_> {
@@ -434,42 +484,53 @@ impl Builder<'_> {
             .collect();
         let sizes: Vec<(Range<usize>, f32)> =
             local.iter().map(|(r, s)| (r.clone(), s.size)).collect();
-        let mut segments = Vec::new();
+        let mut segments: Vec<Segment> = Vec::new();
         let mut x = 0.;
+        // Segments merge consecutive runs, so each takes the next ones.
+        let mut next_run = 0;
         for (range, size) in size_segments(&sizes) {
-            let runs: Vec<TextRun> = local
-                .iter()
-                .filter(|(r, _)| r.start >= range.start && r.end <= range.end)
-                .map(|(r, s)| self.run(s, r.len()))
-                .collect();
+            let mut runs = Vec::new();
+            while let Some((r, s)) = local.get(next_run).filter(|(r, _)| r.end <= range.end) {
+                runs.push(self.run(s, r.len()));
+                next_run += 1;
+            }
             let shaped = self.shape(&text[range.clone()], size, &runs);
             let width = f32::from(shaped.width());
             segments.push(Segment {
                 range,
                 size,
                 runs,
+                pen: PenIndex::of(&shaped),
                 shaped,
                 x,
             });
             x += width;
         }
+        // The segment holding byte `i` (the first for 0).
+        let segment_at = |i: usize| {
+            let k = segments.partition_point(|s| s.range.start <= i);
+            &segments[k.saturating_sub(1)]
+        };
         let pen = |i: usize| {
-            let seg = segments
-                .iter()
-                .rev()
-                .find(|s| s.range.start <= i)
-                .unwrap_or(&segments[0]);
-            seg.x + f32::from(seg.shaped.x_for_index(i - seg.range.start))
+            let seg = segment_at(i);
+            seg.x + seg.pen.x(i - seg.range.start)
         };
         let breaks = match self.forced {
             Some(lines) => forced_breaks(lines, base, text.len()),
             None => break_lines(text, &pen, self.wrap),
         };
+        // Lines cut each segment's shaping into pieces, in order.
+        let mut cursors: Vec<SegmentCursor> = segments.iter().map(SegmentCursor::new).collect();
         let count = breaks.len();
         for (k, line) in breaks.into_iter().enumerate() {
             let mut pieces = Vec::new();
             let (mut size, mut ascent, mut descent) = (0f32, 0f32, 0f32);
-            for seg in &segments {
+            let first = segments.partition_point(|s| s.range.end <= line.start);
+            for (seg, cursor) in segments[first..]
+                .iter()
+                .zip(&mut cursors[first..])
+                .take_while(|(s, _)| s.range.start < line.end)
+            {
                 let (a, b) = (line.start.max(seg.range.start), line.end.min(seg.range.end));
                 if a >= b {
                     continue;
@@ -477,8 +538,7 @@ impl Builder<'_> {
                 let (shaped, runs) = if a == seg.range.start && b == seg.range.end {
                     (seg.shaped.clone(), seg.runs.clone())
                 } else {
-                    let runs = slice_runs(&seg.runs, a - seg.range.start..b - seg.range.start);
-                    (self.shape(&text[a..b], seg.size, &runs), runs)
+                    cursor.take(a - seg.range.start..b - seg.range.start)
                 };
                 size = size.max(seg.size * self.zoom);
                 ascent = ascent.max(f32::from(shaped.ascent));
@@ -542,22 +602,54 @@ impl Builder<'_> {
     }
 }
 
-/// `runs` (covering bytes from 0) cut to `range`.
-fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    for run in runs {
-        let end = start + run.len;
-        let (a, b) = (start.max(range.start), end.min(range.end));
-        if a < b {
-            out.push(TextRun {
-                len: b - a,
-                ..run.clone()
-            });
+/// Cuts a segment's shaping and runs into pieces at increasing byte
+/// ranges, each glyph and run visited about once (rather than shaping
+/// every line's piece again).
+struct SegmentCursor<'a> {
+    shaped: ShapedLineCursor<'a>,
+    runs: &'a [TextRun],
+    /// The first run not wholly before the last piece, and its start.
+    run: usize,
+    run_start: usize,
+}
+
+impl<'a> SegmentCursor<'a> {
+    fn new(segment: &'a Segment) -> Self {
+        SegmentCursor {
+            shaped: segment.shaped.cursor(),
+            runs: &segment.runs,
+            run: 0,
+            run_start: 0,
         }
-        start = end;
     }
-    out
+
+    /// The shaped glyphs and runs of `range` (bytes within the segment, at
+    /// or after the previous range).
+    fn take(&mut self, range: Range<usize>) -> (ShapedLine, Vec<TextRun>) {
+        self.shaped.take_until(range.start);
+        let shaped = self.shaped.take_until(range.end);
+        let mut runs = Vec::new();
+        let mut start = self.run_start;
+        for (i, run) in self.runs.iter().enumerate().skip(self.run) {
+            let end = start + run.len;
+            if end <= range.start {
+                (self.run, self.run_start) = (i + 1, end);
+            } else if start >= range.end {
+                break;
+            } else {
+                let (a, b) = (start.max(range.start), end.min(range.end));
+                runs.push(TextRun {
+                    len: b - a,
+                    ..run.clone()
+                });
+                if end <= range.end {
+                    (self.run, self.run_start) = (i + 1, end);
+                }
+            }
+            start = end;
+        }
+        (shaped, runs)
+    }
 }
 
 /// The installed font families, and a generation that moves on whenever
@@ -937,7 +1029,17 @@ pub(super) fn break_lines(
         }
         prev_space = space;
     }
-    let fits = |start: usize, end: usize| x(visible_end(text, start, end)) - x(start) <= wrap;
+    // Where the whole text's visible part ends, found once: the rest of
+    // the text is measured from every line's start.
+    let text_visible = visible_end(text, 0, text.len());
+    let fits = |start: usize, end: usize| {
+        let visible = if end == text.len() {
+            text_visible.max(start)
+        } else {
+            visible_end(text, start, end)
+        };
+        x(visible) - x(start) <= wrap
+    };
     let mut lines = Vec::new();
     let mut start = 0;
     let mut next = 0; // first candidate not yet passed
@@ -1033,7 +1135,7 @@ mod tests {
     use super::{
         align_offset, break_lines, forced_breaks, hard_lines, max_font_size, note_missing,
         resolve_family, should_greek, size_segments, text_run, visible_end, ContentKey,
-        InstalledFonts,
+        InstalledFonts, PenIndex,
     };
     use gpui_kit::{FontStyle, FontWeight, Hsla, SharedString};
     use mindweave_core::{HAlign, RichText, RunStyle};
@@ -1200,6 +1302,59 @@ mod tests {
             break_lines("abcdef gh", &mono, Some(40.)),
             vec![0..4, 4..7, 7..9]
         );
+    }
+
+    /// What gpui's `x_for_index` gives: the first glyph (in shaped order)
+    /// at or after `index`, else the width.
+    fn scan(glyphs: &[(usize, f32)], width: f32, index: usize) -> f32 {
+        glyphs
+            .iter()
+            .find(|(i, _)| *i >= index)
+            .map_or(width, |(_, x)| *x)
+    }
+
+    #[test]
+    fn pen_positions_match_a_scan_from_the_first_glyph() {
+        let cases: [(&[(usize, f32)], f32); 4] = [
+            (&[], 0.),
+            (&[(0, 0.), (3, 10.), (6, 20.)], 30.),
+            // Ligature / cluster: one glyph for several bytes.
+            (&[(0, 0.), (1, 8.), (4, 16.)], 20.),
+            // Right-to-left text: glyphs out of byte order.
+            (&[(6, 0.), (3, 10.), (0, 20.), (9, 30.)], 40.),
+        ];
+        for (glyphs, width) in cases {
+            let pen = PenIndex::new(glyphs.iter().copied(), width);
+            for index in 0..12 {
+                assert_eq!(
+                    pen.x(index),
+                    scan(glyphs, width, index),
+                    "{glyphs:?} at {index}"
+                );
+            }
+        }
+    }
+
+    /// A 100,000-character unspaced label (CJK, three bytes a character)
+    /// wrapped at 200px: breaking must not scan the line per position.
+    #[test]
+    #[ignore = "timing guard; release builds only"]
+    fn long_unspaced_text_breaks_in_bounded_time() {
+        let text = "漢".repeat(100_000);
+        let pen = PenIndex::new((0..100_000).map(|i| (i * 3, i as f32 * 16.)), 1_600_000.);
+        let x = |i: usize| pen.x(i);
+        let start = std::time::Instant::now();
+        let lines = break_lines(&text, &x, Some(200.));
+        let elapsed = start.elapsed();
+        assert_eq!(lines.len(), 100_000usize.div_ceil(12));
+        eprintln!("100,000 characters broken in {elapsed:?}");
+        assert!(elapsed.as_millis() < 200, "{elapsed:?}");
+    }
+
+    #[test]
+    fn trailing_whitespace_after_the_last_word_hangs() {
+        let text = format!("ab cd{}", " ".repeat(50));
+        assert_eq!(break_lines(&text, &mono, Some(30.)), vec![0..3, 3..55]);
     }
 
     #[test]

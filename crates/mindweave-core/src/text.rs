@@ -497,13 +497,16 @@ impl RichText {
     /// The grapheme boundary before `at` (0 at the start).
     pub fn prev_grapheme(&self, at: usize) -> usize {
         let b = self.boundaries();
-        b.iter().rev().copied().find(|&x| x < at).unwrap_or(0)
+        let k = b.partition_point(|&x| x < at);
+        k.checked_sub(1).map_or(0, |k| b[k])
     }
 
     /// The grapheme boundary after `at` (the end at the end).
     pub fn next_grapheme(&self, at: usize) -> usize {
         let b = self.boundaries();
-        b.iter().copied().find(|&x| x > at).unwrap_or(self.len())
+        b.get(b.partition_point(|&x| x <= at))
+            .copied()
+            .unwrap_or(self.len())
     }
 
     /// The start of the word before `at` (Alt+Left); punctuation, spaces
@@ -620,21 +623,36 @@ impl RichText {
 
     /// `at` clamped, moved back to a grapheme boundary.
     fn floor_boundary(&self, at: usize) -> usize {
-        let b = self.boundaries();
-        b.iter().rev().copied().find(|&x| x <= at).unwrap_or(0)
+        floor_in(&self.boundaries(), at)
     }
 
     /// `at` clamped, moved forward to a grapheme boundary.
     fn ceil_boundary(&self, at: usize) -> usize {
-        let b = self.boundaries();
-        b.iter().copied().find(|&x| x >= at).unwrap_or(self.len())
+        ceil_in(&self.boundaries(), at)
     }
 
-    /// `range` ordered, clamped and widened to grapheme boundaries.
+    /// `range` ordered, clamped and widened to grapheme boundaries (found
+    /// once for both ends).
     fn snap_range(&self, range: Range<usize>) -> Range<usize> {
         let (lo, hi) = (range.start.min(range.end), range.start.max(range.end));
-        self.floor_boundary(lo)..self.ceil_boundary(hi)
+        let b = self.boundaries();
+        floor_in(&b, lo)..ceil_in(&b, hi)
     }
+}
+
+/// The last of the boundaries `b` (in order, from 0 to the end) at or
+/// before `at`.
+fn floor_in(b: &[usize], at: usize) -> usize {
+    let k = b.partition_point(|&x| x <= at);
+    k.checked_sub(1).map_or(0, |k| b[k])
+}
+
+/// The first of the boundaries `b` at or after `at` (the end past it).
+fn ceil_in(b: &[usize], at: usize) -> usize {
+    b.get(b.partition_point(|&x| x < at))
+        .or(b.last())
+        .copied()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
