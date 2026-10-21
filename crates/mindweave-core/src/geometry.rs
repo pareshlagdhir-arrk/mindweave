@@ -385,28 +385,24 @@ impl Frame {
 /// flips within the box, moves it to `(f.x, f.y)`, then rotates it by
 /// `f.rotation` degrees clockwise about the box centre.
 pub fn to_canvas(local: &Geometry, f: &Frame) -> Geometry {
+    map_points(local, |p| frame_point(f, p))
+}
+
+/// One local point of `f` in canvas space: flip within the box, translate,
+/// rotate about the box centre.
+fn frame_point(f: &Frame, (lx, ly): Pt) -> Pt {
     let (sin, cos) = f.rotation.to_radians().sin_cos();
     let (cx, cy) = (f.x + f.w / 2.0, f.y + f.h / 2.0);
-    map_points(local, |(lx, ly)| {
-        let lx = if f.flip_x { f.w - lx } else { lx };
-        let ly = if f.flip_y { f.h - ly } else { ly };
-        let (dx, dy) = (f.x + lx - cx, f.y + ly - cy);
-        (cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
-    })
+    let lx = if f.flip_x { f.w - lx } else { lx };
+    let ly = if f.flip_y { f.h - ly } else { ly };
+    let (dx, dy) = (f.x + lx - cx, f.y + ly - cy);
+    (cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
 }
 
 /// Start and end of a line-like shape (local `(0,0)` to `(w,h)`) in canvas
 /// space, honouring flips and rotation exactly as [`to_canvas`] does.
 pub fn line_endpoints(f: &Frame) -> (Pt, Pt) {
-    let (sin, cos) = f.rotation.to_radians().sin_cos();
-    let (cx, cy) = (f.x + f.w / 2.0, f.y + f.h / 2.0);
-    let map = |(lx, ly): Pt| {
-        let lx = if f.flip_x { f.w - lx } else { lx };
-        let ly = if f.flip_y { f.h - ly } else { ly };
-        let (dx, dy) = (f.x + lx - cx, f.y + ly - cy);
-        (cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
-    };
-    (map((0.0, 0.0)), map((f.w, f.h)))
+    (frame_point(f, (0.0, 0.0)), frame_point(f, (f.w, f.h)))
 }
 
 /// Midpoint of a line-like shape and the angle (degrees, in `(-90, 90]`)
@@ -416,9 +412,10 @@ pub fn line_label_placement(f: &Frame) -> (Pt, f32) {
     let (a, b) = line_endpoints(f);
     let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
     let mut angle = (b.1 - a.1).atan2(b.0 - a.0).to_degrees();
-    if angle > 90.0 {
+    // The epsilon keeps a vertical line at +90 despite f32 noise.
+    if angle > 90.0 + 1e-3 {
         angle -= 180.0;
-    } else if angle <= -90.0 {
+    } else if angle <= -90.0 + 1e-3 {
         angle += 180.0;
     }
     (mid, angle)
@@ -1067,6 +1064,17 @@ mod tests {
             ..Frame::default()
         });
         assert!(close_to(mid, (60.0, 40.0)));
+        for rotation in [90.0, 270.0] {
+            let f = Frame {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 0.0,
+                rotation,
+                ..Frame::default()
+            };
+            assert!((angle(f) - 90.0).abs() < 1e-2, "{rotation}");
+        }
         let down = Frame {
             x: 0.0,
             y: 0.0,

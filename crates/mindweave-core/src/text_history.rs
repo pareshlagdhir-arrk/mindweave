@@ -176,4 +176,24 @@ mod tests {
         }
         assert_eq!(n, 500);
     }
+
+    #[test]
+    fn undo_and_redo_reset_the_merge_group() {
+        let mut h = TextHistory::new(snap("", 0));
+        h.record(snap("", 0), EditKind::InsertWord);
+        h.record(snap("a", 1), EditKind::Other);
+        h.record(snap("ab", 2), EditKind::InsertWord);
+        // Undo the word, then type again: must not merge into the older
+        // InsertWord step, even though it is the same kind.
+        let back = h.undo(snap("abc", 3)).unwrap();
+        assert_eq!(back, snap("ab", 2));
+        h.record(back, EditKind::InsertWord);
+        assert_eq!(h.undo(snap("abd", 3)), Some(snap("ab", 2)));
+        assert_eq!(h.undo(snap("ab", 2)), Some(snap("a", 1)));
+        assert_eq!(h.undo(snap("a", 1)), Some(snap("", 0)));
+        // Redo also resets the group.
+        let again = h.redo(snap("", 0)).unwrap();
+        h.record(again, EditKind::InsertWord);
+        assert!(h.undo(snap("x", 1)).is_some());
+    }
 }

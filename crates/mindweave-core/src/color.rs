@@ -59,11 +59,8 @@ mod tests {
         let bg = |s: &str| parse_hex_color(s).unwrap();
         assert_eq!(auto_text_color(bg("#1E1E1E")), (255, 255, 255));
         assert_eq!(auto_text_color(bg("#F5F5F5")), (0, 0, 0));
-        let mid = bg("#777777");
-        let l = relative_luminance(mid);
-        let (white, black) = (1.05 / (l + 0.05), (l + 0.05) / 0.05);
-        let expected = if white > black { 255 } else { 0 };
-        assert_eq!(auto_text_color(mid), (expected, expected, expected));
+        // Contrast 4.69 with black vs 4.48 with white.
+        assert_eq!(auto_text_color(bg("#777777")), (0, 0, 0));
         assert_eq!(relative_luminance((0, 0, 0)), 0.0);
         assert!((relative_luminance((255, 255, 255)) - 1.0).abs() < 1e-5);
     }
