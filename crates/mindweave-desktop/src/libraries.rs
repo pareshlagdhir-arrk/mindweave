@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use gpui_kit::{App, Global, SharedString};
+use mindweave_core::library::{quote, shorten_notice};
 use mindweave_core::{builtin_libraries, user_libraries_dir, Icon, LibraryRegistry};
 
 /// The icon shown for a Lucide name that is not bundled.
@@ -49,8 +50,13 @@ pub fn lucide_icon_path(name: &str, cx: &App) -> SharedString {
     icon_path_in(name, bundled_icons(cx))
 }
 
+/// Unbundled icons named in one notice before the rest are counted.
+const MAX_NOTICE_ICONS: usize = 5;
+
 /// One notice per library that names Lucide icons this build does not
-/// bundle (they show [`FALLBACK_ICON`]).
+/// bundle (they show [`FALLBACK_ICON`]). Names come from library files, so
+/// they are quoted, listed up to [`MAX_NOTICE_ICONS`], and the notice is
+/// shortened like the registry's.
 fn unbundled_icon_notices(
     registry: &LibraryRegistry,
     bundled: &HashSet<SharedString>,
@@ -70,18 +76,23 @@ fn unbundled_icon_notices(
             let names: Vec<String> = std::iter::once(&library.icon)
                 .chain(library.shapes.iter().map(|s| &s.icon))
                 .filter_map(missing)
-                .map(|name| format!("`{name}`"))
                 .collect();
-            (!names.is_empty()).then(|| {
-                format!(
-                    "{}: {} not bundled with Mindweave; the default icon is used",
-                    library.name,
-                    match names.as_slice() {
-                        [one] => format!("icon {one} is"),
-                        many => format!("icons {} are", many.join(", ")),
-                    }
-                )
-            })
+            let listed = names
+                .iter()
+                .take(MAX_NOTICE_ICONS)
+                .map(|name| format!("`{}`", quote(name)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let subject = match names.len() {
+                0 => return None,
+                1 => format!("icon {listed} is"),
+                n if n <= MAX_NOTICE_ICONS => format!("icons {listed} are"),
+                n => format!("icons {listed} and {} more are", n - MAX_NOTICE_ICONS),
+            };
+            Some(shorten_notice(&format!(
+                "{}: {subject} not bundled with Mindweave; the default icon is used",
+                quote(&library.name)
+            )))
         })
         .collect()
 }
@@ -103,6 +114,8 @@ fn icon_path_in(name: &str, bundled: &HashSet<SharedString>) -> SharedString {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mindweave_core::geometry::Primitive;
+    use mindweave_core::{Library, ShapeDef, ShapeSource, StyleDefaults};
 
     #[test]
     fn unbundled_lucide_icons_get_a_notice() {
@@ -132,6 +145,46 @@ mod tests {
               the default icon is used"
             ]
         );
+    }
+
+    #[test]
+    fn unbundled_icon_notice_is_capped() {
+        let shape = |i: usize, icon: String| ShapeDef {
+            id: format!("s{i}"),
+            name: "S".into(),
+            icon: Icon::Lucide(icon),
+            default_size: (1.0, 1.0),
+            style: StyleDefaults::default(),
+            source: ShapeSource::Primitive(Primitive::Rect),
+            params: Vec::new(),
+        };
+        let shapes = std::iter::once(shape(0, "x".repeat(200)))
+            .chain((1..50).map(|i| shape(i, format!("missing-{i}"))))
+            .collect();
+        let library = Library {
+            id: "big".into(),
+            name: "n".repeat(500),
+            version: "1".into(),
+            author: None,
+            description: None,
+            icon: Icon::Lucide("shapes".into()),
+            order: 0,
+            builtin: false,
+            shapes,
+        };
+        let registry = LibraryRegistry::new(vec![library], None).0;
+        let bundled: HashSet<SharedString> = [SharedString::from("icons/shapes.svg")].into();
+        let notices = unbundled_icon_notices(&registry, &bundled);
+        assert_eq!(notices.len(), 1);
+        let notice = &notices[0];
+        let expected = format!(
+            "{}…: icons `{}…`, `missing-1`, `missing-2`, `missing-3`, `missing-4` \
+             and 45 more are not bundled with Mindweave; the default icon is used",
+            "n".repeat(60),
+            "x".repeat(60)
+        );
+        assert_eq!(notice, &expected);
+        assert!(notice.chars().count() <= 601, "{}", notice.chars().count());
     }
 
     #[test]

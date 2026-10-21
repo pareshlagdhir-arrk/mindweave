@@ -199,8 +199,11 @@ is used:
 
 Limits: each file is at most 1 MB; documents with a DTD or with elements
 nested more than 64 deep are rejected; path numbers larger than 1,000,000
-make that path contribute nothing. A file used by several shapes or icons
-is read once.
+make that path contribute nothing. A path used by several shapes or icons
+is read once; paths that differ only in `./` parts or repeated `/`, such
+as `a.svg` and `./a.svg`, count as the same path. Every file read counts
+towards the library's 16 MB, including files that cannot be used (for
+example, because they are not UTF-8 text).
 
 An SVG that cannot be used gives a warning and skips only that shape.
 
@@ -215,7 +218,9 @@ An `icon` value is either:
   [SVG outlines](#svg-outlines) and is drawn as a monochrome icon.
 
 An invalid icon gives a warning and the default icon is used. So does a
-well-formed Lucide name that this version of Mindweave does not bundle.
+well-formed Lucide name that this version of Mindweave does not bundle;
+one notice per library names the first five such icons and counts the
+rest.
 
 ## Compatibility and errors
 
@@ -235,7 +240,8 @@ well-formed Lucide name that this version of Mindweave does not bundle.
   library already uses. Built-in libraries keep their ids.
 - At most 100 library folders are loaded, in folder name order; one
   notice counts the folders that were skipped.
-- Notices quote at most 60 characters of any value from your files.
+- Notices quote at most 60 characters of any value from your files, and
+  notices longer than 600 characters are cut short with `…`.
 
 ## Worked example: Basic Shapes
 

@@ -760,8 +760,6 @@ fn selectable_in_order(shapes: &[Shape], layer_visible: bool) -> Vec<Uuid> {
     shapes.iter().filter(|s| !s.locked).map(|s| s.id).collect()
 }
 
-/// Ids of the shapes in `shapes` that can stay selected: the unlocked
-/// ones.
 /// `shapes` as clipboard text: `Ok(None)` for none, `Err` with a message
 /// for more than paste accepts ([`MAX_CLIPBOARD_SHAPES`]).
 fn clipboard_text(shapes: &[Shape]) -> Result<Option<String>, String> {
@@ -771,6 +769,8 @@ fn clipboard_text(shapes: &[Shape]) -> Result<Option<String>, String> {
     Ok((!shapes.is_empty()).then(|| to_clipboard(shapes)))
 }
 
+/// Ids of the shapes in `shapes` that can stay selected: the unlocked
+/// ones.
 fn selectable_ids(shapes: &[Shape]) -> HashSet<Uuid> {
     selectable_in_order(shapes, true).into_iter().collect()
 }
