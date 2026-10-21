@@ -177,7 +177,8 @@ pub(super) fn edit_bounds(frames: &[Frame], field: BoundsField, value: f32) -> V
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Summary {
     pub count: usize,
-    /// "Library · Shape", "Missing library", or "Mixed" for different kinds.
+    /// "Library · Shape", "Text" (text boxes), "Missing library", or
+    /// "Mixed" for different kinds.
     pub title: String,
     pub bounds: Rect,
     /// Every selected shape is a text box, whose height fits its text: H
@@ -203,6 +204,9 @@ pub(super) fn summarize(shapes: &[&Shape], libs: &LibraryRegistry) -> Option<Sum
     let def = libs.shape(&first.library, &first.shape);
     let title = if !same_kind {
         "Mixed".to_string()
+    } else if first.is_text_box() {
+        // Text boxes belong to no shape library.
+        "Text".to_string()
     } else {
         match (libs.libraries().iter().find(|l| l.id == first.library), def) {
             (None, _) => "Missing library".to_string(),
@@ -1134,6 +1138,19 @@ mod tests {
         let s = summarize(&[&rect, &ellipse], &libs).unwrap();
         assert_eq!(s.title, "Mixed");
         assert!(s.params.is_empty());
+    }
+
+    #[test]
+    fn text_boxes_are_titled_text() {
+        let libs = libs();
+        let a = Shape::new_text_box((0.0, 0.0));
+        let b = Shape::new_text_box((5.0, 5.0));
+        let rect = shape(&libs, "rectangle", frame(0.0, 0.0, 10.0, 10.0));
+        assert_eq!(summarize(&[&a], &libs).unwrap().title, "Text");
+        assert_eq!(summarize(&[&a, &b], &libs).unwrap().title, "Text");
+        // With other shapes: mixed kinds, never a missing library.
+        assert_eq!(summarize(&[&a, &rect], &libs).unwrap().title, "Mixed");
+        assert_eq!(summarize(&[&rect, &a], &libs).unwrap().title, "Mixed");
     }
 
     #[test]
