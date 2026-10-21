@@ -4,7 +4,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::color::normalize_hex_color;
+
 pub const MAX_RECENT: usize = 20;
+/// How many recently picked colours the colour palette remembers.
+pub const MAX_RECENT_COLORS: usize = 8;
 const DEFAULT_THEME: &str = "Mindweave One Dark";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,6 +33,9 @@ pub struct AppSettings {
     pub editor_window: Option<WindowSize>,
     pub show_layers: bool,
     pub show_properties: bool,
+    /// Colours picked in the colour palette, newest first, as uppercase
+    /// `#RRGGBB`; at most [`MAX_RECENT_COLORS`].
+    pub recent_colors: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -40,6 +47,7 @@ impl Default for AppSettings {
             editor_window: None,
             show_layers: true,
             show_properties: true,
+            recent_colors: Vec::new(),
         }
     }
 }
@@ -84,6 +92,18 @@ impl AppSettings {
             i += 1;
             keep
         });
+    }
+
+    /// Moves or inserts `color` at the front of the recent colours,
+    /// dropping the oldest beyond [`MAX_RECENT_COLORS`]. Text that is not a
+    /// `#RRGGBB` colour is ignored.
+    pub fn push_recent_color(&mut self, color: &str) {
+        let Some(color) = normalize_hex_color(color) else {
+            return;
+        };
+        self.recent_colors.retain(|c| *c != color);
+        self.recent_colors.insert(0, color);
+        self.recent_colors.truncate(MAX_RECENT_COLORS);
     }
 
     pub fn recent_existing(&self) -> Vec<&RecentFile> {
@@ -215,6 +235,29 @@ mod tests {
         let before = s.recent.clone();
         s.rename_recent(Path::new("/nonexistent/x"), Path::new("/nonexistent/y"));
         assert_eq!(s.recent, before);
+    }
+
+    #[test]
+    fn recent_colors_dedupe_and_cap() {
+        let mut s = AppSettings::default();
+        assert!(s.recent_colors.is_empty());
+        s.push_recent_color("#ff0000");
+        s.push_recent_color("#00FF00");
+        // The same colour in another spelling moves to the front, once.
+        s.push_recent_color("FF0000");
+        assert_eq!(s.recent_colors, ["#FF0000", "#00FF00"]);
+        // Text that is not a colour is ignored.
+        s.push_recent_color("red");
+        assert_eq!(s.recent_colors.len(), 2);
+        for i in 0..10u8 {
+            s.push_recent_color(&format!("#0000{i:02X}"));
+        }
+        assert_eq!(s.recent_colors.len(), MAX_RECENT_COLORS);
+        assert_eq!(s.recent_colors[0], "#000009");
+        assert_eq!(s.recent_colors[7], "#000002");
+        // Old settings files without the field load with no recent colours.
+        let old: AppSettings = serde_json::from_str(r#"{"theme": "X"}"#).unwrap();
+        assert!(old.recent_colors.is_empty());
     }
 
     #[test]

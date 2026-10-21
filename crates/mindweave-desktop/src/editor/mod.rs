@@ -2,6 +2,7 @@
 //! tabs, Properties panel and status bar.
 
 mod canvas;
+mod color_palette;
 mod interaction;
 mod layers_panel;
 mod page_tabs;
