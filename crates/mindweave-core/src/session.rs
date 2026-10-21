@@ -142,7 +142,10 @@ fn same_text_box_position(a: &Frame, b: &Frame) -> bool {
         return (a.x, a.y) == (b.x, b.y);
     }
     let (pa, pb) = (top_left(a), top_left(b));
-    let near = |u: f32, v: f32| (u - v).abs() <= 1e-4 * u.abs().max(v.abs()).max(1.0);
+    // A few ulps of the coordinates (layout re-anchoring only adds float
+    // rounding), never a whole unit: a nudge far from the origin counts.
+    let near =
+        |u: f32, v: f32| (u - v).abs() <= 1e-3 + 8.0 * f32::EPSILON * u.abs().max(v.abs()).max(1.0);
     near(pa.0, pb.0) && near(pa.1, pb.1)
 }
 
@@ -1294,6 +1297,23 @@ mod tests {
         s.update_shapes(&[id], |sh| sh.frame.x -= 5.0);
         assert!(!s.is_dirty());
         s.update_shapes(&[id], |sh| sh.frame.y += 1.0);
+        assert!(s.is_dirty());
+
+        // Far from the origin, a 1-unit nudge of a rotated box is still an
+        // edit, while re-anchoring by layout is not.
+        let mut far = Shape::new_text_box((20_000.0, -20_000.0));
+        far.frame.w = 40.0;
+        far.frame.rotation = 30.0;
+        let far_id = far.id;
+        s.add_shapes(vec![far]);
+        s.save().unwrap();
+        s.set_text_box_layout(far_id, 333.3, 77.7);
+        s.set_text_box_layout(far_id, 41.7, 19.1);
+        assert!(!s.is_dirty());
+        s.update_shapes(&[far_id], |sh| sh.frame.x += 1.0);
+        assert!(s.is_dirty());
+        s.update_shapes(&[far_id], |sh| sh.frame.x -= 1.0);
+        s.update_shapes(&[far_id], |sh| sh.frame.y -= 1.0);
         assert!(s.is_dirty());
 
         // Unrotated boxes keep x and y.

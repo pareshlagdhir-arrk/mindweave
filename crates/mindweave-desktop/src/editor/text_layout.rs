@@ -106,11 +106,15 @@ pub struct TextLayout {
 }
 
 impl TextLayout {
-    /// Lays out `text` at `zoom`, wrapped at `wrap_width` canvas units
-    /// (`None`: only at line and paragraph breaks). Runs without a colour
-    /// use `default_color`, and its alpha applies to every run. Families
-    /// that are not installed are drawn in the default font and passed to
-    /// `missing_font`.
+    /// Lays out `text` for painting at `zoom`, wrapped at `wrap_width`
+    /// canvas units (`None`: only at line and paragraph breaks). Runs
+    /// without a colour use `default_color`, and its alpha applies to every
+    /// run. Families that are not installed are drawn in the default font
+    /// and passed to `missing_font`.
+    ///
+    /// Line breaks and the size come from a layout at zoom 1, so they do
+    /// not change with the zoom; at another zoom the same lines are shaped
+    /// again at the zoomed font size for crisp glyphs.
     pub fn layout(
         window: &mut Window,
         text: &RichText,
@@ -124,13 +128,57 @@ impl TextLayout {
         } else {
             1.
         };
+        let wrap = wrap_width.map(|w| w.max(0.));
+        let reference = Self::build(window, text, wrap, 1., default_color, missing_font, None);
+        if zoom == 1. {
+            return reference;
+        }
+        let breaks: Vec<Range<usize>> = reference.lines.iter().map(|l| l.range.clone()).collect();
+        let mut zoomed = Self::build(
+            window,
+            text,
+            wrap,
+            zoom,
+            default_color,
+            &mut |_| {},
+            Some(&breaks),
+        );
+        // Vertical metrics and the box come from the reference, scaled.
+        zoomed.width = reference.width * zoom;
+        zoomed.height = reference.height * zoom;
+        if zoomed.lines.len() == reference.lines.len() {
+            for (line, r) in zoomed.lines.iter_mut().zip(&reference.lines) {
+                line.y = r.y * zoom;
+                line.height = r.height * zoom;
+                line.baseline = r.baseline * zoom;
+            }
+        }
+        let width = zoomed.width;
+        for line in &mut zoomed.lines {
+            line.x = align_offset(line.align, width, line.visible_width);
+        }
+        zoomed
+    }
+
+    /// Lays out `text` at `zoom` with `wrap` in canvas units, breaking
+    /// lines itself or at `forced` (line ranges of a reference layout).
+    fn build(
+        window: &mut Window,
+        text: &RichText,
+        wrap: Option<f32>,
+        zoom: f32,
+        default_color: Hsla,
+        missing_font: &mut dyn FnMut(&str),
+        forced: Option<&[Range<usize>]>,
+    ) -> TextLayout {
         let text_system = window.text_system().clone();
         let mut builder = Builder {
             text_system: &text_system,
             default_family: window.text_style().font().family,
             default_color,
             zoom,
-            wrap: wrap_width.map(|w| w.max(0.) * zoom),
+            wrap: wrap.map(|w| w * zoom),
+            forced,
             missing_font,
             lines: Vec::new(),
             y: 0.,
@@ -178,25 +226,45 @@ impl TextLayout {
     pub(super) fn lines(&self) -> &[Line] {
         &self.lines
     }
+
+    /// Stand-ins for the lines of too-small text, in canvas units from the
+    /// text's top-left corner: a bar over each line's visible text, through
+    /// the middle `GREEK_BAR` of its height.
+    pub(super) fn greek_bars(&self) -> Vec<Rect> {
+        self.lines
+            .iter()
+            .filter(|l| l.visible_width > 0.)
+            .map(|l| {
+                let bar = l.height * GREEK_BAR;
+                self.rect(l.x, l.y + (l.height - bar) / 2., l.visible_width, bar)
+            })
+            .collect()
+    }
 }
+
+/// Height of a greeked line's bar, as a fraction of the line height.
+const GREEK_BAR: f32 = 0.4;
 
 /// Caret geometry, for the text editor.
 #[allow(dead_code)]
 impl TextLayout {
     /// The line showing caret position `offset`: at a soft wrap, the
     /// later line.
-    fn line_of(&self, offset: usize) -> &Line {
+    fn line_of(&self, offset: usize) -> Option<&Line> {
         self.lines
             .iter()
             .rev()
             .find(|l| l.range.start <= offset)
-            .unwrap_or(&self.lines[0])
+            .or(self.lines.first())
     }
 
-    /// The caret at `offset`: a thin box as tall as its line.
+    /// The caret at `offset`: a thin box as tall as its line (empty when
+    /// there are no lines).
     pub fn caret_rect(&self, offset: usize) -> Rect {
-        let line = self.line_of(offset);
-        self.rect(line.x_of(offset), line.y, CARET_WIDTH_PX, line.height)
+        match self.line_of(offset) {
+            Some(line) => self.rect(line.x_of(offset), line.y, CARET_WIDTH_PX, line.height),
+            None => self.rect(0., 0., CARET_WIDTH_PX, 0.),
+        }
     }
 
     /// Boxes covering `range`, one per line it touches; a line whose end
@@ -224,11 +292,14 @@ impl TextLayout {
     /// top-left corner).
     pub fn offset_at(&self, p: Pt) -> usize {
         let (x, y) = (p.0 * self.zoom, p.1 * self.zoom);
-        let line = self
+        let Some(line) = self
             .lines
             .iter()
             .find(|l| y < l.y + l.height)
-            .unwrap_or_else(|| &self.lines[self.lines.len() - 1]);
+            .or(self.lines.last())
+        else {
+            return 0;
+        };
         let x = x - line.x;
         let piece = line
             .pieces
@@ -261,6 +332,8 @@ struct Builder<'a> {
     zoom: f32,
     /// Wrap width in pixels.
     wrap: Option<f32>,
+    /// Line ranges (of the whole text) to break at instead of wrapping.
+    forced: Option<&'a [Range<usize>]>,
     missing_font: &'a mut dyn FnMut(&str),
     lines: Vec<Line>,
     /// Top of the next line, in pixels.
@@ -371,7 +444,10 @@ impl Builder<'_> {
                 .unwrap_or(&segments[0]);
             seg.x + f32::from(seg.shaped.x_for_index(i - seg.range.start))
         };
-        let breaks = break_lines(text, &pen, self.wrap);
+        let breaks = match self.forced {
+            Some(lines) => forced_breaks(lines, base, text.len()),
+            None => break_lines(text, &pen, self.wrap),
+        };
         let count = breaks.len();
         for (k, line) in breaks.into_iter().enumerate() {
             let mut pieces = Vec::new();
@@ -556,17 +632,15 @@ impl TextLayoutCache {
         }
     }
 
-    /// The size (canvas units) of `text` laid out for object `id`: from
-    /// its cached layout when the text and wrap width match at any zoom
-    /// (so zooming does not re-lay out objects out of view), else from a
-    /// new layout at `zoom`.
+    /// The size (canvas units) of `text` laid out for object `id`, which
+    /// does not depend on the zoom: from its cached layout when the text
+    /// and wrap width match, else from a new layout at zoom 1.
     pub fn size(
         &mut self,
         window: &mut Window,
         id: Uuid,
         text: &RichText,
         wrap: Option<f32>,
-        zoom: f32,
         color: Hsla,
     ) -> (f32, f32) {
         let key = ContentKey::new(text, wrap, color);
@@ -577,9 +651,22 @@ impl TextLayoutCache {
                 return e.layout.size();
             }
         }
-        self.insert(window, id, key, text, wrap, zoom, color)
+        self.insert(window, id, key, text, wrap, 1., color)
             .layout
             .size()
+    }
+
+    /// The layout cached for `id` when its text and wrap width match `text`
+    /// and `wrap` (at any zoom and colour), kept for this frame.
+    pub fn cached(&mut self, id: Uuid, text: &RichText, wrap: Option<f32>) -> Option<&TextLayout> {
+        let key = ContentKey::new(text, wrap, Hsla::default());
+        let frame = self.frame;
+        let e = self.entries.get_mut(&id)?;
+        if !e.content.same_size(&key) {
+            return None;
+        }
+        e.used = frame;
+        Some(&e.layout)
     }
 
     /// The entry for `text` laid out for object `id` at `zoom`, laid out
@@ -789,6 +876,46 @@ fn grapheme_break(text: &str, start: usize, x: &dyn Fn(usize) -> f32, wrap: f32)
     end.unwrap_or(text.len())
 }
 
+/// The lines of a reference layout (byte ranges of the whole text) that
+/// fall on the hard line of `len` bytes starting at `base`, from its start;
+/// the whole hard line when none do.
+pub(super) fn forced_breaks(lines: &[Range<usize>], base: usize, len: usize) -> Vec<Range<usize>> {
+    let local: Vec<Range<usize>> = lines
+        .iter()
+        .filter(|l| l.start >= base && l.end <= base + len)
+        .map(|l| l.start - base..l.end - base)
+        .collect();
+    if local.is_empty() {
+        std::iter::once(0..len).collect()
+    } else {
+        local
+    }
+}
+
+/// Smallest on-screen font size, in pixels, at which glyphs are drawn;
+/// smaller text is drawn as bars.
+pub const GREEK_BELOW_PX: f32 = 4.;
+
+/// Whether text whose largest font size is `max_size` canvas units is too
+/// small at `zoom` to draw its glyphs.
+pub fn should_greek(max_size: f32, zoom: f32) -> bool {
+    max_size * zoom < GREEK_BELOW_PX
+}
+
+/// The largest font size in `text`, runs and (for empty paragraphs)
+/// paragraph styles.
+pub fn max_font_size(text: &RichText) -> f32 {
+    text.paragraphs
+        .iter()
+        .flat_map(|p| {
+            let runs = p.runs.iter().map(|r| r.style.size);
+            std::iter::once(p.style.size)
+                .filter(move |_| p.runs.is_empty())
+                .chain(runs)
+        })
+        .fold(0., f32::max)
+}
+
 /// Where a line `width` wide starts in `available` pixels.
 pub(super) fn align_offset(align: HAlign, available: f32, width: f32) -> f32 {
     let free = (available - width).max(0.);
@@ -803,7 +930,8 @@ pub(super) fn align_offset(align: HAlign, available: f32, width: f32) -> f32 {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        align_offset, break_lines, hard_lines, resolve_family, size_segments, text_run, visible_end,
+        align_offset, break_lines, forced_breaks, hard_lines, max_font_size, resolve_family,
+        should_greek, size_segments, text_run, visible_end,
     };
     use gpui_kit::{FontStyle, FontWeight, Hsla, SharedString};
     use mindweave_core::{HAlign, RunStyle};
@@ -937,6 +1065,40 @@ mod tests {
             break_lines("abcdef gh", &mono, Some(40.)),
             vec![0..4, 4..7, 7..9]
         );
+    }
+
+    #[test]
+    fn zoomed_layouts_reuse_the_reference_breaks() {
+        // Reference lines of "hello world\u{2028}again" (hard lines at 0 and 14).
+        let lines = [0..6, 6..11, 14..19];
+        assert_eq!(forced_breaks(&lines, 0, 11), vec![0..6, 6..11]);
+        assert_eq!(forced_breaks(&lines, 14, 5), vec![0..5]);
+        // Text the reference does not know about stays one line.
+        assert_eq!(forced_breaks(&lines, 30, 4), vec![0..4]);
+        // Breaks found at one zoom are replayed exactly at another.
+        let at_1 = break_lines("hello world", &|i| i as f32 * 10., Some(60.));
+        assert_eq!(forced_breaks(&at_1, 0, 11), at_1);
+    }
+
+    #[test]
+    fn tiny_text_is_greeked() {
+        assert!(should_greek(16., 0.2)); // 3.2px
+        assert!(!should_greek(16., 0.25)); // 4px
+        assert!(!should_greek(16., 1.));
+        assert!(should_greek(2., 1.));
+        let mut text = mindweave_core::RichText::new(RunStyle::default(), HAlign::Left);
+        assert_eq!(max_font_size(&text), 16.);
+        let big = RunStyle {
+            size: 30.,
+            ..RunStyle::default()
+        };
+        let small = RunStyle {
+            size: 8.,
+            ..RunStyle::default()
+        };
+        text.insert(0, "a", &big);
+        text.insert(1, "\nb", &small);
+        assert_eq!(max_font_size(&text), 30.);
     }
 
     #[test]

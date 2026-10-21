@@ -10,10 +10,11 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::text_layout::{CacheEntry, TextLayoutCache};
+use super::text_layout::{max_font_size, should_greek, CacheEntry, TextLayoutCache};
 use gpui_kit::*;
-use mindweave_core::geometry::{line_label_placement, Pt};
-use mindweave_core::{auto_text_color, parse_hex_color, Shape, VAlign, Viewport};
+use mindweave_core::geometry::{line_label_placement, Pt, Rect};
+use mindweave_core::{auto_text_color, parse_hex_color, RichText, Shape, VAlign, Viewport};
+use uuid::Uuid;
 
 /// Inner padding of a shape label, in canvas units.
 pub const LABEL_PADDING: f32 = 8.;
@@ -27,6 +28,8 @@ const UNDERLINE_DESCENT: f32 = 0.618;
 /// Strikethrough position above the baseline, as a fraction of the font
 /// size.
 const STRIKE_RISE: f32 = 0.3;
+/// Opacity of the bars standing in for too-small text, times the text's.
+const GREEK_OPACITY: f32 = 0.4;
 
 /// What painting text needs besides the shape.
 pub struct TextPaint<'a> {
@@ -95,12 +98,12 @@ pub fn paint_shape_text(
     };
     let opacity = shape.style.opacity;
     let centre = to_window((f.x + f.w / 2., f.y + f.h / 2.));
+    let greek = should_greek(max_font_size(&label.text), zoom);
     if shape.is_line_like_label() {
         let color = auto_color(text.canvas, opacity);
-        // The size from any zoom culls without laying out again.
         let (w, h) = text
             .layouts
-            .size(window, shape.id, &label.text, None, zoom, color);
+            .size(window, shape.id, &label.text, None, color);
         let (mid, angle) = line_label_placement(f);
         let centre = to_window(mid);
         let reach = ((w * w + h * h).sqrt() / 2. + LINE_LABEL_PADDING) * zoom;
@@ -111,10 +114,6 @@ pub fn paint_shape_text(
         if !r.intersects(&bounds) {
             return;
         }
-        let entry = text
-            .layouts
-            .entry(window, shape.id, &label.text, None, zoom, color);
-        let (w, h) = entry.layout.size();
         let pad = LINE_LABEL_PADDING;
         let patch = [
             (-w / 2. - pad, -h / 2. - pad),
@@ -132,7 +131,15 @@ pub fn paint_shape_text(
             clip: None,
             mask: None,
         };
-        paint_layout(window, cx, entry, text.glyphs, &placement);
+        let job = TextJob {
+            id: shape.id,
+            text: &label.text,
+            wrap: None,
+            zoom,
+            color,
+            greek,
+        };
+        draw(window, cx, text, &job, &placement);
         return;
     }
     if !outline_visible {
@@ -143,14 +150,6 @@ pub fn paint_shape_text(
     let color = auto_color(background, opacity);
     if shape.is_text_box() {
         let pad = TEXT_BOX_PADDING;
-        let entry = text.layouts.entry(
-            window,
-            shape.id,
-            &label.text,
-            text_box_wrap(shape),
-            zoom,
-            color,
-        );
         let placement = Placement {
             centre,
             offset: ((pad - f.w / 2.) * zoom, (pad - f.h / 2.) * zoom),
@@ -158,13 +157,29 @@ pub fn paint_shape_text(
             clip: None,
             mask: None,
         };
-        paint_layout(window, cx, entry, text.glyphs, &placement);
+        let job = TextJob {
+            id: shape.id,
+            text: &label.text,
+            wrap: text_box_wrap(shape),
+            zoom,
+            color,
+            greek,
+        };
+        draw(window, cx, text, &job, &placement);
     } else {
         let (_, wrap) = label_origin(f.w, f.h, LABEL_PADDING, 0., label.valign);
-        let entry = text
-            .layouts
-            .entry(window, shape.id, &label.text, Some(wrap), zoom, color);
-        let (_, th) = entry.layout.size();
+        let th = if greek {
+            // No layout just for bars: only one already cached.
+            match text.layouts.cached(shape.id, &label.text, Some(wrap)) {
+                Some(layout) => layout.size().1,
+                None => return,
+            }
+        } else {
+            let sized = text
+                .layouts
+                .size(window, shape.id, &label.text, Some(wrap), color);
+            sized.1
+        };
         let ((x, y), _) = label_origin(f.w, f.h, LABEL_PADDING, th, label.valign);
         let top_left = to_window((f.x, f.y));
         let placement = Placement {
@@ -175,7 +190,77 @@ pub fn paint_shape_text(
             clip: Some((-y * zoom, (f.h - y) * zoom)),
             mask: Some(Bounds::new(top_left, size(px(f.w * zoom), px(f.h * zoom)))),
         };
-        paint_layout(window, cx, entry, text.glyphs, &placement);
+        let job = TextJob {
+            id: shape.id,
+            text: &label.text,
+            wrap: Some(wrap),
+            zoom,
+            color,
+            greek,
+        };
+        draw(window, cx, text, &job, &placement);
+    }
+}
+
+/// One object's text to paint.
+struct TextJob<'a> {
+    id: Uuid,
+    text: &'a RichText,
+    wrap: Option<f32>,
+    zoom: f32,
+    /// Colour of Auto text, with the object's opacity.
+    color: Hsla,
+    /// Too small on screen for glyphs: bars stand in for the lines.
+    greek: bool,
+}
+
+/// Paints `job` at `at`: its glyphs, or for greeked text a bar per line
+/// from the layout already cached (nothing when there is none).
+fn draw(window: &mut Window, cx: &mut App, text: &mut TextPaint, job: &TextJob, at: &Placement) {
+    if job.greek {
+        if let Some(layout) = text.layouts.cached(job.id, job.text, job.wrap) {
+            let bars = layout.greek_bars();
+            paint_greek(
+                window,
+                &bars,
+                job.zoom,
+                job.color.opacity(GREEK_OPACITY),
+                at,
+            );
+        }
+        return;
+    }
+    let entry = text
+        .layouts
+        .entry(window, job.id, job.text, job.wrap, job.zoom, job.color);
+    paint_layout(window, cx, entry, text.glyphs, at);
+}
+
+/// Paints `bars` (canvas units from the text's top-left corner) placed by
+/// `at`: quads when upright, polygons when turned.
+fn paint_greek(window: &mut Window, bars: &[Rect], zoom: f32, color: Hsla, at: &Placement) {
+    let paint = |window: &mut Window| {
+        for bar in bars {
+            let (x, y, w, h) = (bar.x * zoom, bar.y * zoom, bar.w * zoom, bar.h * zoom);
+            if let Some((top, bottom)) = at.clip {
+                if y + h <= top || y >= bottom {
+                    continue;
+                }
+            }
+            let (x, y) = (x + at.offset.0, y + at.offset.1);
+            if at.angle.rem_euclid(360.) == 0. {
+                let origin = point(at.centre.x + px(x), at.centre.y + px(y));
+                window.paint_quad(fill(Bounds::new(origin, size(px(w), px(h))), color));
+            } else {
+                let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+                    .map(|p| rotated(at.centre, p, at.angle));
+                paint_polygon(window, &corners, color);
+            }
+        }
+    };
+    match at.mask {
+        Some(bounds) => window.with_content_mask(Some(ContentMask { bounds }), paint),
+        None => paint(window),
     }
 }
 
@@ -319,6 +404,9 @@ fn build_rotated(
         fills.push((color, PathBuilder::fill().with_style(style)));
         fills.len() - 1
     };
+    // Underlines and strikethroughs get paths of their own: under the
+    // non-zero rule, their winding could cancel a glyph's and punch holes.
+    let mut bars: Vec<(Hsla, PathBuilder)> = Vec::new();
     let mut upright = Vec::new();
     for line in entry.layout.lines() {
         if let Some((top, bottom)) = at.clip {
@@ -386,8 +474,8 @@ fn build_rotated(
                     let t = f32::from(thickness);
                     let corners =
                         [(x0, y), (x1, y), (x1, y + t), (x0, y + t)].map(|p| to_point(turn(p)));
-                    let i = fill_for(run.color, &mut fills);
-                    fills[i].1.add_polygon(&corners, true);
+                    let i = fill_for(run.color, &mut bars);
+                    bars[i].1.add_polygon(&corners, true);
                 };
                 if let Some(u) = &run.underline {
                     let y = baseline + f32::from(shaped.descent) * UNDERLINE_DESCENT;
@@ -402,6 +490,7 @@ fn build_rotated(
     }
     let paths = fills
         .into_iter()
+        .chain(bars)
         .filter_map(|(color, builder)| {
             let path = builder.build().ok()?;
             (!path.vertices.is_empty()).then_some((path, color))

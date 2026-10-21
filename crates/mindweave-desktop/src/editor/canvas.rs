@@ -402,8 +402,7 @@ impl EditorWindow {
     /// gives each (see `DocumentSession::set_text_box_layout`). It runs
     /// every frame and compares with every box's frame, so sizes left stale
     /// by undo, redo or opening a file are corrected before painting.
-    /// Layouts cached at another zoom are reused for sizing, so zooming
-    /// does not lay out every box again.
+    /// Sizes come from layouts at zoom 1, so zooming changes nothing here.
     fn layout_text_boxes(
         &mut self,
         window: &mut Window,
@@ -411,7 +410,6 @@ impl EditorWindow {
         cx: &mut Context<Self>,
     ) {
         let page = self.session.page();
-        let zoom = page.viewport.zoom;
         let mut changes = Vec::new();
         for shape in page.layers.iter().flat_map(|l| &l.objects) {
             let Some(label) = shape.label.as_ref().filter(|_| shape.is_text_box()) else {
@@ -422,7 +420,7 @@ impl EditorWindow {
             let wrap = text_box_wrap(shape);
             let (w, h) = self
                 .text_layouts
-                .size(window, shape.id, &label.text, wrap, zoom, color);
+                .size(window, shape.id, &label.text, wrap, color);
             let (w, h) = (w + 2. * TEXT_BOX_PADDING, h + 2. * TEXT_BOX_PADDING);
             let f = &shape.frame;
             if (shape.auto_width() && f.w != w) || f.h != h {
@@ -432,11 +430,16 @@ impl EditorWindow {
         if changes.is_empty() {
             return;
         }
+        let generation = self.session.layout_generation();
         for (id, w, h) in changes {
             self.session.set_text_box_layout(id, w, h);
         }
-        // The selection chrome and the sidebar were drawn with the old size.
-        cx.notify();
+        // The selection chrome and the sidebar were drawn with the old
+        // size. A size the frame cannot hold (past its clamp) changes
+        // nothing, and must not repaint every frame.
+        if self.session.layout_generation() != generation {
+            cx.notify();
+        }
     }
 
     /// A point relative to the canvas origin, in canvas coordinates.
