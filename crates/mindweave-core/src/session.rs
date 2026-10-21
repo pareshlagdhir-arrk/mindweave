@@ -53,6 +53,8 @@ pub struct DocumentSession {
     history: History<(u64, Vec<Page>)>,
     /// Revision and page content when the open gesture began.
     gesture: Option<(u64, Vec<Page>)>,
+    /// Bumped whenever a text box's laid-out size changes.
+    layout_generation: u64,
 }
 
 /// Whether `a` and `b` have the same content, ignoring view state.
@@ -98,8 +100,55 @@ fn layer_content_eq(a: &Layer, b: &Layer) -> bool {
             .all(|(a, b)| shape_content_eq(a, b))
 }
 
+/// Moves `f`, resized from `before` about its centre, so its unflipped
+/// local top-left corner stays where it was on the canvas: a rotated text
+/// box keeps its left edge in place while its size follows its text.
+fn keep_top_left(before: &Frame, f: &mut Frame) {
+    // Unrotated, or the same size: x and y already hold, exactly.
+    if f.rotation == 0.0 || (f.w == before.w && f.h == before.h) {
+        return;
+    }
+    let corner = top_left(before);
+    let offset = corner_offset(f);
+    f.x = corner.0 - offset.0;
+    f.y = corner.1 - offset.1;
+}
+
+/// Canvas position of `f`'s unflipped local top-left corner.
+fn top_left(f: &Frame) -> (f32, f32) {
+    let offset = corner_offset(f);
+    (f.x + offset.0, f.y + offset.1)
+}
+
+/// From `(f.x, f.y)` to the canvas position of `f`'s unflipped local
+/// top-left corner (rotation is about the frame's centre).
+fn corner_offset(f: &Frame) -> (f32, f32) {
+    let (sin, cos) = f.rotation.to_radians().sin_cos();
+    let (dx, dy) = (-f.w / 2.0, -f.h / 2.0);
+    (
+        f.w / 2.0 + dx * cos - dy * sin,
+        f.h / 2.0 + dx * sin + dy * cos,
+    )
+}
+
+/// Whether two text-box frames place the box at the same spot: the same
+/// `x`/`y` unrotated; rotated, the same top-left corner (which layout
+/// keeps fixed) up to float rounding.
+fn same_text_box_position(a: &Frame, b: &Frame) -> bool {
+    if a.rotation != b.rotation {
+        return false;
+    }
+    if a.rotation == 0.0 {
+        return (a.x, a.y) == (b.x, b.y);
+    }
+    let (pa, pb) = (top_left(a), top_left(b));
+    let near = |u: f32, v: f32| (u - v).abs() <= 1e-4 * u.abs().max(v.abs()).max(1.0);
+    near(pa.0, pb.0) && near(pa.1, pb.1)
+}
+
 /// Shape equality ignoring the sizes a text box derives from its text
-/// layout: `frame.h` always, `frame.w` while it grows with its text.
+/// layout: `frame.h` always, `frame.w` while it grows with its text, and
+/// the `x`/`y` shift that keeps a rotated box's top-left corner in place.
 fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
     if !(a.is_text_box() && b.is_text_box()) || a.auto_width() != b.auto_width() {
         return a == b;
@@ -120,12 +169,15 @@ fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
     } = a;
     let auto = a.auto_width();
     let content = |f: &Frame| Frame {
+        x: 0.0,
+        y: 0.0,
         h: 0.0,
         w: if auto { 0.0 } else { f.w },
         ..*f
     };
     *id == b.id
         && content(frame) == content(&b.frame)
+        && same_text_box_position(frame, &b.frame)
         && *library == b.library
         && *shape == b.shape
         && *style == b.style
@@ -223,6 +275,7 @@ impl DocumentSession {
             dirty_cache: Cell::new(None),
             history: History::new(HISTORY_CAP),
             gesture: None,
+            layout_generation: 0,
         }
     }
 
@@ -267,11 +320,19 @@ impl DocumentSession {
     }
 
     /// A number naming the current content: it changes with every content
-    /// edit, undo and redo, never with view changes, and equal numbers
-    /// mean equal content. Cheap to read, so callers can skip work when
-    /// nothing changed.
+    /// edit, undo and redo, never with view changes. Equal revisions mean
+    /// equal content apart from text-box layout sizes (see
+    /// [`Self::layout_generation`]). Cheap to read, so callers can skip
+    /// work when nothing changed.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// A number that changes whenever [`Self::set_text_box_layout`] changes
+    /// a text box's size, which [`Self::revision`] does not track. Callers
+    /// showing sizes compare both.
+    pub fn layout_generation(&self) -> u64 {
+        self.layout_generation
     }
 
     /// The document. Edits go through the session so they are recorded
@@ -618,11 +679,16 @@ impl DocumentSession {
             .flat_map(|l| l.objects.iter_mut())
             .find(|s| s.id == id && s.is_text_box());
         if let Some(shape) = shape {
+            let before = shape.frame;
             if shape.auto_width() {
                 shape.frame.w = w;
             }
             shape.frame.h = h;
             shape.normalize();
+            keep_top_left(&before, &mut shape.frame);
+            if shape.frame != before {
+                self.layout_generation += 1;
+            }
         }
     }
 
@@ -1163,6 +1229,80 @@ mod tests {
         s.set_text_box_layout(id, f32::NAN, f32::INFINITY);
         assert_eq!(s.find_shape(id).unwrap().frame.h, 99.0);
         assert_eq!(s.revision(), rev);
+    }
+
+    #[test]
+    fn layout_generation_counts_layout_size_changes() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let tb = Shape::new_text_box((0.0, 0.0));
+        let id = tb.id;
+        s.add_shapes(vec![tb]);
+        let gen = s.layout_generation();
+        let rev = s.revision();
+
+        s.set_text_box_layout(id, 80.0, 40.0);
+        let gen2 = s.layout_generation();
+        assert_ne!(gen2, gen);
+        assert_eq!(s.revision(), rev);
+        // The same size again changes nothing.
+        s.set_text_box_layout(id, 80.0, 40.0);
+        assert_eq!(s.layout_generation(), gen2);
+        // Ignored calls change nothing either.
+        s.set_text_box_layout(id, f32::NAN, 1.0);
+        s.set_text_box_layout(uuid::Uuid::new_v4(), 5.0, 5.0);
+        assert_eq!(s.layout_generation(), gen2);
+        s.set_text_box_layout(id, 80.0, 41.0);
+        assert_ne!(s.layout_generation(), gen2);
+    }
+
+    #[test]
+    fn layout_keeps_a_rotated_text_box_left_edge_in_place() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let mut tb = Shape::new_text_box((100.0, 50.0));
+        tb.frame.w = 40.0;
+        tb.frame.h = 20.0;
+        tb.frame.rotation = 30.0;
+        let id = tb.id;
+        s.add_shapes(vec![tb]);
+        let corners = |f: &Frame| {
+            let (sin, cos) = f.rotation.to_radians().sin_cos();
+            let (cx, cy) = (f.x + f.w / 2.0, f.y + f.h / 2.0);
+            let at = |lx: f32, ly: f32| {
+                let (dx, dy) = (lx - f.w / 2.0, ly - f.h / 2.0);
+                (cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
+            };
+            (at(0.0, 0.0), at(0.0, f.h))
+        };
+        let before = corners(&s.find_shape(id).unwrap().frame);
+
+        s.set_text_box_layout(id, 120.0, 60.0);
+        let f = s.find_shape(id).unwrap().frame;
+        assert_eq!((f.w, f.h, f.rotation), (120.0, 60.0, 30.0));
+        let (top_left, bottom_left) = corners(&f);
+        let close =
+            |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3;
+        assert!(close(top_left, before.0), "{top_left:?} vs {:?}", before.0);
+        // The left edge keeps its direction; it grew downwards.
+        let dir = |a: (f32, f32), b: (f32, f32)| ((b.0 - a.0) / 60.0, (b.1 - a.1) / 60.0);
+        let (sin, cos) = 30f32.to_radians().sin_cos();
+        assert!(close(dir(top_left, bottom_left), (-sin, cos)));
+
+        // Moving x and y with the layout is not an unsaved change.
+        s.save().unwrap();
+        s.update_shapes(&[id], |sh| sh.frame.x += 5.0);
+        s.set_text_box_layout(id, 70.0, 90.0);
+        s.update_shapes(&[id], |sh| sh.frame.x -= 5.0);
+        assert!(!s.is_dirty());
+        s.update_shapes(&[id], |sh| sh.frame.y += 1.0);
+        assert!(s.is_dirty());
+
+        // Unrotated boxes keep x and y.
+        let tb = Shape::new_text_box((7.0, 9.0));
+        let id = tb.id;
+        s.add_shapes(vec![tb]);
+        s.set_text_box_layout(id, 50.0, 30.0);
+        let f = s.find_shape(id).unwrap().frame;
+        assert_eq!((f.x, f.y, f.w, f.h), (7.0, 9.0, 50.0, 30.0));
     }
 
     #[test]

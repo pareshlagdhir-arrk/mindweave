@@ -239,12 +239,14 @@ fn same(value: f32) -> f32 {
     value
 }
 
-/// What the shape panel was last synced from: the content revision and
-/// the selection (its ids hashed, so comparing is cheap). Equal keys mean
-/// nothing the panel shows has changed, up to a 64-bit hash collision.
+/// What the shape panel was last synced from: the content revision, the
+/// text-box layout generation (laid-out sizes the revision does not track)
+/// and the selection (its ids hashed, so comparing is cheap). Equal keys
+/// mean nothing the panel shows has changed, up to a 64-bit hash collision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct SyncKey {
     revision: u64,
+    layout: u64,
     selection: u64,
 }
 
@@ -254,8 +256,14 @@ impl SyncKey {
         selection.hash(&mut hasher);
         Self {
             revision,
+            layout: 0,
             selection: hasher.finish(),
         }
+    }
+
+    /// The key with the session's text-box layout generation.
+    pub(super) fn with_layout(self, layout: u64) -> Self {
+        Self { layout, ..self }
     }
 
     /// Whether the panel synced at `last` (`None`: never, or a field was
@@ -544,7 +552,8 @@ impl EditorWindow {
     /// Runs every frame, so it does nothing unless the content or the
     /// selection changed since the last full sync.
     pub(super) fn sync_shape_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let key = SyncKey::new(self.session.revision(), &self.selection);
+        let key = SyncKey::new(self.session.revision(), &self.selection)
+            .with_layout(self.session.layout_generation());
         if !key.needs_sync(self.properties.shape.synced) {
             return;
         }
@@ -953,6 +962,10 @@ mod tests {
         assert!(SyncKey::new(7, &[a]).needs_sync(Some(key)));
         assert!(SyncKey::new(7, &[b, a]).needs_sync(Some(key)));
         assert!(SyncKey::new(7, &[]).needs_sync(Some(key)));
+        // A text box's laid-out size changing (H/W) resyncs too.
+        let key = SyncKey::new(7, &[a]).with_layout(3);
+        assert!(!SyncKey::new(7, &[a]).with_layout(3).needs_sync(Some(key)));
+        assert!(SyncKey::new(7, &[a]).with_layout(4).needs_sync(Some(key)));
     }
 
     #[test]
