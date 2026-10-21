@@ -222,9 +222,15 @@ pub enum LibraryError {
     Invalid(String),
 }
 
+/// Pays for bytes about to be read; an error stops the read.
+pub type Charge<'a> = &'a mut dyn FnMut(usize) -> Result<(), LibraryError>;
+
 /// Read access to the files of one library, by path relative to its folder.
 pub trait LibraryFiles {
-    fn read(&self, rel: &str) -> Result<String, LibraryError>;
+    /// Reads `rel`. Before reading any bytes, passes their number to
+    /// `charge` and returns its error, if any, so reads that then fail
+    /// (such as text that is not UTF-8) are paid for too.
+    fn read(&self, rel: &str, charge: Charge) -> Result<String, LibraryError>;
 }
 
 /// A library folder on disk. Paths that are absolute, contain `..`, or
@@ -233,7 +239,7 @@ pub trait LibraryFiles {
 pub struct DirFiles(pub PathBuf);
 
 impl LibraryFiles for DirFiles {
-    fn read(&self, rel: &str) -> Result<String, LibraryError> {
+    fn read(&self, rel: &str, charge: Charge) -> Result<String, LibraryError> {
         check_relative_path(rel)?;
         let shown = quote(rel);
         let unreadable = |e: std::io::Error| {
@@ -257,11 +263,16 @@ impl LibraryFiles for DirFiles {
         if meta.len() > MAX_FILE_BYTES as u64 {
             return Err(LibraryError::TooLarge(shown));
         }
-        // The file may grow between the size check and the read.
+        // At most MAX_FILE_BYTES, checked above.
+        let size = meta.len() as usize;
+        charge(size)?;
+        // The file may grow between the size check and the read; bytes
+        // beyond `size` are paid for after the read.
         let mut bytes = Vec::new();
         std::fs::File::open(&path)
             .and_then(|f| f.take(MAX_FILE_BYTES as u64 + 1).read_to_end(&mut bytes))
             .map_err(unreadable)?;
+        charge(bytes.len().saturating_sub(size))?;
         if bytes.len() > MAX_FILE_BYTES {
             return Err(LibraryError::TooLarge(shown));
         }
@@ -274,13 +285,15 @@ impl LibraryFiles for DirFiles {
 pub struct EmbeddedFiles(pub &'static [(&'static str, &'static str)]);
 
 impl LibraryFiles for EmbeddedFiles {
-    fn read(&self, rel: &str) -> Result<String, LibraryError> {
+    fn read(&self, rel: &str, charge: Charge) -> Result<String, LibraryError> {
         check_relative_path(rel)?;
-        self.0
+        let (_, text) = self
+            .0
             .iter()
             .find(|(path, _)| *path == rel)
-            .map(|(_, text)| (*text).to_owned())
-            .ok_or_else(|| LibraryError::Missing(quote(rel)))
+            .ok_or_else(|| LibraryError::Missing(quote(rel)))?;
+        charge(text.len())?;
+        Ok((*text).to_owned())
     }
 }
 
@@ -299,9 +312,16 @@ fn shortened(text: &str, max: usize) -> String {
     }
 }
 
-/// A value from a library file, shortened for a message.
-fn quote(value: &str) -> String {
+/// A value from a library file, shortened for a message: at most 60
+/// characters, then `…`.
+pub fn quote(value: &str) -> String {
     shortened(value, MAX_QUOTED_CHARS)
+}
+
+/// A notice or log line about libraries, shortened to at most 600
+/// characters, then `…`.
+pub fn shorten_notice(text: &str) -> String {
+    shortened(text, MAX_NOTICE_CHARS)
 }
 
 /// Messages from loading libraries.
@@ -316,8 +336,9 @@ pub struct LoadReport {
 }
 
 /// The files of the library being loaded. Counts the bytes read against
-/// [`MAX_LIBRARY_BYTES`] and reads each SVG outline once, however many
-/// shapes and icons use it.
+/// [`MAX_LIBRARY_BYTES`], including those of reads that fail, and reads
+/// each SVG outline once, however many shapes and icons use it and
+/// however its path is written (`a.svg`, `./a.svg`).
 struct Reader<'a> {
     files: &'a dyn LibraryFiles,
     bytes_read: usize,
@@ -338,16 +359,32 @@ impl<'a> Reader<'a> {
     }
 
     /// Reads `rel`, enforcing [`MAX_FILE_BYTES`] whatever the source.
-    /// Nothing more is read once the budget is spent.
+    /// Bytes are paid for before they are read, and nothing more is read
+    /// once the budget is spent.
     fn read(&mut self, rel: &str) -> Result<String, LibraryError> {
         if self.over_budget() {
             return Err(LibraryError::TooMuchData);
         }
-        let text = self.files.read(rel)?;
+        let rel = normalized_path(rel)?;
+        let before = self.bytes_read;
+        let bytes_read = &mut self.bytes_read;
+        let mut charge = |n: usize| {
+            *bytes_read = bytes_read.saturating_add(n);
+            if *bytes_read > MAX_LIBRARY_BYTES {
+                Err(LibraryError::TooMuchData)
+            } else {
+                Ok(())
+            }
+        };
+        let text = self.files.read(&rel, &mut charge)?;
+        // In case a source did not pay for all it returned.
+        let paid = self.bytes_read - before;
+        self.bytes_read = self
+            .bytes_read
+            .saturating_add(text.len().saturating_sub(paid));
         if text.len() > MAX_FILE_BYTES {
-            return Err(LibraryError::TooLarge(quote(rel)));
+            return Err(LibraryError::TooLarge(quote(&rel)));
         }
-        self.bytes_read += text.len();
         if self.over_budget() {
             return Err(LibraryError::TooMuchData);
         }
@@ -356,16 +393,32 @@ impl<'a> Reader<'a> {
 
     /// The SVG outline file `rel`.
     fn outline(&mut self, rel: &str) -> Result<Geometry, String> {
-        if let Some(outline) = self.outlines.get(rel) {
+        let rel = normalized_path(rel).map_err(|e| e.to_string())?;
+        if let Some(outline) = self.outlines.get(&rel) {
             return outline.clone();
         }
         let outline = self
-            .read(rel)
+            .read(&rel)
             .map_err(|e| e.to_string())
-            .and_then(|text| parse_outline(&text).map_err(|e| format!("`{}`: {e}", quote(rel))));
-        self.outlines.insert(rel.to_owned(), outline.clone());
+            .and_then(|text| parse_outline(&text).map_err(|e| format!("`{}`: {e}", quote(&rel))));
+        self.outlines.insert(rel, outline.clone());
         outline
     }
+}
+
+/// `rel`, checked by [`check_relative_path`], without `.` parts or
+/// repeated `/`, so each file has one name.
+fn normalized_path(rel: &str) -> Result<String, LibraryError> {
+    check_relative_path(rel)?;
+    let parts: Vec<&str> = rel
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    if parts.is_empty() {
+        // `.` names the folder itself; reading it reports that.
+        return Ok(rel.to_owned());
+    }
+    Ok(parts.join("/"))
 }
 
 /// Accepts only plain relative paths (`shapes/a.svg`, `./a.svg`).
@@ -965,7 +1018,7 @@ impl LibraryRegistry {
                 Err(e) => notices.push(format!("{label}: {e}")),
                 Ok((library, _)) if ids.contains(&library.id) => notices.push(format!(
                     "{label}: the library id `{}` is already in use; skipped",
-                    library.id
+                    quote(&library.id)
                 )),
                 Ok((library, report)) => {
                     if !report.notices.is_empty() {
@@ -984,12 +1037,7 @@ impl LibraryRegistry {
                 .then_with(|| a.id.cmp(&b.id))
         });
         libraries.extend(user);
-        let short = |lines: Vec<String>| {
-            lines
-                .iter()
-                .map(|line| shortened(line, MAX_NOTICE_CHARS))
-                .collect()
-        };
+        let short = |lines: Vec<String>| lines.iter().map(|line| shorten_notice(line)).collect();
         let report = LoadReport {
             notices: short(notices),
             log: short(log),
@@ -1653,9 +1701,11 @@ max = 8
 
         let files = DirFiles(root.clone());
         for rel in ["", "..", "a/../../x.svg", "/etc/passwd", "a\\..\\x.svg"] {
-            assert!(files.read(rel).is_err(), "{rel}");
+            assert!(files.read(rel, &mut no_charge).is_err(), "{rel}");
         }
-        assert!(EmbeddedFiles(&[("../x", "")]).read("../x").is_err());
+        assert!(EmbeddedFiles(&[("../x", "")])
+            .read("../x", &mut no_charge)
+            .is_err());
     }
 
     #[cfg(unix)]
@@ -1827,13 +1877,35 @@ max = 8
     }
 
     impl LibraryFiles for CountingFiles {
-        fn read(&self, rel: &str) -> Result<String, LibraryError> {
+        fn read(&self, rel: &str, charge: Charge) -> Result<String, LibraryError> {
             *self.reads.borrow_mut().entry(rel.to_owned()).or_default() += 1;
-            self.files
+            let text = self
+                .files
                 .get(rel)
-                .cloned()
-                .ok_or_else(|| LibraryError::Missing(rel.into()))
+                .ok_or_else(|| LibraryError::Missing(rel.into()))?;
+            charge(text.len())?;
+            Ok(text.clone())
         }
+    }
+
+    /// Library files that total the bytes they were allowed to read.
+    struct MeteredFiles<F> {
+        files: F,
+        paid: RefCell<usize>,
+    }
+
+    impl<F: LibraryFiles> LibraryFiles for MeteredFiles<F> {
+        fn read(&self, rel: &str, charge: Charge) -> Result<String, LibraryError> {
+            self.files.read(rel, &mut |n| {
+                charge(n)?;
+                *self.paid.borrow_mut() += n;
+                Ok(())
+            })
+        }
+    }
+
+    fn no_charge(_: usize) -> Result<(), LibraryError> {
+        Ok(())
     }
 
     #[test]
@@ -1902,6 +1974,34 @@ max = 8
     }
 
     #[test]
+    fn files_that_do_not_pay_still_count_towards_the_budget() {
+        /// Library files that never call `charge`.
+        struct Unpaid(CountingFiles);
+        impl LibraryFiles for Unpaid {
+            fn read(&self, rel: &str, _: Charge) -> Result<String, LibraryError> {
+                self.0.read(rel, &mut no_charge)
+            }
+        }
+        let big = "x".repeat(MAX_FILE_BYTES);
+        let mut files = vec![
+            ("library.toml".to_owned(), LIB_TOML.to_owned()),
+            (
+                "shapes.toml".to_owned(),
+                (0..20)
+                    .map(|i| format!("[[shape]]\nid = \"s{i}\"\nname = \"S\"\nsvg = \"{i}.svg\"\n"))
+                    .collect(),
+            ),
+        ];
+        files.extend((0..20).map(|i| (format!("{i}.svg"), big.clone())));
+        let files = Unpaid(CountingFiles::new(files));
+        assert_eq!(
+            load_library(&files, false).unwrap_err(),
+            LibraryError::TooMuchData
+        );
+        assert_eq!(files.0.reads("16.svg"), 0);
+    }
+
+    #[test]
     fn an_svg_used_several_times_is_read_once() {
         let svg = r#"<svg viewBox="0 0 1 1"><rect width="1" height="1"/></svg>"#;
         let shapes = "[[shape]]\nid = \"a\"\nname = \"A\"\nicon = \"a.svg\"\nsvg = \"a.svg\"\n\
@@ -1923,6 +2023,90 @@ max = 8
         // A missing file is looked for once but reported for each shape.
         assert_eq!(files.reads("none.svg"), 1);
         assert_eq!(report.notices.len(), 2, "{report:?}");
+    }
+
+    #[test]
+    fn differently_written_paths_to_one_svg_are_read_once() {
+        let svg = r#"<svg viewBox="0 0 1 1"><rect width="1" height="1"/></svg>"#;
+        let shapes: String = ["a.svg", "./a.svg", "././a.svg", ".//a.svg"]
+            .iter()
+            .enumerate()
+            .map(|(i, rel)| format!("[[shape]]\nid = \"s{i}\"\nname = \"S\"\nsvg = \"{rel}\"\n"))
+            .collect();
+        let files = CountingFiles::new(vec![
+            ("library.toml".into(), LIB_TOML.into()),
+            ("shapes.toml".into(), shapes),
+            ("a.svg".into(), svg.into()),
+        ]);
+        let (lib, report) = load_library(&files, false).unwrap();
+        assert_eq!(report, LoadReport::default());
+        assert_eq!(lib.shapes.len(), 4);
+        let svg_reads: usize = files
+            .reads
+            .borrow()
+            .iter()
+            .filter(|(rel, _)| rel.ends_with(".svg"))
+            .map(|(_, n)| n)
+            .sum();
+        assert_eq!(svg_reads, 1);
+    }
+
+    #[test]
+    fn failed_reads_count_towards_the_byte_budget() {
+        // Every shape names the same 1 MB file that is not UTF-8, each
+        // through its own hard link, so every read is in full and fails.
+        let dir = tempfile::tempdir().unwrap();
+        let count = 20;
+        let shapes: String = (0..count)
+            .map(|i| format!("[[shape]]\nid = \"s{i}\"\nname = \"S\"\nsvg = \"bad{i}.svg\"\n"))
+            .collect();
+        let root = write_lib(
+            dir.path(),
+            "l",
+            &[("library.toml", LIB_TOML), ("shapes.toml", &shapes)],
+        );
+        fs::write(root.join("bad0.svg"), vec![0xFF; MAX_FILE_BYTES]).unwrap();
+        for i in 1..count {
+            fs::hard_link(root.join("bad0.svg"), root.join(format!("bad{i}.svg"))).unwrap();
+        }
+        assert_eq!(load_dir(&root).unwrap_err(), LibraryError::TooMuchData);
+        // Reads stop before the budget is exceeded.
+        let files = MeteredFiles {
+            files: DirFiles(root),
+            paid: RefCell::default(),
+        };
+        assert_eq!(
+            load_library(&files, false).unwrap_err(),
+            LibraryError::TooMuchData
+        );
+        let paid = *files.paid.borrow();
+        assert!(paid <= MAX_LIBRARY_BYTES, "{paid}");
+        assert!(paid > MAX_LIBRARY_BYTES - MAX_FILE_BYTES, "{paid}");
+    }
+
+    #[test]
+    fn duplicate_library_ids_are_quoted_in_notices() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "i".repeat(MAX_ID_LEN);
+        for folder in ["a", "b"] {
+            write_lib(
+                dir.path(),
+                folder,
+                &[
+                    ("library.toml", &library_toml(&id, "Same", 0)),
+                    ("shapes.toml", ONE_RECT),
+                ],
+            );
+        }
+        let (registry, report) = LibraryRegistry::new(vec![], Some(dir.path()));
+        assert_eq!(registry.libraries().len(), 1);
+        assert_eq!(
+            report.notices,
+            [format!(
+                "b: the library id `{}` is already in use; skipped",
+                quote(&id)
+            )]
+        );
     }
 
     #[test]
