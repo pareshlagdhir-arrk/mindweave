@@ -395,6 +395,35 @@ pub fn to_canvas(local: &Geometry, f: &Frame) -> Geometry {
     })
 }
 
+/// Start and end of a line-like shape (local `(0,0)` to `(w,h)`) in canvas
+/// space, honouring flips and rotation exactly as [`to_canvas`] does.
+pub fn line_endpoints(f: &Frame) -> (Pt, Pt) {
+    let (sin, cos) = f.rotation.to_radians().sin_cos();
+    let (cx, cy) = (f.x + f.w / 2.0, f.y + f.h / 2.0);
+    let map = |(lx, ly): Pt| {
+        let lx = if f.flip_x { f.w - lx } else { lx };
+        let ly = if f.flip_y { f.h - ly } else { ly };
+        let (dx, dy) = (f.x + lx - cx, f.y + ly - cy);
+        (cx + dx * cos - dy * sin, cy + dx * sin + dy * cos)
+    };
+    (map((0.0, 0.0)), map((f.w, f.h)))
+}
+
+/// Midpoint of a line-like shape and the angle (degrees, in `(-90, 90]`)
+/// its label is drawn at: the line's real angle, turned by 180 degrees when
+/// needed so text never reads upside-down.
+pub fn line_label_placement(f: &Frame) -> (Pt, f32) {
+    let (a, b) = line_endpoints(f);
+    let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+    let mut angle = (b.1 - a.1).atan2(b.0 - a.0).to_degrees();
+    if angle > 90.0 {
+        angle -= 180.0;
+    } else if angle <= -90.0 {
+        angle += 180.0;
+    }
+    (mid, angle)
+}
+
 /// An axis-aligned rectangle.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct Rect {
@@ -948,5 +977,103 @@ mod tests {
         assert_eq!(Primitive::Star.param_range("points"), Some((3.0, 20.0)));
         assert_eq!(Primitive::Polygon.param_range("sides"), Some((3.0, 12.0)));
         assert_eq!(Primitive::Star.param_range("sides"), None);
+    }
+
+    #[test]
+    fn line_endpoints_follow_flips_and_rotation() {
+        let frames = [
+            Frame {
+                x: 10.0,
+                y: 20.0,
+                w: 100.0,
+                h: 40.0,
+                ..Frame::default()
+            },
+            Frame {
+                x: 10.0,
+                y: 20.0,
+                w: 100.0,
+                h: 40.0,
+                flip_x: true,
+                ..Frame::default()
+            },
+            Frame {
+                x: 10.0,
+                y: 20.0,
+                w: 100.0,
+                h: 40.0,
+                flip_y: true,
+                rotation: 33.0,
+                ..Frame::default()
+            },
+            Frame {
+                x: -5.0,
+                y: 7.0,
+                w: 30.0,
+                h: 80.0,
+                flip_x: true,
+                flip_y: true,
+                rotation: 250.0,
+            },
+        ];
+        for f in frames {
+            let g = to_canvas(
+                &primitive_geometry(Primitive::Line, f.w, f.h, &no_params),
+                &f,
+            );
+            let v = vertices(&g, 0);
+            let (a, b) = line_endpoints(&f);
+            assert!(close_to(a, v[0]), "{f:?}: {a:?} vs {:?}", v[0]);
+            assert!(close_to(b, *v.last().unwrap()), "{f:?}");
+        }
+        let (a, b) = line_endpoints(&Frame {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 0.0,
+            rotation: 90.0,
+            ..Frame::default()
+        });
+        assert!(close_to(a, (5.0, -5.0)) && close_to(b, (5.0, 5.0)));
+    }
+
+    #[test]
+    fn line_label_never_upside_down() {
+        let angle = |f: Frame| line_label_placement(&f).1;
+        let rtl = Frame {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 0.0,
+            flip_x: true,
+            ..Frame::default()
+        };
+        assert!(angle(rtl).abs() < 1e-3);
+        let rot = Frame {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 0.0,
+            rotation: 120.0,
+            ..Frame::default()
+        };
+        assert!((angle(rot) + 60.0).abs() < 1e-3);
+        let (mid, _) = line_label_placement(&Frame {
+            x: 10.0,
+            y: 20.0,
+            w: 100.0,
+            h: 40.0,
+            rotation: 45.0,
+            ..Frame::default()
+        });
+        assert!(close_to(mid, (60.0, 40.0)));
+        let down = Frame {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 50.0,
+            ..Frame::default()
+        };
+        assert!((angle(down) - 90.0).abs() < 1e-3);
     }
 }

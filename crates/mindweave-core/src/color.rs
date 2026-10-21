@@ -23,9 +23,50 @@ pub fn normalize_hex_color(text: &str) -> Option<String> {
     parse_hex_color(text).map(format_hex_color)
 }
 
+/// WCAG relative luminance of an sRGB colour, 0 (black) to 1 (white).
+pub fn relative_luminance((r, g, b): (u8, u8, u8)) -> f32 {
+    let linear = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+/// Black or white, whichever has the higher WCAG contrast ratio against
+/// `background`.
+pub fn auto_text_color(background: (u8, u8, u8)) -> (u8, u8, u8) {
+    let l = relative_luminance(background);
+    // Contrast with white is 1.05 / (l + 0.05); with black (l + 0.05) / 0.05.
+    let with_white = 1.05 / (l + 0.05);
+    let with_black = (l + 0.05) / 0.05;
+    if with_white > with_black {
+        (255, 255, 255)
+    } else {
+        (0, 0, 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn white_on_dark_black_on_light() {
+        let bg = |s: &str| parse_hex_color(s).unwrap();
+        assert_eq!(auto_text_color(bg("#1E1E1E")), (255, 255, 255));
+        assert_eq!(auto_text_color(bg("#F5F5F5")), (0, 0, 0));
+        let mid = bg("#777777");
+        let l = relative_luminance(mid);
+        let (white, black) = (1.05 / (l + 0.05), (l + 0.05) / 0.05);
+        let expected = if white > black { 255 } else { 0 };
+        assert_eq!(auto_text_color(mid), (expected, expected, expected));
+        assert_eq!(relative_luminance((0, 0, 0)), 0.0);
+        assert!((relative_luminance((255, 255, 255)) - 1.0).abs() < 1e-5);
+    }
 
     #[test]
     fn parses_six_hex_digits_with_or_without_hash() {
