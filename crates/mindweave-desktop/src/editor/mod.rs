@@ -25,16 +25,16 @@ use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::*;
 use mindweave_core::{
-    duplicate, format_hex_color, from_clipboard, parse_hex_color, prepare_paste, to_clipboard,
-    DocumentSession, Shape, Viewport, MAX_CLIPBOARD_SHAPES,
+    duplicate, format_hex_color, from_clipboard, parse_hex_color, plain_text_box, prepare_paste,
+    to_clipboard, DocumentSession, Shape, Viewport, MAX_CLIPBOARD_SHAPES,
 };
 
 // `Copy` is used by path: importing it would hide the derivable trait.
 use crate::actions::{
-    self, Cancel, CloseWindow, Cut, Delete, Duplicate, NudgeDown, NudgeDownFar, NudgeLeft,
-    NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp, NudgeUpFar, Paste, Redo, Save, SelectAll,
-    ToggleLayers, ToggleProperties, ToolArrow, ToolEllipse, ToolHand, ToolLine, ToolPointer,
-    ToolRectangle, Undo, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
+    self, Cancel, CloseWindow, Cut, Delete, Duplicate, EditText, NudgeDown, NudgeDownFar,
+    NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp, NudgeUpFar, Paste, Redo, Save,
+    SelectAll, ToggleLayers, ToggleProperties, ToolArrow, ToolEllipse, ToolHand, ToolLine,
+    ToolPointer, ToolRectangle, ToolText, Undo, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
 };
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
@@ -553,34 +553,62 @@ impl EditorWindow {
         AppState::update_settings(cx, |s| s.show_properties = !s.show_properties);
     }
 
-    /// Makes `tool` the active (unlocked) tool, from its key.
-    fn select_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
-        self.tools.select(tool, false);
+    /// Makes `tool` the active tool, locked when `lock` is set. Choosing a
+    /// tool stops text editing.
+    pub(crate) fn choose_tool(
+        &mut self,
+        tool: Tool,
+        lock: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.end_text_edit(window, cx);
+        self.tools.select(tool, lock);
         cx.notify();
     }
 
-    fn on_tool_pointer(&mut self, _: &ToolPointer, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_tool(Tool::Pointer, cx);
+    /// Makes `tool` the active (unlocked) tool, from its key.
+    fn select_tool(&mut self, tool: Tool, window: &mut Window, cx: &mut Context<Self>) {
+        self.choose_tool(tool, false, window, cx);
     }
 
-    fn on_tool_hand(&mut self, _: &ToolHand, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_tool(Tool::Hand, cx);
+    fn on_tool_pointer(&mut self, _: &ToolPointer, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::Pointer, window, cx);
     }
 
-    fn on_tool_rectangle(&mut self, _: &ToolRectangle, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_tool(Tool::shape(BASIC_SHAPES, "rectangle"), cx);
+    fn on_tool_hand(&mut self, _: &ToolHand, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::Hand, window, cx);
     }
 
-    fn on_tool_ellipse(&mut self, _: &ToolEllipse, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_tool(Tool::shape(BASIC_SHAPES, "ellipse"), cx);
+    fn on_tool_text(&mut self, _: &ToolText, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::Text, window, cx);
     }
 
-    fn on_tool_line(&mut self, _: &ToolLine, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_tool(Tool::shape(BASIC_SHAPES, "line"), cx);
+    fn on_tool_rectangle(
+        &mut self,
+        _: &ToolRectangle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_tool(Tool::shape(BASIC_SHAPES, "rectangle"), window, cx);
     }
 
-    fn on_tool_arrow(&mut self, _: &ToolArrow, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_tool(Tool::shape(BASIC_SHAPES, "arrow"), cx);
+    fn on_tool_ellipse(&mut self, _: &ToolEllipse, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::shape(BASIC_SHAPES, "ellipse"), window, cx);
+    }
+
+    fn on_tool_line(&mut self, _: &ToolLine, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::shape(BASIC_SHAPES, "line"), window, cx);
+    }
+
+    fn on_tool_arrow(&mut self, _: &ToolArrow, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::shape(BASIC_SHAPES, "arrow"), window, cx);
+    }
+
+    /// Return: edits the one selected text box or labelled shape.
+    fn on_edit_text(&mut self, _: &EditText, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_action(window, cx);
+        self.edit_selected_text(window, cx);
     }
 
     /// Escape: aborts the gesture in progress; otherwise clears the
@@ -746,8 +774,9 @@ impl EditorWindow {
     }
 
     /// Pastes shapes copied from any Mindweave window onto the active
-    /// layer: in place when that is in view, else centred in view.
-    /// Clipboard text that is not a shapes payload is ignored.
+    /// layer: in place when that is in view, else centred in view. Other
+    /// clipboard text (from another application) becomes a new text box
+    /// at the view centre.
     fn on_paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if self.forward_to_text_field(input::Paste, window, cx)
             || self.forward_to_canvas_text(TextCommand::Paste, window, cx)
@@ -755,15 +784,20 @@ impl EditorWindow {
             return;
         }
         self.begin_edit_action(window, cx);
-        let Some(shapes) = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .and_then(|text| from_clipboard(&text))
-        else {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
-        let shapes = prepare_paste(shapes, &self.visible_canvas());
-        self.add_and_select(shapes, window, cx);
+        let view = self.visible_canvas();
+        let shapes = match from_clipboard(&text) {
+            Some(shapes) => prepare_paste(shapes, &view),
+            None => {
+                let centre = (view.x + view.w / 2., view.y + view.h / 2.);
+                plain_text_box(&text, centre).into_iter().collect()
+            }
+        };
+        if !shapes.is_empty() {
+            self.add_and_select(shapes, window, cx);
+        }
     }
 
     fn on_duplicate(&mut self, _: &Duplicate, window: &mut Window, cx: &mut Context<Self>) {
@@ -1020,6 +1054,8 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_zoom_reset))
             .on_action(cx.listener(Self::on_tool_pointer))
             .on_action(cx.listener(Self::on_tool_hand))
+            .on_action(cx.listener(Self::on_tool_text))
+            .on_action(cx.listener(Self::on_edit_text))
             .on_action(cx.listener(Self::on_tool_rectangle))
             .on_action(cx.listener(Self::on_tool_ellipse))
             .on_action(cx.listener(Self::on_tool_line))
@@ -1069,6 +1105,7 @@ impl Render for EditorWindow {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
+    use super::properties_panel::begin_color_step;
     use super::{
         clipboard_text, hex_to_hsla, hsla_to_hex, in_text_field, is_plain_space, key_context,
         letter_spaced, panel_group_id, parse_number, pruned, row_click, selectable_ids,
@@ -1197,6 +1234,46 @@ mod tests {
         assert!(!g.end(&mut s, GestureOwner::Text));
         assert!(g.begin(&mut s, GestureOwner::Pointer));
         assert!(g.end(&mut s, GestureOwner::Pointer));
+    }
+
+    #[test]
+    fn a_colour_drag_after_a_text_session_is_its_own_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("c.mindweave")).unwrap();
+        let shape = Shape::new_text_box((0., 0.));
+        let id = shape.id;
+        s.add_shapes(vec![shape]);
+        let fill = |s: &mut DocumentSession, hex: &str| {
+            s.update_shapes(&[id], |sh| sh.style.fill = Some(hex.into()))
+        };
+        let mut g = SessionGesture::default();
+        let mut color_edit = false;
+        assert!(g.begin(&mut s, GestureOwner::Text));
+        // The picker opens while text is being edited: its changes join the
+        // editing session, and it does not count as a colour step.
+        begin_color_step(&mut g, &mut s, true, &mut color_edit);
+        assert!(!color_edit);
+        fill(&mut s, "#FF0000");
+        // Editing ends with the picker still open.
+        assert!(g.end(&mut s, GestureOwner::Text));
+        // Further picker changes open a colour step of their own…
+        begin_color_step(&mut g, &mut s, true, &mut color_edit);
+        assert!(color_edit);
+        fill(&mut s, "#00FF00");
+        begin_color_step(&mut g, &mut s, true, &mut color_edit);
+        fill(&mut s, "#0000FF");
+        // …which the picker closing ends, as one step.
+        assert!(g.end(&mut s, GestureOwner::Color));
+        assert!(s.undo());
+        assert_eq!(
+            s.find_shape(id).unwrap().style.fill.as_deref(),
+            Some("#FF0000")
+        );
+        // A change from a closed picker is not a colour step.
+        let mut closed = false;
+        begin_color_step(&mut g, &mut s, false, &mut closed);
+        assert!(!closed);
+        assert!(g.begin(&mut s, GestureOwner::Pointer));
     }
 
     #[test]

@@ -10,12 +10,14 @@
 use std::ops::Range;
 use std::time::Duration;
 
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
 use mindweave_core::{
-    from_clipboard, EditKind, EditSnapshot, RichText, RunStyle, Shape, StyleChange, StyleSummary,
-    TextHistory, LINE_BREAK, MAX_CLIPBOARD_BYTES, MAX_PASTE_CHARS,
+    from_clipboard, DocumentSession, EditKind, EditSnapshot, Label, RichText, RunStyle, Shape,
+    StyleChange, StyleSummary, TextHistory, LINE_BREAK, MAX_CLIPBOARD_BYTES, MAX_PASTE_CHARS,
 };
 use serde_json::{json, Value};
 use unicode_segmentation::UnicodeSegmentation;
@@ -26,7 +28,7 @@ use super::text_paint::{
     canvas_background, paint_polygon, text_color, text_frame, text_wrap, TextFrame,
     LINE_LABEL_PADDING,
 };
-use super::{EditorWindow, GestureOwner};
+use super::{EditorWindow, GestureOwner, SessionGesture};
 use crate::actions::*;
 
 /// Value of the `"mindweave"` key that marks a rich-text clipboard payload.
@@ -270,9 +272,6 @@ pub struct TextEditor {
     /// The style typing uses, set by a toggle with nothing selected.
     pub typing_style: Option<RunStyle>,
     pub history: TextHistory,
-    /// Whether the session created the target (a new text box).
-    #[allow(dead_code)] // Read when leaving editing (Task 6: empty new boxes).
-    pub is_new: bool,
     /// The state before the composition in progress began.
     composing_from: Option<EditSnapshot>,
     /// Where Up and Down aim, in canvas units from the text's left edge.
@@ -281,7 +280,7 @@ pub struct TextEditor {
 
 impl TextEditor {
     /// A session on `text` with the caret at its end.
-    pub fn new(target: Uuid, text: &RichText, is_new: bool) -> Self {
+    pub fn new(target: Uuid, text: &RichText) -> Self {
         let caret = text.len();
         TextEditor {
             target,
@@ -294,7 +293,6 @@ impl TextEditor {
                 caret,
                 anchor: caret,
             }),
-            is_new,
             composing_from: None,
             goal_x: None,
         }
@@ -695,6 +693,89 @@ impl TextEditor {
     }
 }
 
+/// What a double click edits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TextTarget {
+    /// The label of a shape, or a text box.
+    Existing(Uuid),
+    /// A new text box at this canvas point.
+    NewBox(Pt),
+}
+
+/// What a double click at canvas point `at` edits, given the shape `hit`
+/// there (the topmost unlocked shape of the visible active layer): that
+/// shape's text, else a new text box at the point.
+pub fn double_click_target(hit: Option<Uuid>, at: Pt) -> TextTarget {
+    match hit {
+        Some(id) => TextTarget::Existing(id),
+        None => TextTarget::NewBox(at),
+    }
+}
+
+/// What Return edits: the selection's one shape, when it is a text box or
+/// has a label.
+pub fn enter_target(session: &DocumentSession, selection: &[Uuid]) -> Option<Uuid> {
+    let [id] = selection else {
+        return None;
+    };
+    let shape = session.find_shape(*id)?;
+    (shape.is_text_box() || shape.label.is_some()).then_some(*id)
+}
+
+/// Opens a text-editing session's gesture and adds a new, empty text box
+/// with its top-left corner at `at` to the active layer inside it, so that
+/// leaving it empty leaves no undo step. Returns the box's id.
+pub fn start_new_text_box(
+    session: &mut DocumentSession,
+    gesture: &mut SessionGesture,
+    at: Pt,
+) -> Uuid {
+    gesture.begin(session, GestureOwner::Text);
+    let shape = Shape::new_text_box(at);
+    let id = shape.id;
+    session.add_shapes(vec![shape]);
+    id
+}
+
+/// Opens a text-editing session's gesture on shape `target` of the active
+/// layer, giving a shape without a label an empty one
+/// ([`Label::new_shape_label`]). Returns `false`, opening nothing, when
+/// there is no such shape.
+pub fn start_text_session(
+    session: &mut DocumentSession,
+    gesture: &mut SessionGesture,
+    target: Uuid,
+) -> bool {
+    let Some(shape) = session.find_shape(target) else {
+        return false;
+    };
+    let needs_label = shape.label.is_none();
+    gesture.begin(session, GestureOwner::Text);
+    if needs_label {
+        session.set_label(target, Some(Label::new_shape_label()));
+    }
+    true
+}
+
+/// Ends the text-editing session on `target`: an empty text box is removed
+/// (a new one leaves no undo step), an empty label is cleared, and the
+/// session's edits become one undo step (none when nothing changed).
+/// Returns whether the target is still there.
+pub fn finish_text_session(
+    session: &mut DocumentSession,
+    gesture: &mut SessionGesture,
+    target: Uuid,
+) -> bool {
+    let empty = |s: &Shape| s.label.as_ref().is_none_or(|l| l.text.is_empty());
+    match session.find_shape(target) {
+        Some(shape) if shape.is_text_box() && empty(shape) => session.remove_shape_silently(target),
+        Some(shape) if shape.label.is_some() && empty(shape) => session.set_label(target, None),
+        _ => {}
+    }
+    gesture.end(session, GestureOwner::Text);
+    session.find_shape(target).is_some()
+}
+
 /// A rectangle `2 * half` big centred on `centre`, turned by `angle`
 /// degrees: where clicks edit the text.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -757,52 +838,131 @@ pub struct TextEditUi {
 }
 
 impl EditorWindow {
-    /// Starts editing the label (or text) of shape `target` on the active
-    /// layer, with the caret at its end; the session's edits form one undo
-    /// step. Ends any edit in progress first. A shape without a label is
-    /// not edited.
-    #[allow(dead_code)] // Called by the Text tool and double-click (Task 6).
-    pub fn begin_text_edit(
-        &mut self,
-        target: Uuid,
-        is_new: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Readies the editor for a text-editing session: ends the one in
+    /// progress, puts back a pointer gesture and ends a colour drag's step,
+    /// so the session's gesture is its own.
+    fn prepare_text_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.end_text_edit(window, cx);
+        self.cancel_gesture(cx);
+        self.finish_color_edit(cx);
+    }
+
+    /// Starts editing the label (or text) of shape `target` on the active
+    /// layer, with the caret at its end; a shape without a label gets an
+    /// empty one. The session's edits form one undo step. Ends any edit in
+    /// progress first.
+    ///
+    /// A new text box is added inside the session's gesture (see
+    /// [`start_new_text_box`]), so leaving it empty removes it without an
+    /// undo step; no flag for new boxes is needed.
+    pub fn begin_text_edit(&mut self, target: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        self.prepare_text_edit(window, cx);
+        let scope = self.selection_scope();
+        if !start_text_session(&mut self.session, &mut self.session_gesture, target) {
+            return;
+        }
+        self.prune_selection(scope);
+        self.selection = vec![target];
         let Some(text) = self
             .session
             .find_shape(target)
             .and_then(|s| s.label.as_ref())
             .map(|l| l.text.clone())
         else {
+            // Not reached: the session gave the target a label.
+            finish_text_session(&mut self.session, &mut self.session_gesture, target);
             return;
         };
-        // The session's gesture must be the editing session's alone: a
-        // pointer gesture is put back, a colour drag's step ended.
-        self.cancel_gesture(cx);
-        self.finish_color_edit(cx);
-        self.session_gesture
-            .begin(&mut self.session, GestureOwner::Text);
-        self.text_edit = Some(TextEditor::new(target, &text, is_new));
+        self.text_edit = Some(TextEditor::new(target, &text));
         self.focus_handle.focus(window, cx);
         self.restart_blink(window, cx);
         cx.notify();
     }
 
-    /// Stops editing text: the session's edits become one undo step (none
-    /// when nothing changed) and the keys go back to the shapes.
+    /// Adds a new text box at canvas point `at` on the active layer and
+    /// starts editing it. A hidden active layer refuses, as it refuses
+    /// placing shapes. Left empty, the box goes away without an undo step.
+    pub(super) fn begin_new_text_box(
+        &mut self,
+        at: Pt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prepare_text_edit(window, cx);
+        if !self.session.active_layer_selectable() {
+            window.push_notification(Notification::warning("Show the layer to draw on it."), cx);
+            return;
+        }
+        let id = start_new_text_box(&mut self.session, &mut self.session_gesture, at);
+        self.begin_text_edit(id, window, cx);
+    }
+
+    /// A click with the Text tool at canvas point `at`: a new text box
+    /// there, being edited; the tool then goes back to Pointer unless
+    /// locked. A refused box (hidden layer) leaves the tool as it is.
+    pub(super) fn place_text_box(&mut self, at: Pt, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_new_text_box(at, window, cx);
+        if self.text_edit.is_some() {
+            self.tools.after_place();
+        }
+        cx.notify();
+    }
+
+    /// A double click at canvas point `at`: edits the text of the shape
+    /// there (the caret at the click when it lands on the text), else adds
+    /// a new text box there.
+    pub(super) fn double_click_text(
+        &mut self,
+        at: Pt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A move begun by the first click whose mouse-up was missed is put
+        // back before hit-testing.
+        self.cancel_gesture(cx);
+        let hit = self.shape_at(at, cx);
+        match double_click_target(hit, at) {
+            TextTarget::NewBox(at) => self.begin_new_text_box(at, window, cx),
+            TextTarget::Existing(id) => {
+                self.begin_text_edit(id, window, cx);
+                if self.text_edit.is_some() {
+                    self.text_press(at, 1, false, window, cx);
+                    // A press, not a drag: the mouse-up may come anywhere.
+                    self.end_text_drag();
+                }
+            }
+        }
+    }
+
+    /// Return: edits the one selected text box or labelled shape, with all
+    /// its text selected.
+    pub(super) fn edit_selected_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = enter_target(&self.session, &self.selection) else {
+            return;
+        };
+        self.begin_text_edit(id, window, cx);
+        self.text_command(TextCommand::SelectAll, window, cx);
+    }
+
+    /// Stops editing text: an empty text box is removed and an emptied
+    /// label cleared, the session's edits become one undo step (none when
+    /// nothing changed) and the keys go back to the shapes. The target, if
+    /// still there, becomes the selection.
     pub fn end_text_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A composition in progress is kept, as its own undo step.
         if self.text_edit.as_ref().is_some_and(|e| e.marked.is_some()) {
             self.with_text(window, cx, |ed, text, _| ed.unmark(text));
         }
-        if self.text_edit.take().is_none() {
+        let Some(edit) = self.text_edit.take() else {
             return;
-        }
+        };
         self.text_ui = TextEditUi::default();
-        self.session_gesture
-            .end(&mut self.session, GestureOwner::Text);
+        let scope = self.selection_scope();
+        let kept = finish_text_session(&mut self.session, &mut self.session_gesture, edit.target);
+        if kept {
+            self.selection = vec![edit.target];
+        }
+        self.prune_selection(scope);
         self.focus_handle.focus(window, cx);
         cx.notify();
     }
@@ -1298,10 +1458,17 @@ impl EntityInputHandler for EditorWindow {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        byte_to_utf16, parse_text_payload, pasted, press_hit, target_area, text_payload,
-        utf16_to_byte, Lines, Motion, Pasted, TextEditor, Toggle, Unit,
+        byte_to_utf16, double_click_target, enter_target, finish_text_session, parse_text_payload,
+        pasted, press_hit, start_new_text_box, start_text_session, target_area, text_payload,
+        utf16_to_byte, Lines, Motion, Pasted, TextEditor, TextTarget, Toggle, Unit,
     };
-    use mindweave_core::{HAlign, RichText, RunStyle, Shape, StyleChange, MAX_PASTE_CHARS};
+    use crate::editor::interaction::hit_shape;
+    use crate::editor::{GestureOwner, SessionGesture};
+    use mindweave_core::geometry::Frame;
+    use mindweave_core::{
+        builtin_libraries, DocumentSession, HAlign, Label, LibraryRegistry, RichText, RunStyle,
+        Shape, StyleChange, MAX_PASTE_CHARS,
+    };
     use std::ops::Range;
     use uuid::Uuid;
 
@@ -1312,7 +1479,7 @@ mod tests {
     }
 
     fn editor(text: &RichText) -> TextEditor {
-        TextEditor::new(Uuid::new_v4(), text, false)
+        TextEditor::new(Uuid::new_v4(), text)
     }
 
     #[test]
@@ -1698,6 +1865,172 @@ mod tests {
         assert_eq!(go(&mut ed, Motion::WordRight, true), (7, 14));
         // A selection collapses towards the move, then moves a word.
         assert_eq!(go(&mut ed, Motion::WordLeft, false), (4, 4));
+    }
+
+    fn session() -> (tempfile::TempDir, DocumentSession) {
+        let dir = tempfile::tempdir().unwrap();
+        let session = DocumentSession::create(dir.path().join("t.mindweave")).unwrap();
+        (dir, session)
+    }
+
+    fn rectangle(libs: &LibraryRegistry, at: (f32, f32)) -> Shape {
+        let def = libs.shape("basic-shapes", "rectangle").unwrap();
+        Shape::new(
+            def,
+            "basic-shapes",
+            Frame {
+                x: at.0,
+                y: at.1,
+                w: 100.,
+                h: 50.,
+                ..Frame::default()
+            },
+        )
+    }
+
+    #[test]
+    fn double_click_target_resolution() {
+        let libs = LibraryRegistry::new(builtin_libraries(), None).0;
+        let (_dir, mut s) = session();
+        let target = |s: &DocumentSession, at: (f32, f32)| {
+            double_click_target(hit_shape(s, &libs, at, 1.), at)
+        };
+        // Empty canvas: a new box at the point.
+        assert_eq!(target(&s, (500., 500.)), TextTarget::NewBox((500., 500.)));
+        // A shape: its label.
+        let shape = rectangle(&libs, (0., 0.));
+        let shape_id = shape.id;
+        let mut text_box = Shape::new_text_box((200., 0.));
+        text_box.frame.w = 60.;
+        let box_id = text_box.id;
+        s.add_shapes(vec![shape, text_box]);
+        assert_eq!(target(&s, (50., 25.)), TextTarget::Existing(shape_id));
+        // A text box: itself.
+        assert_eq!(target(&s, (230., 10.)), TextTarget::Existing(box_id));
+        // Locked: a new box.
+        s.update_shapes(&[shape_id], |sh| sh.locked = true);
+        assert_eq!(target(&s, (50., 25.)), TextTarget::NewBox((50., 25.)));
+        // On another layer: a new box.
+        s.add_layer();
+        assert_eq!(target(&s, (230., 10.)), TextTarget::NewBox((230., 10.)));
+        // Hidden active layer: a new box (which adding then refuses).
+        let lower = s.page().layers.len() - 1;
+        s.set_active_layer(lower);
+        assert_eq!(target(&s, (230., 10.)), TextTarget::Existing(box_id));
+        s.toggle_layer_visibility(lower);
+        assert_eq!(target(&s, (230., 10.)), TextTarget::NewBox((230., 10.)));
+    }
+
+    #[test]
+    fn empty_new_box_leaves_nothing() {
+        let (_dir, mut s) = session();
+        let mut g = SessionGesture::default();
+        let id = start_new_text_box(&mut s, &mut g, (10., 20.));
+        let shape = s.find_shape(id).unwrap();
+        assert!(shape.is_text_box());
+        assert_eq!((shape.frame.x, shape.frame.y), (10., 20.));
+        assert!(!finish_text_session(&mut s, &mut g, id));
+        assert!(s.find_shape(id).is_none());
+        assert!(!s.can_undo());
+        assert!(!s.is_dirty());
+        // The gesture is closed: a pointer gesture can open.
+        assert!(g.begin(&mut s, GestureOwner::Pointer));
+        g.end(&mut s, GestureOwner::Pointer);
+
+        // A box that got text stays, as one undo step.
+        let id = start_new_text_box(&mut s, &mut g, (0., 0.));
+        s.update_shapes(&[id], |sh| {
+            sh.label
+                .as_mut()
+                .unwrap()
+                .text
+                .insert(0, "hi", &RunStyle::default());
+        });
+        assert!(finish_text_session(&mut s, &mut g, id));
+        assert!(s.is_dirty());
+        assert!(s.undo());
+        assert!(s.find_shape(id).is_none());
+        assert!(!s.can_undo());
+    }
+
+    #[test]
+    fn emptied_label_is_cleared() {
+        let libs = LibraryRegistry::new(builtin_libraries(), None).0;
+        let (_dir, mut s) = session();
+        let shape = rectangle(&libs, (0., 0.));
+        let id = shape.id;
+        s.add_shapes(vec![shape]);
+        let steps_before = s.can_undo();
+        let mut g = SessionGesture::default();
+
+        // Editing a shape without a label gives it an empty default one;
+        // leaving it empty takes it away again, leaving no step.
+        assert!(start_text_session(&mut s, &mut g, id));
+        let label = s.find_shape(id).unwrap().label.clone().unwrap();
+        assert_eq!(label, Label::new_shape_label());
+        assert!(finish_text_session(&mut s, &mut g, id));
+        assert_eq!(s.find_shape(id).unwrap().label, None);
+        s.undo();
+        assert!(s.find_shape(id).is_none(), "the only step left adds it");
+        assert!(s.redo());
+        assert_eq!(steps_before, s.can_undo());
+
+        // A label emptied while editing is cleared, as one step.
+        s.set_label(id, Some(Label::new_shape_label()));
+        s.update_shapes(&[id], |sh| {
+            sh.label
+                .as_mut()
+                .unwrap()
+                .text
+                .insert(0, "x", &RunStyle::default());
+        });
+        assert!(start_text_session(&mut s, &mut g, id));
+        s.update_shapes(&[id], |sh| sh.label.as_mut().unwrap().text.delete(0..1));
+        assert!(finish_text_session(&mut s, &mut g, id));
+        assert_eq!(s.find_shape(id).unwrap().label, None);
+        assert!(s.undo());
+        assert_eq!(
+            s.find_shape(id)
+                .unwrap()
+                .label
+                .as_ref()
+                .unwrap()
+                .text
+                .plain(),
+            "x"
+        );
+
+        // An existing text box emptied while editing is removed, as a step.
+        let text_box = mindweave_core::plain_text_box("hello", (0., 0.)).unwrap();
+        let box_id = text_box.id;
+        s.add_shapes(vec![text_box]);
+        assert!(start_text_session(&mut s, &mut g, box_id));
+        s.update_shapes(&[box_id], |sh| sh.label.as_mut().unwrap().text.delete(0..5));
+        assert!(!finish_text_session(&mut s, &mut g, box_id));
+        assert!(s.find_shape(box_id).is_none());
+        assert!(s.undo());
+        assert!(s.find_shape(box_id).is_some());
+
+        // A missing shape starts nothing.
+        assert!(!start_text_session(&mut s, &mut g, Uuid::new_v4()));
+        assert!(g.begin(&mut s, GestureOwner::Pointer));
+    }
+
+    #[test]
+    fn enter_edits_one_selected_text_object() {
+        let libs = LibraryRegistry::new(builtin_libraries(), None).0;
+        let (_dir, mut s) = session();
+        let plain_shape = rectangle(&libs, (0., 0.));
+        let mut labelled = rectangle(&libs, (0., 100.));
+        labelled.label = Some(Label::new_shape_label());
+        let text_box = Shape::new_text_box((0., 200.));
+        let ids = [plain_shape.id, labelled.id, text_box.id];
+        s.add_shapes(vec![plain_shape, labelled, text_box]);
+        assert_eq!(enter_target(&s, &[ids[0]]), None);
+        assert_eq!(enter_target(&s, &[ids[1]]), Some(ids[1]));
+        assert_eq!(enter_target(&s, &[ids[2]]), Some(ids[2]));
+        assert_eq!(enter_target(&s, &[ids[1], ids[2]]), None);
+        assert_eq!(enter_target(&s, &[]), None);
     }
 
     #[test]

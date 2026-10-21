@@ -23,6 +23,10 @@ actions!(
         ToolEllipse,
         ToolLine,
         ToolArrow,
+        ToolText,
+        /// Return in the editor: edits the one selected text box or
+        /// labelled shape, with all its text selected.
+        EditText,
         /// Escape in the editor: aborts a gesture, else clears the
         /// selection and goes back to the Pointer tool.
         Cancel,
@@ -147,7 +151,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("o", ToolEllipse, editor),
         KeyBinding::new("l", ToolLine, editor),
         KeyBinding::new("a", ToolArrow, editor),
+        KeyBinding::new("t", ToolText, editor),
         KeyBinding::new("escape", Cancel, editor),
+        KeyBinding::new("enter", EditText, editor),
         KeyBinding::new("left", NudgeLeft, editor),
         KeyBinding::new("right", NudgeRight, editor),
         KeyBinding::new("up", NudgeUp, editor),
@@ -254,7 +260,9 @@ mod tests {
             ("o", "mindweave::ToolEllipse"),
             ("l", "mindweave::ToolLine"),
             ("a", "mindweave::ToolArrow"),
+            ("t", "mindweave::ToolText"),
             ("escape", "mindweave::Cancel"),
+            ("enter", "mindweave::EditText"),
             ("left", "mindweave::NudgeLeft"),
             ("right", "mindweave::NudgeRight"),
             ("up", "mindweave::NudgeUp"),
@@ -281,8 +289,9 @@ mod tests {
 
     /// Actions bound only in the editor, outside text fields, which keep
     /// their own copy, paste, undo and select-all keys.
-    const EDIT_ACTIONS: [&str; 9] = [
+    const EDIT_ACTIONS: [&str; 10] = [
         "::Cancel",
+        "::EditText",
         "::Undo",
         "::Redo",
         "::Cut",
@@ -311,7 +320,7 @@ mod tests {
                     || EDIT_ACTIONS.iter().any(|a| name.ends_with(a))
             })
             .collect();
-        assert_eq!(tool_bindings.len(), 15 + 9);
+        assert_eq!(tool_bindings.len(), 16 + 10);
         for binding in &tool_bindings {
             let predicate = binding.predicate().expect("tool keys have a context");
             assert!(predicate.eval(&context(&["Root", EDITOR_CONTEXT])));
@@ -354,7 +363,9 @@ mod tests {
             );
         }
         // Tool keys and other letters are typed, not taken as commands.
-        for k in ["v", "h", "r", "o", "l", "a", "space", "shift-a", "cmd-d"] {
+        for k in [
+            "v", "h", "r", "o", "l", "a", "t", "space", "shift-a", "cmd-d",
+        ] {
             let (found, _) = keymap.bindings_for_input(&key(k), &editing);
             assert!(found.is_empty(), "{k}: {:?}", names(&found));
         }
@@ -368,6 +379,13 @@ mod tests {
         assert_eq!(first("cmd-z", &shapes), Some("mindweave::Undo"));
         assert_eq!(first("left", &shapes), Some("mindweave::NudgeLeft"));
         assert_eq!(first("cmd-b", &shapes), Some("mindweave::ToggleLayers"));
+        // Return edits the selected text; while editing it starts a
+        // paragraph.
+        assert_eq!(first("enter", &shapes), Some("mindweave::EditText"));
+        assert_eq!(
+            first("enter", &editing),
+            Some("mindweave::TextNewParagraph")
+        );
         // A text field focused while editing keeps its keys.
         let field = stack(&["Root", "Editor TextEditing", "Input"]);
         assert_eq!(first("left", &field), None);

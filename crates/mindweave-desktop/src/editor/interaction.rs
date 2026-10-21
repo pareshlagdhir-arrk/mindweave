@@ -11,9 +11,9 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{hit_test, FillRole, Frame, Primitive, Pt, Rect};
 use mindweave_core::{
-    drag_create, handle_positions, marquee_selects, resize, rotate, rotate_handle_position,
-    selection_bounds, translate, DocumentSession, Handle, LibraryRegistry, Shape, ShapeDef,
-    ShapeSource, CLICK_DRAG_THRESHOLD,
+    drag_create, handle_positions, marquee_selects, resize_with_text_boxes, rotate,
+    rotate_handle_position, selection_bounds, translate, DocumentSession, Handle, LibraryRegistry,
+    Shape, ShapeDef, ShapeSource, CLICK_DRAG_THRESHOLD,
 };
 use uuid::Uuid;
 
@@ -73,6 +73,10 @@ pub enum Gesture {
         handle: Handle,
         start: Pt,
         originals: Originals,
+        /// For each of `originals`: `Some(auto_width)` when it is a text
+        /// box, which only changes width and then stops growing with its
+        /// text; `None` for other shapes.
+        auto_widths: Vec<Option<bool>>,
     },
     /// Turning the selection about `center`, pressed at `start`.
     Rotating {
@@ -138,19 +142,21 @@ pub fn press_kind(handle: Option<HandleHit>, shape: Option<Uuid>, shift: bool) -
 }
 
 /// What a press at `p` starts, given the selection chrome (if anything is
-/// selected), the grab radius and rotate-handle offset in canvas units, and
-/// the shape hit there. Handles win, except that inside a selection
-/// smaller than two grab radii on both axes the shape body wins over its
-/// resize handles, so tiny shapes can still be moved.
+/// selected), the grab radius and rotate-handle offset in canvas units,
+/// whether the chrome has only side handles (`width_only`, see
+/// [`visible_handles`]), and the shape hit there. Handles win, except that
+/// inside a selection smaller than two grab radii on both axes the shape
+/// body wins over its resize handles, so tiny shapes can still be moved.
 pub fn press_target(
     chrome: Option<&Frame>,
     p: Pt,
     grab: f32,
     rotate_offset: f32,
+    width_only: bool,
     shape: Option<Uuid>,
     shift: bool,
 ) -> PressKind {
-    let handle = chrome.and_then(|f| handle_at(f, p, grab, rotate_offset));
+    let handle = chrome.and_then(|f| handle_at(f, p, grab, rotate_offset, width_only));
     let tiny = chrome.is_some_and(|f| f.w < 2. * grab && f.h < 2. * grab);
     let handle = match handle {
         Some(HandleHit::Resize(_)) if tiny && shape.is_some() => None,
@@ -247,25 +253,33 @@ fn frame_centre(f: &Frame) -> Pt {
 
 /// The resize handles shown on the chrome `frame`: an axis shorter than
 /// two grab radii (`grab` canvas units) has no edge-midpoint handles on it,
-/// so the middle of a flat line or a thin box is not a handle.
-pub fn visible_handles(frame: &Frame, grab: f32) -> Vec<(Handle, Pt)> {
+/// so the middle of a flat line or a thin box is not a handle. With
+/// `width_only` (one text box, which only changes width) only the side
+/// handles are shown.
+pub fn visible_handles(frame: &Frame, grab: f32, width_only: bool) -> Vec<(Handle, Pt)> {
     let (thin_w, thin_h) = (frame.w < 2. * grab, frame.h < 2. * grab);
     handle_positions(frame)
         .into_iter()
         .filter(|(h, _)| match h {
-            Handle::N | Handle::S => !thin_h,
+            Handle::N | Handle::S => !thin_h && !width_only,
             Handle::E | Handle::W => !thin_w,
-            _ => true,
+            _ => !width_only,
         })
         .collect()
 }
 
 /// The handle of the chrome `frame` nearest to `p` within `grab` canvas
-/// units (of [`visible_handles`]); the rotate handle sits `rotate_offset`
-/// above the top edge.
-pub fn handle_at(frame: &Frame, p: Pt, grab: f32, rotate_offset: f32) -> Option<HandleHit> {
+/// units (of [`visible_handles`] with `width_only`); the rotate handle
+/// sits `rotate_offset` above the top edge.
+pub fn handle_at(
+    frame: &Frame,
+    p: Pt,
+    grab: f32,
+    rotate_offset: f32,
+    width_only: bool,
+) -> Option<HandleHit> {
     let dist = |q: Pt| (q.0 - p.0).hypot(q.1 - p.1);
-    visible_handles(frame, grab)
+    visible_handles(frame, grab, width_only)
         .into_iter()
         .map(|(h, q)| (HandleHit::Resize(h), dist(q)))
         .chain([(
@@ -304,19 +318,44 @@ pub fn resize_cursor(handle: Handle, rotation: f32) -> CursorStyle {
 /// The frames a move, resize or rotate gesture gives with the pointer at
 /// `p`: computed from the original frames each time. Shift keeps the
 /// aspect ratio (resize) or snaps to 15° (rotate); Alt resizes from the
-/// centre. `None` for other gestures.
+/// centre. Text boxes only change width when resized. `None` for other
+/// gestures.
 pub fn transformed(gesture: &Gesture, p: Pt, shift: bool, alt: bool) -> Option<Originals> {
     let originals = gesture.originals()?;
     let start_frames: Vec<Frame> = originals.iter().map(|(_, f)| *f).collect();
     let frames = match gesture {
         Gesture::Moving { start, .. } => translate(&start_frames, p.0 - start.0, p.1 - start.1),
-        Gesture::Resizing { handle, start, .. } => {
-            resize(&start_frames, *handle, *start, p, shift, alt)
+        Gesture::Resizing {
+            handle,
+            start,
+            auto_widths,
+            ..
+        } => {
+            let text_boxes: Vec<bool> = auto_widths.iter().map(Option::is_some).collect();
+            resize_with_text_boxes(&start_frames, &text_boxes, *handle, *start, p, shift, alt)
         }
         Gesture::Rotating { center, start, .. } => rotate(&start_frames, *center, *start, p, shift),
         _ => return None,
     };
     Some(originals.iter().map(|(id, _)| *id).zip(frames).collect())
+}
+
+/// The text boxes a resize gesture changes, which stop growing with their
+/// text once dragged; none for other gestures.
+pub fn text_box_widths_off(gesture: &Gesture) -> Vec<Uuid> {
+    match gesture {
+        Gesture::Resizing {
+            originals,
+            auto_widths,
+            ..
+        } => originals
+            .iter()
+            .zip(auto_widths)
+            .filter(|(_, w)| w.is_some())
+            .map(|((id, _), _)| *id)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Whether the pointer at `p` hits `outline` within `tolerance` canvas
@@ -473,6 +512,19 @@ impl EditorWindow {
         if let Some(originals) = gesture.originals() {
             let originals = originals.clone();
             self.apply_frames(originals, cx);
+            if let Gesture::Resizing {
+                originals,
+                auto_widths,
+                ..
+            } = &gesture
+            {
+                let widths: Vec<(Uuid, bool)> = originals
+                    .iter()
+                    .zip(auto_widths)
+                    .filter_map(|((id, _), w)| Some((*id, (*w)?)))
+                    .collect();
+                self.set_auto_widths(&widths, cx);
+            }
             self.session_gesture
                 .end(&mut self.session, GestureOwner::Pointer);
             self.update_session(|_| {}, cx);
@@ -537,6 +589,7 @@ impl EditorWindow {
             at,
             HANDLE_GRAB_PX / zoom,
             ROTATE_HANDLE_OFFSET_PX / zoom,
+            self.chrome_width_only(),
             shape,
             modifiers.shift,
         );
@@ -560,11 +613,22 @@ impl EditorWindow {
                     originals: self.selected_frames(),
                 }
             }
-            PressKind::Resize(handle) => Gesture::Resizing {
-                handle,
-                start: at,
-                originals: self.selected_frames(),
-            },
+            PressKind::Resize(handle) => {
+                let originals = self.selected_frames();
+                let auto_widths = originals
+                    .iter()
+                    .map(|(id, _)| {
+                        let shape = self.session.find_shape(*id)?;
+                        shape.is_text_box().then(|| shape.auto_width())
+                    })
+                    .collect();
+                Gesture::Resizing {
+                    handle,
+                    start: at,
+                    originals,
+                    auto_widths,
+                }
+            }
             PressKind::Rotate => Gesture::Rotating {
                 center: chrome.map(|f| frame_centre(&f)).unwrap_or(at),
                 start: at,
@@ -614,6 +678,11 @@ impl EditorWindow {
             }
         } else if let Some(frames) = transformed(&self.gesture, p, modifiers.shift, modifiers.alt) {
             self.apply_frames(frames, cx);
+            let widths: Vec<(Uuid, bool)> = text_box_widths_off(&self.gesture)
+                .into_iter()
+                .map(|id| (id, false))
+                .collect();
+            self.set_auto_widths(&widths, cx);
         }
     }
 
@@ -692,6 +761,37 @@ impl EditorWindow {
         );
     }
 
+    /// Sets whether the text boxes in `widths` grow with their text.
+    fn set_auto_widths(&mut self, widths: &[(Uuid, bool)], cx: &mut Context<Self>) {
+        if widths.is_empty() {
+            return;
+        }
+        let ids: Vec<Uuid> = widths.iter().map(|(id, _)| *id).collect();
+        self.update_session(
+            |s| {
+                s.update_shapes(&ids, |shape| {
+                    let auto = widths.iter().find(|(id, _)| *id == shape.id);
+                    if let (Some(props), Some((_, auto))) = (shape.text_box.as_mut(), auto) {
+                        props.auto_width = *auto;
+                    }
+                })
+            },
+            cx,
+        );
+    }
+
+    /// Whether the selection chrome shows only side handles: when the
+    /// selection is one text box, which only changes width.
+    pub(super) fn chrome_width_only(&self) -> bool {
+        match self.selection.as_slice() {
+            [id] => self
+                .session
+                .find_shape(*id)
+                .is_some_and(|s| s.is_text_box()),
+            _ => false,
+        }
+    }
+
     /// The selected shapes and their frames, back to front.
     pub(super) fn selected_frames(&self) -> Originals {
         if self.selection.is_empty() {
@@ -714,7 +814,7 @@ impl EditorWindow {
 
     /// The topmost selectable shape at canvas point `at`, hit-tested
     /// against the outlines cached by the last paint.
-    fn shape_at(&mut self, at: Pt, cx: &mut Context<Self>) -> Option<Uuid> {
+    pub(super) fn shape_at(&mut self, at: Pt, cx: &mut Context<Self>) -> Option<Uuid> {
         let libs = cx.global::<Libraries>().0.clone();
         let tolerance = HIT_TOLERANCE_PX / self.session.page().viewport.zoom;
         let cache = &mut self.geometry_cache;
@@ -738,6 +838,7 @@ impl EditorWindow {
                     at?,
                     HANDLE_GRAB_PX / zoom,
                     ROTATE_HANDLE_OFFSET_PX / zoom,
+                    self.chrome_width_only(),
                 )
             }
             _ => None,
@@ -836,8 +937,8 @@ mod tests {
     use super::{
         chrome_frame, handle_at, hit_shape, is_drag, is_line_like, marquee_rect, marquee_selection,
         move_placement, placement_frame, placement_shape, press_kind, press_selection,
-        press_target, preview_shape, resize_cursor, transformed, visible_handles, Gesture,
-        HandleHit, PressKind,
+        press_target, preview_shape, resize_cursor, text_box_widths_off, transformed,
+        visible_handles, Gesture, HandleHit, PressKind,
     };
     use gpui_kit::CursorStyle;
     use mindweave_core::geometry::Frame;
@@ -1239,16 +1340,19 @@ mod tests {
     fn handles_are_grabbed_within_their_radius() {
         let f = boxed(0., 0., 100., 50.);
         assert_eq!(
-            handle_at(&f, (101., 49.), 6., 12.),
+            handle_at(&f, (101., 49.), 6., 12., false),
             Some(HandleHit::Resize(Handle::SE))
         );
         assert_eq!(
-            handle_at(&f, (50., 2.), 6., 12.),
+            handle_at(&f, (50., 2.), 6., 12., false),
             Some(HandleHit::Resize(Handle::N))
         );
-        assert_eq!(handle_at(&f, (50., -11.), 6., 12.), Some(HandleHit::Rotate));
-        assert_eq!(handle_at(&f, (50., 25.), 6., 12.), None);
-        assert_eq!(handle_at(&f, (108., 50.), 6., 12.), None);
+        assert_eq!(
+            handle_at(&f, (50., -11.), 6., 12., false),
+            Some(HandleHit::Rotate)
+        );
+        assert_eq!(handle_at(&f, (50., 25.), 6., 12., false), None);
+        assert_eq!(handle_at(&f, (108., 50.), 6., 12., false), None);
     }
 
     #[test]
@@ -1297,6 +1401,7 @@ mod tests {
             handle: Handle::E,
             start: (30., 5.),
             originals: originals.clone(),
+            auto_widths: vec![None, None],
         };
         let resized = transformed(&resizing, (60., 5.), false, false).unwrap();
         assert_eq!(resized[1], (b, boxed(40., 0., 20., 10.)));
@@ -1315,16 +1420,25 @@ mod tests {
     #[test]
     fn edge_handles_of_a_flat_or_thin_box_are_dropped() {
         let flat = boxed(0., 50., 100., 0.);
-        let kept: Vec<Handle> = visible_handles(&flat, 6.).iter().map(|(h, _)| *h).collect();
+        let kept: Vec<Handle> = visible_handles(&flat, 6., false)
+            .iter()
+            .map(|(h, _)| *h)
+            .collect();
         assert!(!kept.contains(&Handle::N) && !kept.contains(&Handle::S));
         assert!(kept.contains(&Handle::E) && kept.contains(&Handle::NE));
         let thin = boxed(0., 0., 4., 100.);
-        let kept: Vec<Handle> = visible_handles(&thin, 6.).iter().map(|(h, _)| *h).collect();
+        let kept: Vec<Handle> = visible_handles(&thin, 6., false)
+            .iter()
+            .map(|(h, _)| *h)
+            .collect();
         assert!(!kept.contains(&Handle::E) && !kept.contains(&Handle::W));
         assert!(kept.contains(&Handle::N));
-        assert_eq!(visible_handles(&boxed(0., 0., 100., 50.), 6.).len(), 8);
+        assert_eq!(
+            visible_handles(&boxed(0., 0., 100., 50.), 6., false).len(),
+            8
+        );
         // Nothing to grab in the middle of a flat line.
-        assert_eq!(handle_at(&flat, (50., 50.), 6., 12.), None);
+        assert_eq!(handle_at(&flat, (50., 50.), 6., 12., false), None);
     }
 
     #[test]
@@ -1332,14 +1446,63 @@ mod tests {
         let [line] = ids();
         let flat = boxed(0., 50., 100., 0.);
         assert_eq!(
-            press_target(Some(&flat), (50., 50.), 6., 12., Some(line), false),
+            press_target(Some(&flat), (50., 50.), 6., 12., false, Some(line), false),
             PressKind::Move(line)
         );
         // Its ends still resize.
         assert_eq!(
-            press_target(Some(&flat), (100., 50.), 6., 12., Some(line), false),
+            press_target(Some(&flat), (100., 50.), 6., 12., false, Some(line), false),
             PressKind::Resize(Handle::NE)
         );
+    }
+
+    #[test]
+    fn a_text_box_resize_only_changes_its_width() {
+        let [a] = ids();
+        let resizing = |handle| Gesture::Resizing {
+            handle,
+            start: (100., 20.),
+            originals: vec![(a, boxed(0., 0., 100., 20.))],
+            auto_widths: vec![Some(true)],
+        };
+        // A corner drag down and right: wider, the height kept.
+        let out = transformed(&resizing(Handle::SE), (150., 90.), true, false).unwrap();
+        assert_eq!(out, vec![(a, boxed(0., 0., 150., 20.))]);
+        // Top and bottom handles change nothing.
+        let out = transformed(&resizing(Handle::S), (150., 90.), false, false).unwrap();
+        assert_eq!(out, vec![(a, boxed(0., 0., 100., 20.))]);
+        assert_eq!(text_box_widths_off(&resizing(Handle::E)), vec![a]);
+        let shape = Gesture::Resizing {
+            handle: Handle::E,
+            start: (0., 0.),
+            originals: vec![(a, boxed(0., 0., 100., 20.))],
+            auto_widths: vec![None],
+        };
+        assert!(text_box_widths_off(&shape).is_empty());
+        assert!(text_box_widths_off(&Gesture::Idle).is_empty());
+    }
+
+    #[test]
+    fn one_selected_text_box_shows_only_side_handles() {
+        let f = boxed(0., 0., 100., 30.);
+        let kept: Vec<Handle> = visible_handles(&f, 6., true)
+            .iter()
+            .map(|(h, _)| *h)
+            .collect();
+        assert_eq!(kept.len(), 2);
+        assert!(kept.contains(&Handle::E) && kept.contains(&Handle::W));
+        // Corners are not grabbed; the sides are.
+        assert_eq!(handle_at(&f, (100., 30.), 6., 12., true), None);
+        assert_eq!(
+            handle_at(&f, (100., 15.), 6., 12., true),
+            Some(HandleHit::Resize(Handle::E))
+        );
+        assert_eq!(
+            handle_at(&f, (50., -12.), 6., 12., true),
+            Some(HandleHit::Rotate)
+        );
+        // Other shapes keep all eight.
+        assert_eq!(visible_handles(&f, 6., false).len(), 8);
     }
 
     #[test]
@@ -1347,22 +1510,22 @@ mod tests {
         let [tiny] = ids();
         let f = boxed(0., 0., 8., 8.);
         assert_eq!(
-            press_target(Some(&f), (4., 4.), 6., 12., Some(tiny), false),
+            press_target(Some(&f), (4., 4.), 6., 12., false, Some(tiny), false),
             PressKind::Move(tiny)
         );
         // Outside the body a corner still resizes.
         assert_eq!(
-            press_target(Some(&f), (10., 10.), 6., 12., None, false),
+            press_target(Some(&f), (10., 10.), 6., 12., false, None, false),
             PressKind::Resize(Handle::SE)
         );
         // A larger shape keeps handles first.
         let big = boxed(0., 0., 100., 100.);
         assert_eq!(
-            press_target(Some(&big), (2., 2.), 6., 12., Some(tiny), false),
+            press_target(Some(&big), (2., 2.), 6., 12., false, Some(tiny), false),
             PressKind::Resize(Handle::NW)
         );
         assert_eq!(
-            press_target(None, (2., 2.), 6., 12., None, true),
+            press_target(None, (2., 2.), 6., 12., false, None, true),
             PressKind::Marquee { additive: true }
         );
     }

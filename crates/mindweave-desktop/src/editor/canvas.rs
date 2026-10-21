@@ -56,7 +56,7 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
         move |bounds, hitbox, window, cx| {
             paint_background(bounds, &settings, &viewport, window, cx);
             editor.update(cx, |editor, cx| editor.paint_content(bounds, window, cx));
-            let (dragging, hand, ibeam, crosshair, pointer) = {
+            let (dragging, hand, ibeam, crosshair, text_tool, pointer) = {
                 let editor = editor.read(cx);
                 let ibeam = editor
                     .pointer_local
@@ -73,6 +73,7 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
                     ibeam,
                     matches!(editor.tools.tool, Tool::Shape { .. })
                         || matches!(editor.gesture, Gesture::Placing { .. }),
+                    editor.tools.tool == Tool::Text,
                     pointer,
                 )
             };
@@ -80,7 +81,7 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
                 window.set_cursor_style(CursorStyle::ClosedHand, &hitbox);
             } else if hand {
                 window.set_cursor_style(CursorStyle::OpenHand, &hitbox);
-            } else if ibeam {
+            } else if ibeam || text_tool {
                 window.set_cursor_style(CursorStyle::IBeam, &hitbox);
             } else if crosshair {
                 window.set_cursor_style(CursorStyle::Crosshair, &hitbox);
@@ -271,16 +272,26 @@ fn register_input(
                     cx.notify();
                 } else if event.button == MouseButton::Left {
                     let at = editor.to_canvas(local(event.position, bounds));
+                    // The second click of a double click on a gallery
+                    // shape, which closed the gallery, places nothing.
+                    let stray = matches!(editor.tools.tool, Tool::Shape { .. })
+                        && shape_gallery::is_stray_second_click(
+                            event.click_count,
+                            editor.ribbon.gallery_closed_at.map(|at| at.elapsed()),
+                        );
+                    if stray {
+                        return;
+                    }
+                    // A double click (with any tool but Hand, which pans)
+                    // edits text: the first click did what it does.
+                    if event.click_count == 2 {
+                        editor.double_click_text(at, window, cx);
+                        return;
+                    }
                     match editor.tools.tool {
                         Tool::Pointer => editor.begin_pointer_press(at, event.modifiers, cx),
-                        // The second click of a double click on a gallery
-                        // shape, which closed the gallery, places nothing.
-                        Tool::Shape { .. }
-                            if shape_gallery::is_stray_second_click(
-                                event.click_count,
-                                editor.ribbon.gallery_closed_at.map(|at| at.elapsed()),
-                            ) => {}
                         Tool::Shape { .. } => editor.begin_placing(at, event.modifiers, window, cx),
+                        Tool::Text => editor.place_text_box(at, window, cx),
                         Tool::Hand => {}
                     }
                 }
@@ -420,7 +431,11 @@ impl EditorWindow {
                 &viewport,
                 &chrome,
                 ROTATE_HANDLE_OFFSET_PX,
-                &visible_handles(&chrome, HANDLE_GRAB_PX / viewport.zoom),
+                &visible_handles(
+                    &chrome,
+                    HANDLE_GRAB_PX / viewport.zoom,
+                    self.chrome_width_only(),
+                ),
                 accent,
             );
         }

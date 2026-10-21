@@ -1,6 +1,6 @@
 //! The editor's active tool and the ribbon tab being shown.
 
-/// The ribbon tab holding Pointer and Hand.
+/// The ribbon tab holding Pointer, Hand and Text.
 pub const HOME_TAB: &str = "home";
 /// The built-in library whose tools have their own keys.
 pub const BASIC_SHAPES: &str = "basic-shapes";
@@ -17,6 +17,8 @@ pub const SHAPE_KEYS: [(&str, &str); 4] = [
 pub enum Tool {
     Pointer,
     Hand,
+    /// A click adds a text box there and starts editing it.
+    Text,
     /// Places shape `shape` of library `library`.
     Shape {
         library: String,
@@ -36,7 +38,7 @@ impl Tool {
     /// The ribbon tab showing this tool's button.
     pub fn tab(&self) -> &str {
         match self {
-            Tool::Pointer | Tool::Hand => HOME_TAB,
+            Tool::Pointer | Tool::Hand | Tool::Text => HOME_TAB,
             Tool::Shape { library, .. } => library,
         }
     }
@@ -83,8 +85,8 @@ impl ToolState {
         self.locked = lock;
     }
 
-    /// Called after a shape is placed: back to Pointer unless locked. The
-    /// tab stays.
+    /// Called after a shape or text box is placed: back to Pointer unless
+    /// locked. The tab stays.
     pub fn after_place(&mut self) {
         if !self.locked {
             self.tool = Tool::Pointer;
@@ -119,6 +121,22 @@ mod tests {
         assert!(state.locked);
         // Placing does not change the tab.
         assert_eq!(state.tab, BASIC_SHAPES);
+    }
+
+    #[test]
+    fn text_tool_returns_to_pointer_unless_locked() {
+        let mut state = ToolState::default();
+        state.select(Tool::Text, false);
+        assert_eq!(state.tab, HOME_TAB);
+        state.after_place();
+        assert_eq!(state.tool, Tool::Pointer);
+
+        state.select(Tool::Text, true);
+        state.after_place();
+        assert_eq!(state.tool, Tool::Text);
+        assert!(state.locked);
+        state.cancel();
+        assert_eq!(state.tool, Tool::Pointer);
     }
 
     #[test]

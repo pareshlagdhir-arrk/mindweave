@@ -16,7 +16,7 @@ use mindweave_core::{BackgroundPattern, CanvasSettings, DocumentSession};
 use super::shape_properties::{self, ShapeFields};
 use super::{
     hex_to_hsla, hsla_to_hex, parse_number, section_label, EditorWindow, GestureOwner,
-    SMALL_TEXT_SIZE,
+    SessionGesture, SMALL_TEXT_SIZE,
 };
 
 const PATTERNS: [(BackgroundPattern, &str); 3] = [
@@ -330,19 +330,34 @@ impl PropertyFields {
     }
 }
 
+/// Starts a colour picker drag's undo step when a picker that is `open`
+/// changes a colour and none is in progress (`color_edit`), setting
+/// `color_edit` only when the step really started. While text is being
+/// edited its session holds the gesture: the change joins it, and the next
+/// change after editing ends starts the picker's own step.
+pub(crate) fn begin_color_step(
+    gesture: &mut SessionGesture,
+    session: &mut DocumentSession,
+    open: bool,
+    color_edit: &mut bool,
+) {
+    if open && !*color_edit {
+        *color_edit = gesture.begin(session, GestureOwner::Color);
+    }
+}
+
 impl EditorWindow {
     /// Starts one undo step for a colour picker drag when a picker that is
     /// `open` changes a colour; it ends when every picker has closed (see
     /// [`Self::finish_color_edit`]). A change from a closed picker is a
     /// step of its own.
     pub(super) fn begin_color_edit(&mut self, open: bool) {
-        if open && !self.properties.color_edit {
-            // While text is being edited its session holds the gesture,
-            // and the change joins it.
-            self.session_gesture
-                .begin(&mut self.session, GestureOwner::Color);
-            self.properties.color_edit = true;
-        }
+        begin_color_step(
+            &mut self.session_gesture,
+            &mut self.session,
+            open,
+            &mut self.properties.color_edit,
+        );
     }
 
     /// Ends the undo step of a colour picker drag, if one is open.

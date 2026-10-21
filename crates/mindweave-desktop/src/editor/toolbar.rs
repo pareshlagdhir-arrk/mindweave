@@ -278,7 +278,7 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
     )
 }
 
-/// Home's buttons: Pointer and Hand.
+/// Home's buttons: Pointer, Hand and Text.
 fn home_buttons() -> Vec<ToolButton> {
     vec![
         ToolButton {
@@ -294,6 +294,13 @@ fn home_buttons() -> Vec<ToolButton> {
             icon: ButtonIcon::Svg("icons/hand.svg".into()),
             name: "Hand".into(),
             tooltip: "Hand (H)".into(),
+        },
+        ToolButton {
+            id: "tool-text".into(),
+            tool: Tool::Text,
+            icon: ButtonIcon::Svg("icons/type.svg".into()),
+            name: "Text".into(),
+            tooltip: "Text (T)".into(),
         },
     ]
 }
@@ -393,7 +400,7 @@ fn tool_button(
         .when(locked, |b| b.child(lock_dot(theme.primary)))
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-            this.tools.select(tool.clone(), event.click_count() >= 2);
+            this.choose_tool(tool.clone(), event.click_count() >= 2, window, cx);
             // Keep tool keys working after a click on the toolbar.
             this.focus_handle.focus(window, cx);
             cx.notify();
@@ -532,8 +539,10 @@ mod tests {
 
     #[test]
     fn more_stands_in_for_a_hidden_active_tool() {
-        // Home: Pointer, then Hand.
+        // Home: Pointer, Hand, then Text.
         let buttons = home_buttons();
+        assert!(active_tool_hidden(&buttons, 2, &Tool::Text));
+        assert!(!active_tool_hidden(&buttons, 3, &Tool::Text));
         assert!(!active_tool_hidden(&buttons, 2, &Tool::Hand));
         assert!(active_tool_hidden(&buttons, 1, &Tool::Hand));
         assert!(!active_tool_hidden(&buttons, 1, &Tool::Pointer));

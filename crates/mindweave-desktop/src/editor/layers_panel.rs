@@ -105,8 +105,12 @@ fn row(
                 .small()
                 .icon(icon)
                 .tooltip(tooltip)
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
+                    // Hiding the layer being edited on stops editing.
+                    if ix == this.session.page().active_layer {
+                        this.end_text_edit(window, cx);
+                    }
                     this.update_session(|s| s.toggle_layer_visibility(ix), cx);
                 })),
         )

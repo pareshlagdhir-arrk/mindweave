@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::color::normalize_hex_color;
 use crate::geometry::{Frame, Pt};
 use crate::library::ShapeDef;
-use crate::text::{HAlign, RichText, RunStyle, DEFAULT_FONT_SIZE};
+use crate::text::{HAlign, RichText, RunStyle, DEFAULT_FONT_SIZE, LABEL_FONT_SIZE};
 
 /// Library id reserved for Mindweave's built-in objects.
 pub const TEXT_LIBRARY: &str = "mindweave";
@@ -76,6 +76,23 @@ pub struct Label {
     pub text: RichText,
     #[serde(default)]
     pub valign: VAlign,
+}
+
+impl Label {
+    /// The empty label a shape gets when its text is first edited: centred,
+    /// vertically in the middle, at [`LABEL_FONT_SIZE`].
+    pub fn new_shape_label() -> Label {
+        Label {
+            text: RichText::new(
+                RunStyle {
+                    size: LABEL_FONT_SIZE,
+                    ..RunStyle::default()
+                },
+                HAlign::Center,
+            ),
+            valign: VAlign::Middle,
+        }
+    }
 }
 
 /// Properties only text boxes have.
@@ -268,7 +285,24 @@ impl Shape {
 mod tests {
     use super::*;
     use crate::library::builtin_libraries;
-    use crate::text::{HAlign, DEFAULT_FONT_SIZE};
+    use crate::text::{HAlign, DEFAULT_FONT_SIZE, LABEL_FONT_SIZE};
+
+    #[test]
+    fn a_new_shape_label_is_empty_centred_and_middle() {
+        let label = Label::new_shape_label();
+        assert!(label.text.is_empty());
+        assert_eq!(label.valign, VAlign::Middle);
+        assert_eq!(label.text.paragraphs.len(), 1);
+        assert_eq!(label.text.paragraphs[0].align, HAlign::Center);
+        assert_eq!(label.text.style_at(0).size, LABEL_FONT_SIZE);
+        assert_eq!(
+            label.text.style_at(0),
+            RunStyle {
+                size: LABEL_FONT_SIZE,
+                ..RunStyle::default()
+            }
+        );
+    }
 
     #[test]
     fn flatten_keeps_frame_out_of_extra_and_accepts_integers() {

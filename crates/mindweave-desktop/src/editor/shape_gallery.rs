@@ -179,8 +179,7 @@ fn gallery_cell(
             let lock = event.click_count() >= 2;
             editor
                 .update(cx, |editor, cx| {
-                    editor.tools.select(tool.clone(), lock);
-                    cx.notify();
+                    editor.choose_tool(tool.clone(), lock, window, cx);
                 })
                 .ok();
             if lock {
