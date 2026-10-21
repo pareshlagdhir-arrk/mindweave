@@ -11,8 +11,9 @@ use crate::document::{
     BackgroundPattern, CanvasSettings, Document, Layer, Page, Viewport, DEFAULT_DOT_SIZE,
 };
 use crate::format::{self, FormatError};
+use crate::geometry::Frame;
 use crate::history::{History, HISTORY_CAP};
-use crate::shape::Shape;
+use crate::shape::{Label, Shape};
 pub use crate::viewport::{ZOOM_MAX, ZOOM_MIN};
 
 pub const GRID_MIN: f32 = 4.0;
@@ -69,7 +70,71 @@ fn page_content_eq(a: &Page, b: &Page) -> bool {
         layers,
         active_layer: _,
     } = a;
-    *id == b.id && *name == b.name && *canvas == b.canvas && *layers == b.layers
+    *id == b.id
+        && *name == b.name
+        && *canvas == b.canvas
+        && layers.len() == b.layers.len()
+        && layers
+            .iter()
+            .zip(&b.layers)
+            .all(|(a, b)| layer_content_eq(a, b))
+}
+
+fn layer_content_eq(a: &Layer, b: &Layer) -> bool {
+    // Destructured so a new `Layer` field must be classified here.
+    let Layer {
+        id,
+        name,
+        visible,
+        objects,
+    } = a;
+    *id == b.id
+        && *name == b.name
+        && *visible == b.visible
+        && objects.len() == b.objects.len()
+        && objects
+            .iter()
+            .zip(&b.objects)
+            .all(|(a, b)| shape_content_eq(a, b))
+}
+
+/// Shape equality ignoring the sizes a text box derives from its text
+/// layout: `frame.h` always, `frame.w` while it grows with its text.
+fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
+    if !(a.is_text_box() && b.is_text_box()) || a.auto_width() != b.auto_width() {
+        return a == b;
+    }
+    // Destructured so a new `Shape` field must be classified here.
+    let Shape {
+        id,
+        library,
+        shape,
+        frame,
+        style,
+        params,
+        name,
+        locked,
+        label,
+        text_box,
+        extra,
+    } = a;
+    let auto = a.auto_width();
+    let content = |f: &Frame| Frame {
+        h: 0.0,
+        w: if auto { 0.0 } else { f.w },
+        ..*f
+    };
+    *id == b.id
+        && content(frame) == content(&b.frame)
+        && *library == b.library
+        && *shape == b.shape
+        && *style == b.style
+        && *params == b.params
+        && *name == b.name
+        && *locked == b.locked
+        && *label == b.label
+        && *text_box == b.text_box
+        && *extra == b.extra
 }
 
 /// Replace out-of-range or non-finite values with usable ones.
@@ -529,6 +594,45 @@ impl DocumentSession {
         for (i, shape) in changed {
             objects[i] = shape;
         }
+    }
+
+    /// Sets or clears the label of shape `id` on the active layer as one
+    /// undo step; nothing is recorded when the label is unchanged.
+    pub fn set_label(&mut self, id: Uuid, label: Option<Label>) {
+        self.update_shapes(&[id], |s| s.label = label.clone());
+    }
+
+    /// Stores the size text box `id` (on the active page) derives from its
+    /// text layout: the height, and the width while it grows with its
+    /// text. This is not an edit: no undo step, no new revision, and the
+    /// dirty comparison ignores these sizes. Non-finite values, unknown
+    /// ids and shapes that are not text boxes are ignored.
+    pub fn set_text_box_layout(&mut self, id: Uuid, w: f32, h: f32) {
+        if !(w.is_finite() && h.is_finite()) {
+            return;
+        }
+        let shape = self
+            .page_mut()
+            .layers
+            .iter_mut()
+            .flat_map(|l| l.objects.iter_mut())
+            .find(|s| s.id == id && s.is_text_box());
+        if let Some(shape) = shape {
+            if shape.auto_width() {
+                shape.frame.w = w;
+            }
+            shape.frame.h = h;
+            shape.normalize();
+        }
+    }
+
+    /// Removes shape `id` from the active page without an undo step of its
+    /// own: inside an open gesture it joins the gesture, so removing an
+    /// empty text box added in the same gesture leaves no step and the
+    /// gesture's starting revision. Without a gesture it is an ordinary,
+    /// recorded removal.
+    pub fn remove_shape_silently(&mut self, id: Uuid) {
+        self.remove_shapes(&[id]);
     }
 
     // View edits (never dirty).
@@ -999,6 +1103,174 @@ mod tests {
             ..Default::default()
         };
         Shape::new(&def, "basic-shapes", frame)
+    }
+
+    fn label(text: &str) -> crate::shape::Label {
+        use crate::text::{HAlign, RichText, RunStyle};
+        let mut t = RichText::new(RunStyle::default(), HAlign::Center);
+        t.insert(0, text, &RunStyle::default());
+        crate::shape::Label {
+            text: t,
+            valign: crate::shape::VAlign::Middle,
+        }
+    }
+
+    #[test]
+    fn layout_size_does_not_dirty() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let tb = Shape::new_text_box((0.0, 0.0));
+        let id = tb.id;
+        s.add_shapes(vec![tb]);
+        s.save().unwrap();
+        let rev = s.revision();
+        let can_undo = s.can_undo();
+
+        // Auto width: both derived sizes change, nothing is recorded.
+        s.set_text_box_layout(id, 80.0, 40.0);
+        let f = s.find_shape(id).unwrap().frame;
+        assert_eq!((f.w, f.h), (80.0, 40.0));
+        assert!(!s.is_dirty());
+        assert_eq!(s.revision(), rev);
+        assert_eq!(s.can_undo(), can_undo);
+
+        // Fixed width: the width is content, only the height is derived.
+        s.update_shapes(&[id], |sh| {
+            sh.text_box.as_mut().unwrap().auto_width = false;
+            sh.frame.w = 100.0;
+        });
+        s.save().unwrap();
+        s.set_text_box_layout(id, 55.0, 60.0);
+        let f = s.find_shape(id).unwrap().frame;
+        assert_eq!((f.w, f.h), (100.0, 60.0));
+        assert!(!s.is_dirty());
+
+        // The comparison after an edit ignores the derived height too.
+        s.update_shapes(&[id], |sh| sh.frame.x += 5.0);
+        s.set_text_box_layout(id, 0.0, 99.0);
+        s.update_shapes(&[id], |sh| sh.frame.x -= 5.0);
+        assert!(!s.is_dirty());
+        // A real width change on a fixed-width box is dirty.
+        s.update_shapes(&[id], |sh| sh.frame.w = 120.0);
+        assert!(s.is_dirty());
+
+        // Non-text-box shapes and bad values are ignored.
+        let r = rect(0.0);
+        let rid = r.id;
+        s.add_shapes(vec![r]);
+        let rev = s.revision();
+        s.set_text_box_layout(rid, 50.0, 50.0);
+        assert_eq!(s.find_shape(rid).unwrap().frame.w, 10.0);
+        s.set_text_box_layout(id, f32::NAN, f32::INFINITY);
+        assert_eq!(s.find_shape(id).unwrap().frame.h, 99.0);
+        assert_eq!(s.revision(), rev);
+    }
+
+    #[test]
+    fn set_label_is_one_undo_step() {
+        let (_d, mut s) = new_session("a.mindweave");
+        let r = rect(0.0);
+        let id = r.id;
+        s.add_shapes(vec![r]);
+        s.save().unwrap();
+        let rev = s.revision();
+
+        s.set_label(id, Some(label("Hi")));
+        assert_eq!(s.find_shape(id).unwrap().label, Some(label("Hi")));
+        assert!(s.is_dirty());
+        let rev2 = s.revision();
+        assert_ne!(rev2, rev);
+        // Same label again: no step.
+        s.set_label(id, Some(label("Hi")));
+        assert_eq!(s.revision(), rev2);
+
+        assert!(s.undo());
+        assert_eq!(s.find_shape(id).unwrap().label, None);
+        assert!(!s.is_dirty());
+        assert!(s.redo());
+        assert_eq!(s.find_shape(id).unwrap().label, Some(label("Hi")));
+        s.set_label(id, None);
+        assert_eq!(s.find_shape(id).unwrap().label, None);
+        assert!(s.undo());
+        assert_eq!(s.find_shape(id).unwrap().label, Some(label("Hi")));
+        // Unknown id: nothing happens.
+        let rev = s.revision();
+        s.set_label(uuid::Uuid::new_v4(), Some(label("x")));
+        assert_eq!(s.revision(), rev);
+    }
+
+    #[test]
+    fn empty_box_removed_inside_gesture_leaves_no_step() {
+        let (_d, mut s) = new_session("a.mindweave");
+        s.add_shapes(vec![rect(0.0)]);
+        s.save().unwrap();
+        let rev = s.revision();
+        let can_undo = s.can_undo();
+
+        s.begin_gesture();
+        let tb = Shape::new_text_box((10.0, 10.0));
+        let id = tb.id;
+        s.add_shapes(vec![tb]);
+        s.set_text_box_layout(id, 30.0, 20.0);
+        s.update_shapes(&[id], |sh| {
+            sh.label.as_mut().unwrap().text = label("typed").text;
+        });
+        s.update_shapes(&[id], |sh| {
+            sh.label.as_mut().unwrap().text = Shape::new_text_box((0.0, 0.0)).label.unwrap().text;
+        });
+        s.remove_shape_silently(id);
+        assert!(s.find_shape(id).is_none());
+        s.end_gesture();
+
+        assert_eq!(s.revision(), rev);
+        assert_eq!(s.can_undo(), can_undo);
+        assert!(!s.is_dirty());
+        assert_eq!(s.shapes_on_active_layer().len(), 1);
+    }
+
+    #[test]
+    fn open_normalises_text_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mindweave");
+        let mut d = Document::new();
+        let mut r = rect(0.0);
+        r.label = Some(label("abc"));
+        d.pages[0].layers[0].objects.push(r);
+        let mut v = serde_json::to_value(&d).unwrap();
+        let runs = serde_json::json!([
+            {"text": "a", "style": {"size": 0, "color": "nope", "font": "Missing Font"}},
+            {"text": "b", "style": {"size": 1e9, "color": "#00ff00"}},
+            {"text": "c", "style": {"size": 12}}
+        ]);
+        v["pages"][0]["layers"][0]["objects"][0]["label"]["text"]["paragraphs"][0]["runs"] = runs;
+        std::fs::write(&path, v.to_string()).unwrap();
+
+        let session = DocumentSession::open(path).unwrap();
+        let shape = &session.page().layers[0].objects[0];
+        let runs = &shape.label.as_ref().unwrap().text.paragraphs[0].runs;
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].style.size, 1.0);
+        assert_eq!(runs[0].style.color, None);
+        assert_eq!(runs[0].style.font.as_deref(), Some("Missing Font"));
+        assert_eq!(runs[1].style.size, 1000.0);
+        assert_eq!(runs[1].style.color.as_deref(), Some("#00FF00"));
+        assert_eq!(runs[2].style.size, 12.0);
+        assert!(!session.is_dirty());
+
+        // JSON cannot hold NaN; a NaN that reaches the model is repaired.
+        let (_d, mut s) = new_session("b.mindweave");
+        let mut r = rect(0.0);
+        let mut l = label("x");
+        l.text.paragraphs[0].runs[0].style.size = f32::NAN;
+        r.label = Some(l);
+        let id = r.id;
+        s.add_shapes(vec![r]);
+        let l = s.find_shape(id).unwrap().label.clone().unwrap();
+        assert_eq!(l.text.paragraphs[0].runs[0].style.size, 16.0);
+        let mut l = label("y");
+        l.text.paragraphs[0].runs[0].style.size = f32::NAN;
+        s.set_label(id, Some(l));
+        let l = s.find_shape(id).unwrap().label.clone().unwrap();
+        assert_eq!(l.text.paragraphs[0].runs[0].style.size, 16.0);
     }
 
     #[test]

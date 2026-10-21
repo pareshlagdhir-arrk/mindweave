@@ -18,8 +18,8 @@ pub mod transform;
 pub mod viewport;
 
 pub use clipboard::{
-    duplicate, from_clipboard, prepare_paste, to_clipboard, CLIPBOARD_MARKER, CLIPBOARD_VERSION,
-    MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_SHAPES,
+    duplicate, from_clipboard, plain_text_box, prepare_paste, to_clipboard, CLIPBOARD_MARKER,
+    CLIPBOARD_VERSION, MAX_CLIPBOARD_BYTES, MAX_CLIPBOARD_SHAPES, MAX_PASTE_CHARS,
 };
 pub use color::{
     auto_text_color, format_hex_color, normalize_hex_color, parse_hex_color, relative_luminance,
@@ -37,15 +37,15 @@ pub use session::DocumentSession;
 pub use settings::{
     load_settings, save_settings, settings_path, AppSettings, RecentFile, WindowSize, MAX_RECENT,
 };
-pub use shape::{Shape, Style};
+pub use shape::{Label, Shape, Style, TextBoxProps, VAlign, TEXT_LIBRARY, TEXT_SHAPE};
 pub use text::{
     HAlign, Mixed, Paragraph, RichText, Run, RunStyle, StyleChange, StyleSummary,
     DEFAULT_FONT_SIZE, LABEL_FONT_SIZE, LINE_BREAK, MAX_FONT_SIZE, MIN_FONT_SIZE,
 };
 pub use text_history::{EditKind, EditSnapshot, TextHistory};
 pub use transform::{
-    drag_create, frame_aabb, handle_positions, marquee_selects, resize, rotate,
-    rotate_handle_position, selection_bounds, translate, Handle, CLICK_DRAG_THRESHOLD,
+    drag_create, frame_aabb, handle_positions, marquee_selects, resize, resize_with_text_boxes,
+    rotate, rotate_handle_position, selection_bounds, translate, Handle, CLICK_DRAG_THRESHOLD,
     DUPLICATE_OFFSET, MIN_SIZE,
 };
 pub use viewport::{

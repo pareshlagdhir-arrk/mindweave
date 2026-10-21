@@ -239,6 +239,38 @@ pub fn resize(
     keep_aspect: bool,
     from_center: bool,
 ) -> Vec<Frame> {
+    resize_with_text_boxes(
+        start,
+        &[],
+        handle,
+        start_pointer,
+        pointer,
+        keep_aspect,
+        from_center,
+    )
+}
+
+/// [`resize`] where `text_boxes[i]` marks `start[i]` as a text box (a
+/// missing entry means `false`).
+///
+/// A text box only reflows: its height, rotation and flips never change.
+/// Alone, only its width changes, along its own x axis: side and corner
+/// handles move its left or right edge with the opposite edge fixed (with
+/// `from_center`, both edges), `keep_aspect` is ignored, top and bottom
+/// handles change nothing, and dragging past the opposite edge does not
+/// flip it. In a group resize it scales its position and width like the
+/// other frames but keeps its height and is never mirrored. The caller
+/// turns `auto_width` off and lays the text out again for the new width.
+pub fn resize_with_text_boxes(
+    start: &[Frame],
+    text_boxes: &[bool],
+    handle: Handle,
+    start_pointer: Pt,
+    pointer: Pt,
+    keep_aspect: bool,
+    from_center: bool,
+) -> Vec<Frame> {
+    let is_text_box = |i: usize| text_boxes.get(i).copied().unwrap_or(false);
     let d = (pointer.0 - start_pointer.0, pointer.1 - start_pointer.1);
     let (hx, hy) = handle.sides();
     // Which axes a `w × h` box's gesture changes. Keeping the aspect ratio
@@ -256,6 +288,9 @@ pub fn resize(
         }
     };
     if let [f] = start {
+        if is_text_box(0) {
+            return vec![resize_text_box(f, hx, d, from_center)];
+        }
         let (affects_x, affects_y) = affected(f.w, f.h);
         let (u, v) = axes(f);
         let local = (d.0 * u.0 + d.1 * u.1, d.0 * v.0 + d.1 * v.1);
@@ -302,7 +337,8 @@ pub fn resize(
     let mirrored = (sx < 0.0) != (sy < 0.0);
     start
         .iter()
-        .map(|f| {
+        .enumerate()
+        .map(|(i, f)| {
             let c = frame_center(f);
             let center = (
                 anchor.0 + (c.0 - anchor.0) * sx,
@@ -310,6 +346,9 @@ pub fn resize(
             );
             // A shape with no extent on an axis (a straight line) keeps it.
             let w = side(f.w, f.w * sx.abs(), affects_x && f.w > 0.0);
+            if is_text_box(i) {
+                return recentred(f, center, w, f.h);
+            }
             let h = side(f.h, f.h * sy.abs(), affects_y && f.h > 0.0);
             let mut out = recentred(f, center, w, h);
             out.flip_x ^= sx < 0.0;
@@ -320,6 +359,27 @@ pub fn resize(
             out
         })
         .collect()
+}
+
+/// A text box after its handle on side `hx` (`-1` left, `1` right, `0`
+/// neither) moved by canvas `d`: only the width changes.
+fn resize_text_box(f: &Frame, hx: f32, d: Pt, from_center: bool) -> Frame {
+    if hx == 0.0 {
+        return *f;
+    }
+    let (u, v) = axes(f);
+    let du = d.0 * u.0 + d.1 * u.1;
+    let gain = if from_center { 2.0 } else { 1.0 };
+    let sw = f.w + gain * hx * du;
+    let w = sw.abs().max(MIN_SIZE);
+    let c = frame_center(f);
+    let center = if from_center {
+        c
+    } else {
+        let anchor = along(c, u, -hx * f.w / 2.0, v, 0.0);
+        along(anchor, u, hx * w.copysign(sw) / 2.0, v, 0.0)
+    };
+    recentred(f, center, w, f.h)
 }
 
 /// Frames after turning the pointer about `center` from `start_pointer`
@@ -923,6 +983,111 @@ mod tests {
         assert_eq!(
             rotate_handle_position(&f, 12.0),
             rotate_handle_position(&flipped, 12.0)
+        );
+    }
+
+    #[test]
+    fn text_box_resize_changes_width_only() {
+        let tb = frame(100.0, 100.0, 80.0, 20.0);
+        let one = |handle, d: Pt, shift, alt| {
+            let p0 = corner(&tb, handle);
+            let p1 = (p0.0 + d.0, p0.1 + d.1);
+            let out = resize_with_text_boxes(&[tb], &[true], handle, p0, p1, shift, alt);
+            assert_eq!(out.len(), 1);
+            out[0]
+        };
+        // Corner drag, with and without Shift/Alt: width only.
+        for (shift, alt) in [(false, false), (true, false), (false, true), (true, true)] {
+            let f = one(Handle::SE, (40.0, 30.0), shift, alt);
+            assert_eq!(f.h, 20.0);
+            assert_eq!(f.y, 100.0);
+            let w = if alt { 160.0 } else { 120.0 };
+            let x = if alt { 60.0 } else { 100.0 };
+            assert_frame(&f, x, 100.0, w, 20.0);
+            assert!(!f.flip_x && !f.flip_y);
+        }
+        // Left edge keeps the right edge fixed.
+        assert_frame(
+            &one(Handle::W, (30.0, 0.0), false, false),
+            130.0,
+            100.0,
+            50.0,
+            20.0,
+        );
+        assert_frame(
+            &one(Handle::NW, (-10.0, -50.0), true, false),
+            90.0,
+            100.0,
+            90.0,
+            20.0,
+        );
+        // Top and bottom handles change nothing.
+        assert_eq!(one(Handle::N, (5.0, -40.0), true, true), tb);
+        assert_eq!(one(Handle::S, (5.0, 40.0), false, false), tb);
+        // Crossing the opposite edge never flips text.
+        let f = one(Handle::E, (-100.0, 0.0), false, false);
+        assert_frame(&f, 80.0, 100.0, 20.0, 20.0);
+        assert!(!f.flip_x);
+        // Never narrower than MIN_SIZE.
+        assert_frame(
+            &one(Handle::E, (-80.0, 0.0), false, false),
+            100.0,
+            100.0,
+            MIN_SIZE,
+            20.0,
+        );
+
+        // Rotated: the opposite edge stays fixed along the box's own axis.
+        let r = Frame {
+            rotation: 90.0,
+            ..tb
+        };
+        let p0 = corner(&r, Handle::E);
+        let out = resize_with_text_boxes(
+            &[r],
+            &[true],
+            Handle::E,
+            p0,
+            (p0.0, p0.1 + 20.0),
+            false,
+            false,
+        );
+        assert!(close(out[0].w, 100.0) && close(out[0].h, 20.0));
+        assert_pt(corner(&out[0], Handle::W), corner(&r, Handle::W));
+
+        // Group resize: text boxes scale position and width, keep height
+        // and never flip; other shapes scale as before.
+        let shape = frame(0.0, 0.0, 100.0, 100.0);
+        let start = [shape, tb];
+        let p0 = (180.0, 120.0); // SE corner of the group bounds
+        let out = resize_with_text_boxes(
+            &start,
+            &[false, true],
+            Handle::SE,
+            p0,
+            (360.0, 240.0),
+            false,
+            false,
+        );
+        assert_frame(&out[0], 0.0, 0.0, 200.0, 200.0);
+        // Centre (140, 110) scales to (280, 220); width 80 → 160.
+        assert_frame(&out[1], 200.0, 210.0, 160.0, 20.0);
+        let mirrored = resize_with_text_boxes(
+            &start,
+            &[false, true],
+            Handle::E,
+            p0,
+            (-180.0, 120.0),
+            false,
+            false,
+        );
+        assert!(mirrored[0].flip_x);
+        assert!(!mirrored[1].flip_x && !mirrored[1].flip_y);
+        assert_eq!(mirrored[1].h, 20.0);
+        // Missing flags mean "not a text box", matching `resize`.
+        assert_eq!(
+            resize_with_text_boxes(&start, &[], Handle::SE, p0, (360.0, 240.0), true, false),
+            resize(&start, Handle::SE, p0, (360.0, 240.0), true, false)
         );
     }
 

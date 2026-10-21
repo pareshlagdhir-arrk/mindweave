@@ -1,6 +1,12 @@
 //! A shape placed on a layer: a reference to a library shape plus its
-//! frame, style and parameter values. Unknown fields are kept so files
-//! written by newer versions or with missing libraries survive a save.
+//! frame, style and parameter values, and optionally a text label. Unknown
+//! fields are kept so files written by newer versions or with missing
+//! libraries survive a save.
+//!
+//! Free text boxes are shapes too, with the reserved library
+//! [`TEXT_LIBRARY`] and shape [`TEXT_SHAPE`]: their text is the `label`
+//! and their `frame.h` (and `frame.w` while `auto_width`) is derived from
+//! the text layout.
 
 use std::collections::BTreeMap;
 
@@ -8,8 +14,16 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::color::normalize_hex_color;
-use crate::geometry::Frame;
+use crate::geometry::{Frame, Pt};
 use crate::library::ShapeDef;
+use crate::text::{HAlign, RichText, RunStyle, DEFAULT_FONT_SIZE};
+
+/// Library id reserved for Mindweave's built-in objects.
+pub const TEXT_LIBRARY: &str = "mindweave";
+/// Shape id of a free text box in [`TEXT_LIBRARY`].
+pub const TEXT_SHAPE: &str = "text";
+/// Height of a new, empty text box: one line at the default font size.
+const TEXT_BOX_LINE_HEIGHT: f32 = 20.0;
 
 const COORD_MAX: f32 = 1e9;
 /// Zero is allowed: horizontal and vertical lines have no height or width.
@@ -45,6 +59,39 @@ impl Default for Style {
     }
 }
 
+/// Vertical placement of a shape label inside its frame. Ignored for text
+/// boxes, whose height fits their text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VAlign {
+    Top,
+    #[default]
+    Middle,
+    Bottom,
+}
+
+/// Text on a shape, or the text of a text box.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Label {
+    pub text: RichText,
+    #[serde(default)]
+    pub valign: VAlign,
+}
+
+/// Properties only text boxes have.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextBoxProps {
+    /// The box grows with its text; turned off once the user sets a width.
+    pub auto_width: bool,
+}
+
+impl Default for TextBoxProps {
+    fn default() -> Self {
+        TextBoxProps { auto_width: true }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Shape {
     pub id: Uuid,
@@ -61,6 +108,12 @@ pub struct Shape {
     pub name: Option<String>,
     #[serde(default)]
     pub locked: bool,
+    /// The shape's label, or a text box's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<Label>,
+    /// Set on text boxes only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_box: Option<TextBoxProps>,
     /// Fields this version does not know, written back unchanged.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -88,8 +141,59 @@ impl Shape {
                 .collect(),
             name: None,
             locked: false,
+            label: None,
+            text_box: None,
             extra: serde_json::Map::new(),
         }
+    }
+
+    /// A new, empty text box with its top-left corner at `at`: one line
+    /// high, growing with its text, left aligned in the default style, no
+    /// fill or stroke.
+    pub fn new_text_box(at: Pt) -> Shape {
+        Shape {
+            id: Uuid::new_v4(),
+            library: TEXT_LIBRARY.to_string(),
+            shape: TEXT_SHAPE.to_string(),
+            frame: Frame {
+                x: at.0,
+                y: at.1,
+                w: 1.0,
+                h: TEXT_BOX_LINE_HEIGHT,
+                ..Frame::default()
+            },
+            style: Style::default(),
+            params: BTreeMap::new(),
+            name: None,
+            locked: false,
+            label: Some(Label {
+                text: RichText::new(
+                    RunStyle {
+                        size: DEFAULT_FONT_SIZE,
+                        ..RunStyle::default()
+                    },
+                    HAlign::Left,
+                ),
+                valign: VAlign::Top,
+            }),
+            text_box: Some(TextBoxProps::default()),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    pub fn is_text_box(&self) -> bool {
+        self.library == TEXT_LIBRARY && self.shape == TEXT_SHAPE
+    }
+
+    /// Whether the label is drawn along the shape as a line label (basic
+    /// lines and arrows) rather than inside its frame.
+    pub fn is_line_like_label(&self) -> bool {
+        self.library == "basic-shapes" && matches!(self.shape.as_str(), "line" | "arrow")
+    }
+
+    /// Whether the text box grows with its text (`false` for other shapes).
+    pub fn auto_width(&self) -> bool {
+        self.text_box.as_ref().is_some_and(|t| t.auto_width)
     }
 
     /// The numeric value of parameter `key`, if set to a number.
@@ -105,8 +209,9 @@ impl Shape {
         }
     }
 
-    /// Replaces non-finite or out-of-range values with usable ones and
-    /// drops invalid colours.
+    /// Replaces non-finite or out-of-range values with usable ones, drops
+    /// invalid colours, normalises the label text and gives a text box its
+    /// missing text box properties and label.
     pub fn normalize(&mut self) {
         let f = &mut self.frame;
         for v in [&mut f.w, &mut f.h] {
@@ -147,6 +252,15 @@ impl Shape {
         for c in [&mut s.fill, &mut s.stroke] {
             *c = c.as_deref().and_then(normalize_hex_color);
         }
+        if self.is_text_box() {
+            self.text_box.get_or_insert_with(TextBoxProps::default);
+            if self.label.is_none() {
+                self.label = Shape::new_text_box((0.0, 0.0)).label;
+            }
+        }
+        if let Some(label) = &mut self.label {
+            label.text.normalize();
+        }
     }
 }
 
@@ -154,6 +268,7 @@ impl Shape {
 mod tests {
     use super::*;
     use crate::library::builtin_libraries;
+    use crate::text::{HAlign, DEFAULT_FONT_SIZE};
 
     #[test]
     fn flatten_keeps_frame_out_of_extra_and_accepts_integers() {
@@ -214,6 +329,84 @@ mod tests {
         assert_eq!(s.style.fill.as_deref(), Some("#F5F5F5"));
         assert_eq!(s.param("corner_radius"), Some(0.0));
         assert_eq!((s.frame.w, s.frame.h), (120.0, 80.0));
+    }
+
+    #[test]
+    fn text_box_roundtrip_keeps_auto_width() {
+        let mut t = Shape::new_text_box((12.0, 34.0));
+        assert!(t.is_text_box());
+        assert!(!t.is_line_like_label());
+        assert_eq!(
+            (t.library.as_str(), t.shape.as_str()),
+            ("mindweave", "text")
+        );
+        assert_eq!(
+            (t.frame.x, t.frame.y, t.frame.w, t.frame.h),
+            (12.0, 34.0, 1.0, 20.0)
+        );
+        assert_eq!(t.style, Style::default());
+        assert_eq!(t.text_box, Some(TextBoxProps { auto_width: true }));
+        let label = t.label.as_ref().unwrap();
+        assert!(label.text.is_empty());
+        assert_eq!(label.text.paragraphs[0].align, HAlign::Left);
+        assert_eq!(label.text.style_at(0).size, DEFAULT_FONT_SIZE);
+
+        let json = serde_json::to_value(&t).unwrap();
+        assert_eq!(json["text_box"]["auto_width"], true);
+        let back: Shape = serde_json::from_value(json).unwrap();
+        assert!(
+            back.extra.is_empty(),
+            "known fields leaked: {:?}",
+            back.extra
+        );
+        assert_eq!(back, t);
+
+        t.text_box = Some(TextBoxProps { auto_width: false });
+        let back: Shape = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back.text_box, Some(TextBoxProps { auto_width: false }));
+    }
+
+    #[test]
+    fn label_is_a_field_not_extra_and_absent_when_none() {
+        let mut s: Shape = serde_json::from_str(
+            r#"{"id":"0b6a2c1d-6c55-4e0e-8a83-0b3e8f1f9a10","library":"basic-shapes","shape":"arrow",
+            "x":0,"y":0,"w":1,"h":1,
+            "label":{"text":{"paragraphs":[{"runs":[{"text":"hi","style":{"size":0}}]}]},"valign":"bottom"}}"#,
+        )
+        .unwrap();
+        assert!(s.extra.is_empty());
+        assert!(s.is_line_like_label());
+        assert!(!s.is_text_box());
+        let label = s.label.as_ref().unwrap();
+        assert_eq!(label.valign, VAlign::Bottom);
+        assert_eq!(label.text.plain(), "hi");
+        s.label = None;
+        let out = serde_json::to_value(&s).unwrap();
+        assert!(out.get("label").is_none());
+        assert!(out.get("text_box").is_none());
+    }
+
+    #[test]
+    fn normalize_repairs_text_box_and_label_text() {
+        let mut s: Shape = serde_json::from_str(
+            r#"{"id":"0b6a2c1d-6c55-4e0e-8a83-0b3e8f1f9a10","library":"mindweave","shape":"text",
+            "x":0,"y":0,"w":1,"h":1}"#,
+        )
+        .unwrap();
+        s.normalize();
+        assert_eq!(s.text_box, Some(TextBoxProps { auto_width: true }));
+        assert!(s.label.as_ref().unwrap().text.is_empty());
+        let mut text = s.label.clone().unwrap().text;
+        text.paragraphs[0].style.size = f32::NAN;
+        s.label = Some(Label {
+            text,
+            valign: VAlign::Top,
+        });
+        s.normalize();
+        assert_eq!(
+            s.label.unwrap().text.paragraphs[0].style.size,
+            DEFAULT_FONT_SIZE
+        );
     }
 
     #[test]

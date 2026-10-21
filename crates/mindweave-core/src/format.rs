@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::document::Document;
 
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum FormatError {
@@ -67,7 +67,7 @@ mod tests {
     #[test]
     fn new_document_has_one_page_one_layer() {
         let d = Document::new();
-        assert_eq!(d.version, 2);
+        assert_eq!(d.version, 3);
         assert_eq!(d.pages.len(), 1);
         assert_eq!(d.pages[0].name, "Page 1");
         assert_eq!(d.pages[0].layers[0].name, "Layer 1");
@@ -104,17 +104,17 @@ mod tests {
         let s = fs::read_to_string(&path).unwrap();
         assert!(s.contains("\n  "));
         assert!(s.contains("\"pattern\": \"dots\""));
-        assert!(s.contains("\"version\": 2"));
+        assert!(s.contains("\"version\": 3"));
     }
 
     #[test]
     fn load_rejects_newer_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.mindweave");
-        fs::write(&path, r#"{"version":3,"pages":[],"active_page":0}"#).unwrap();
+        fs::write(&path, r#"{"version":4,"pages":[],"active_page":0}"#).unwrap();
         assert!(matches!(
             load(&path),
-            Err(FormatError::UnsupportedVersion(3))
+            Err(FormatError::UnsupportedVersion(4))
         ));
     }
 
@@ -265,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_file_loads_and_saves_as_v2() {
+    fn v1_file_loads_and_saves_as_v3() {
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = (
             dir.path().join("a.mindweave"),
@@ -276,8 +276,58 @@ mod tests {
         v["pages"][0]["layers"][0]["objects"] = serde_json::json!([]);
         fs::write(&a, v.to_string()).unwrap();
         let d = load(&a).unwrap();
-        assert_eq!(d.version, 2);
+        assert_eq!(d.version, 3);
         save(&d, &b).unwrap();
-        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 2"));
+        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 3"));
+    }
+
+    #[test]
+    fn label_roundtrip_and_v2_file_loads() {
+        use crate::shape::{Label, Shape, VAlign};
+        use crate::text::{HAlign, RichText, RunStyle};
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (
+            dir.path().join("a.mindweave"),
+            dir.path().join("b.mindweave"),
+        );
+        // A version 2 file (no labels or text boxes) loads unchanged.
+        fs::write(&a, SHAPE_DOC).unwrap();
+        let mut d = load(&a).unwrap();
+        assert_eq!(d.version, 3);
+        let objects = &mut d.pages[0].layers[0].objects;
+        assert_eq!(objects[0].label, None);
+        assert_eq!(objects[0].text_box, None);
+        assert_eq!(objects[0].extra.len(), 1);
+
+        let bold = RunStyle {
+            bold: true,
+            font: Some("No Such Font".into()),
+            color: Some("#FF0000".into()),
+            ..RunStyle::default()
+        };
+        let mut text = RichText::new(RunStyle::default(), HAlign::Center);
+        text.insert(0, "Hello\nworld", &RunStyle::default());
+        text.insert(5, "!", &bold);
+        objects[0].label = Some(Label {
+            text: text.clone(),
+            valign: VAlign::Bottom,
+        });
+        let mut tb = Shape::new_text_box((5.0, 6.0));
+        tb.label.as_mut().unwrap().text = text;
+        tb.text_box.as_mut().unwrap().auto_width = false;
+        objects.push(tb);
+
+        save(&d, &b).unwrap();
+        let saved = fs::read_to_string(&b).unwrap();
+        assert!(saved.contains("\"version\": 3"));
+        let back = load(&b).unwrap();
+        assert_eq!(back, d);
+        let shapes = &back.pages[0].layers[0].objects;
+        assert_eq!(shapes[0].extra.len(), 1, "label must not land in extra");
+        assert!(shapes[1].extra.is_empty());
+        assert_eq!(
+            shapes[0].label.as_ref().unwrap().text.plain(),
+            "Hello!\nworld"
+        );
     }
 }

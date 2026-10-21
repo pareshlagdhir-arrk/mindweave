@@ -1,22 +1,29 @@
-//! Clipboard payloads for shapes, and duplicating shapes.
+//! Clipboard payloads for shapes, plain-text paste, and duplicating shapes.
 //!
-//! Shapes are copied as JSON text:
-//! `{"mindweave":"shapes","version":1,"shapes":[...]}`. Clipboard text
-//! comes from any application, so reading it never panics and rejects
-//! anything that is not such a payload.
+//! Shapes (with their labels, and text boxes) are copied as JSON text:
+//! `{"mindweave":"shapes","version":2,"shapes":[...]}`. Version 1 payloads
+//! (shapes without text) are still read. Clipboard text comes from any
+//! application, so reading it never panics and rejects anything that is
+//! not such a payload.
 
 use serde::Serialize;
 use serde_json::Value;
+use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 
-use crate::geometry::{Frame, Rect};
+use crate::geometry::{Frame, Pt, Rect};
 use crate::shape::Shape;
+use crate::text::RunStyle;
 use crate::transform::{selection_bounds, DUPLICATE_OFFSET};
 
 /// Value of the `"mindweave"` key that marks a shapes payload.
 pub const CLIPBOARD_MARKER: &str = "shapes";
-/// Payload version this build reads and writes.
-pub const CLIPBOARD_VERSION: u64 = 1;
+/// Payload version this build writes; it reads this and every older one.
+pub const CLIPBOARD_VERSION: u64 = 2;
+/// Oldest payload version this build reads.
+const OLDEST_CLIPBOARD_VERSION: u64 = 1;
+/// Most characters (graphemes) of plain text pasted into a new text box.
+pub const MAX_PASTE_CHARS: usize = 100_000;
 /// Most shapes accepted from one payload.
 pub const MAX_CLIPBOARD_SHAPES: usize = 10_000;
 /// Longest clipboard text parsed, in bytes.
@@ -55,7 +62,7 @@ pub fn to_clipboard(shapes: &[Shape]) -> String {
 }
 
 /// The shapes in clipboard `text`, normalised, or `None` when `text` is
-/// not a version 1 shapes payload, is too large, holds more than
+/// not a shapes payload of a version this build reads, is too large, holds more than
 /// [`MAX_CLIPBOARD_SHAPES`] shapes, or a shape does not parse.
 pub fn from_clipboard(text: &str) -> Option<Vec<Shape>> {
     if text.len() > MAX_CLIPBOARD_BYTES || !looks_like_payload(text) {
@@ -66,7 +73,7 @@ pub fn from_clipboard(text: &str) -> Option<Vec<Shape>> {
     let mut payload: Value = serde_json::from_str(text).ok()?;
     let obj = payload.as_object_mut()?;
     if obj.get("mindweave")?.as_str()? != CLIPBOARD_MARKER
-        || obj.get("version")?.as_u64()? != CLIPBOARD_VERSION
+        || !(OLDEST_CLIPBOARD_VERSION..=CLIPBOARD_VERSION).contains(&obj.get("version")?.as_u64()?)
     {
         return None;
     }
@@ -82,6 +89,24 @@ pub fn from_clipboard(text: &str) -> Option<Vec<Shape>> {
             Some(s)
         })
         .collect()
+}
+
+/// A new text box at `at` holding plain `text` (from another application)
+/// in the default style, cut to its first [`MAX_PASTE_CHARS`] graphemes;
+/// `None` when `text` is blank.
+pub fn plain_text_box(text: &str, at: Pt) -> Option<Shape> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let end = text
+        .grapheme_indices(true)
+        .nth(MAX_PASTE_CHARS)
+        .map_or(text.len(), |(i, _)| i);
+    let mut shape = Shape::new_text_box(at);
+    if let Some(label) = &mut shape.label {
+        label.text.insert(0, &text[..end], &RunStyle::default());
+    }
+    Some(shape)
 }
 
 /// Whether `text` starts like a shapes payload: a JSON object with the
@@ -138,6 +163,7 @@ pub fn duplicate(shapes: &[Shape]) -> Vec<Shape> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::RunStyle;
 
     fn shape(x: f32, y: f32, w: f32, h: f32) -> Shape {
         let def = crate::library::builtin_libraries()[0].shapes[0].clone();
@@ -170,7 +196,7 @@ mod tests {
         let text = to_clipboard(&shapes);
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["mindweave"], "shapes");
-        assert_eq!(v["version"], 1);
+        assert_eq!(v["version"], 2);
         assert_eq!(v["shapes"].as_array().unwrap().len(), 2);
         assert_eq!(from_clipboard(&text), Some(shapes));
         assert_eq!(from_clipboard(&to_clipboard(&[])), Some(vec![]));
@@ -180,8 +206,9 @@ mod tests {
     fn from_clipboard_rejects_foreign_text() {
         let good = to_clipboard(&[shape(0.0, 0.0, 10.0, 10.0)]);
         let truncated = &good[..good.len() / 2];
-        let version_2 = good.replace("\"version\":1", "\"version\":2");
-        assert_ne!(version_2, good);
+        let version_3 = good.replace("\"version\":2", "\"version\":3");
+        assert_ne!(version_3, good);
+        let version_0 = good.replace("\"version\":2", "\"version\":0");
         let other_marker = good.replace("\"mindweave\":\"shapes\"", "\"mindweave\":\"pages\"");
         assert_ne!(other_marker, good);
         for text in [
@@ -195,7 +222,8 @@ mod tests {
             r#"{"mindweave":"shapes","version":"1","shapes":[]}"#,
             r#"{"mindweave":"shapes","version":1,"shapes":[{"id":"nope"}]}"#,
             truncated,
-            &version_2,
+            &version_3,
+            &version_0,
             &other_marker,
         ] {
             assert_eq!(from_clipboard(text), None, "accepted {text:?}");
@@ -203,11 +231,70 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_v2_roundtrip_with_labels() {
+        use crate::shape::{Label, VAlign};
+        use crate::text::{HAlign, RichText, RunStyle};
+        let mut text = RichText::new(RunStyle::default(), HAlign::Right);
+        let red = RunStyle {
+            color: Some("#FF0000".into()),
+            italic: true,
+            ..RunStyle::default()
+        };
+        text.insert(0, "one\ntwo", &red);
+        let mut a = shape(0.0, 0.0, 10.0, 10.0);
+        a.label = Some(Label {
+            text: text.clone(),
+            valign: VAlign::Top,
+        });
+        let mut tb = Shape::new_text_box((3.0, 4.0));
+        tb.label.as_mut().unwrap().text = text;
+        tb.text_box.as_mut().unwrap().auto_width = false;
+        let shapes = vec![a, tb];
+        let payload = to_clipboard(&shapes);
+        assert!(payload.starts_with(r#"{"mindweave":"shapes","version":2,"#));
+        let back = from_clipboard(&payload).unwrap();
+        assert_eq!(back, shapes);
+        assert!(back.iter().all(|s| s.extra.is_empty()));
+        assert!(back[1].is_text_box());
+    }
+
+    #[test]
+    fn clipboard_v1_still_accepted() {
+        let a = shape(1.0, 2.0, 3.0, 4.0);
+        let one = serde_json::to_string(&a).unwrap();
+        let v1 = format!(r#"{{"mindweave":"shapes","version":1,"shapes":[{one}]}}"#);
+        assert_eq!(from_clipboard(&v1), Some(vec![a]));
+    }
+
+    #[test]
+    fn plain_paste_is_capped() {
+        let at = (7.0, 8.0);
+        assert_eq!(plain_text_box("", at), None);
+        assert_eq!(plain_text_box(" \n\t \r\n", at), None);
+        let tb = plain_text_box("Hello\r\nworld", at).unwrap();
+        assert!(tb.is_text_box());
+        assert_eq!((tb.frame.x, tb.frame.y), at);
+        let label = tb.label.as_ref().unwrap();
+        assert_eq!(label.text.plain(), "Hello\nworld");
+        assert_eq!(label.text.style_at(0), RunStyle::default());
+        assert!(tb.text_box.unwrap().auto_width);
+
+        // Capped in graphemes: a letter with a combining accent counts
+        // once and is never split.
+        let unit = "e\u{301}";
+        let long = unit.repeat(MAX_PASTE_CHARS + 5);
+        let tb = plain_text_box(&long, at).unwrap();
+        let text = tb.label.unwrap().text.plain();
+        assert_eq!(text, unit.repeat(MAX_PASTE_CHARS));
+        assert_eq!(MAX_PASTE_CHARS, 100_000);
+    }
+
+    #[test]
     fn from_clipboard_enforces_limits() {
         let one = serde_json::to_string(&shape(0.0, 0.0, 10.0, 10.0)).unwrap();
         let payload = |n: usize| {
             format!(
-                r#"{{"mindweave":"shapes","version":1,"shapes":[{}]}}"#,
+                r#"{{"mindweave":"shapes","version":2,"shapes":[{}]}}"#,
                 vec![one.as_str(); n].join(",")
             )
         };
@@ -229,8 +316,8 @@ mod tests {
         let good = to_clipboard(&[shape(0.0, 0.0, 10.0, 10.0)]);
         assert!(from_clipboard(&format!("\n  {good}  \n")).is_some());
         let reordered = good.replacen(
-            r#"{"mindweave":"shapes","version":1,"#,
-            r#"{"version":1,"mindweave":"shapes","#,
+            r#"{"mindweave":"shapes","version":2,"#,
+            r#"{"version":2,"mindweave":"shapes","#,
             1,
         );
         assert_ne!(reordered, good);
