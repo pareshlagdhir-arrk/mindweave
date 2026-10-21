@@ -26,7 +26,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::*;
-use mindweave_core::geometry::Rect;
+use mindweave_core::geometry::{Pt, Rect};
 use mindweave_core::{
     duplicate, format_hex_color, from_clipboard, is_mindweave_payload, is_newer_payload,
     parse_hex_color, plain_text_box, prepare_paste, to_clipboard, DocumentSession, Shape, Viewport,
@@ -46,7 +46,7 @@ use interaction::{Gesture, Press, NUDGE_FAR_STEP, NUDGE_STEP};
 use shape_paint::GeometryCache;
 use text_edit::{TextCommand, TextEditUi, TextEditor};
 use text_layout::TextLayoutCache;
-use text_paint::GlyphOutlines;
+use text_paint::{canvas_background, text_box_wrap, text_color, GlyphOutlines, TEXT_BOX_PADDING};
 use tool::{Tool, ToolState, BASIC_SHAPES};
 use uuid::Uuid;
 
@@ -832,6 +832,28 @@ impl EditorWindow {
         };
         match paste_plan(&text, &self.visible_canvas()) {
             PastePlan::Shapes(shapes) => self.add_and_select(shapes, window, cx),
+            PastePlan::TextBox(mut shape) => {
+                if let Some(label) = &shape.label {
+                    let canvas = canvas_background(
+                        self.session.page().canvas.background.as_deref(),
+                        cx.theme().background,
+                    );
+                    let size = self.text_layouts.size(
+                        window,
+                        shape.id,
+                        &label.text,
+                        text_box_wrap(&shape),
+                        text_color(&shape, canvas),
+                    );
+                    let view = self.visible_canvas();
+                    centre_text_box(
+                        &mut shape,
+                        size,
+                        (view.x + view.w / 2., view.y + view.h / 2.),
+                    );
+                }
+                self.add_and_select(vec![*shape], window, cx);
+            }
             PastePlan::Newer => window.push_notification(
                 Notification::warning("This was copied from a newer version of Mindweave."),
                 cx,
@@ -943,6 +965,9 @@ fn pruned(
 enum PastePlan {
     /// Adds these shapes.
     Shapes(Vec<Shape>),
+    /// Adds this text box of pasted text, its top-left corner at the view
+    /// centre until [`centre_text_box`] centres it there.
+    TextBox(Box<Shape>),
     /// Refuses a payload from a newer Mindweave.
     Newer,
     Nothing,
@@ -965,9 +990,18 @@ fn paste_plan(text: &str, view: &Rect) -> PastePlan {
     }
     let centre = (view.x + view.w / 2., view.y + view.h / 2.);
     match plain_text_box(text, centre) {
-        Some(shape) => PastePlan::Shapes(vec![shape]),
+        Some(shape) => PastePlan::TextBox(Box::new(shape)),
         None => PastePlan::Nothing,
     }
+}
+
+/// Sizes text box `shape` to fit its text, laid out `text_size` canvas
+/// units big, and centres it on `centre`.
+fn centre_text_box(shape: &mut Shape, (w, h): (f32, f32), centre: Pt) {
+    let (w, h) = (w + 2. * TEXT_BOX_PADDING, h + 2. * TEXT_BOX_PADDING);
+    let f = &mut shape.frame;
+    (f.w, f.h) = (w, h);
+    (f.x, f.y) = (centre.0 - w / 2., centre.1 - h / 2.);
 }
 
 /// Ids of the unlocked shapes in `shapes`, in order; none when their
@@ -1179,9 +1213,9 @@ mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::properties_panel::begin_color_step;
     use super::{
-        clipboard_text, hex_to_hsla, hsla_to_hex, in_text_field, is_plain_space, key_context,
-        letter_spaced, panel_group_id, parse_number, paste_plan, pruned, row_click, selectable_ids,
-        selectable_in_order, GestureOwner, PastePlan, RowClick, SessionGesture,
+        centre_text_box, clipboard_text, hex_to_hsla, hsla_to_hex, in_text_field, is_plain_space,
+        key_context, letter_spaced, panel_group_id, parse_number, paste_plan, pruned, row_click,
+        selectable_ids, selectable_in_order, GestureOwner, PastePlan, RowClick, SessionGesture,
     };
     use gpui_kit::Keystroke;
     use mindweave_core::geometry::Frame;
@@ -1367,12 +1401,16 @@ mod tests {
             "x".repeat(MAX_CLIPBOARD_BYTES)
         );
         assert_eq!(paste_plan(&big, &view), PastePlan::Nothing);
-        // Text from another application: a text box at the view centre.
+        // Text from another application: a text box centred in view once
+        // its text is measured.
         match paste_plan("hello", &view) {
-            PastePlan::Shapes(s) => {
-                assert!(s[0].is_text_box());
-                assert_eq!((s[0].frame.x, s[0].frame.y), (100., 50.));
-                assert_eq!(s[0].label.as_ref().unwrap().text.plain(), "hello");
+            PastePlan::TextBox(mut text_box) => {
+                assert!(text_box.is_text_box());
+                assert_eq!(text_box.label.as_ref().unwrap().text.plain(), "hello");
+                // "hello" laid out 40 × 16, with 4 units of padding around.
+                centre_text_box(&mut text_box, (40., 16.), (100., 50.));
+                let f = text_box.frame;
+                assert_eq!((f.x, f.y, f.w, f.h), (76., 38., 48., 24.));
             }
             other => panic!("{other:?}"),
         }

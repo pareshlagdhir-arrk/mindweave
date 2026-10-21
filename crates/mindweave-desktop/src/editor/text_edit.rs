@@ -16,9 +16,9 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
 use mindweave_core::{
-    from_clipboard, DocumentSession, EditKind, EditSnapshot, FormatError, HAlign, Label, RichText,
-    RunStyle, Shape, StyleChange, StyleSummary, TextHistory, LINE_BREAK, MAX_CLIPBOARD_BYTES,
-    MAX_PASTE_CHARS,
+    is_mindweave_payload, is_newer_payload, DocumentSession, EditKind, EditSnapshot, FormatError,
+    HAlign, Label, RichText, RunStyle, Shape, StyleChange, StyleSummary, TextHistory, LINE_BREAK,
+    MAX_CLIPBOARD_BYTES, MAX_PASTE_CHARS,
 };
 use serde_json::{json, Value};
 use unicode_segmentation::UnicodeSegmentation;
@@ -100,17 +100,24 @@ pub fn parse_text_payload(payload: &str) -> Option<RichText> {
 pub enum Pasted {
     Rich(RichText),
     Plain(String),
+    /// Shapes copied from a newer Mindweave: nothing is pasted, a notice
+    /// says why.
+    Newer,
 }
 
 /// What to paste from a clipboard entry with `metadata` and `text`: the
 /// rich text of a Mindweave payload, else the plain text, except copied
-/// shapes, which are not text.
+/// shapes, which are not text (nor is their JSON when this build cannot
+/// read it: too large, malformed, or from a newer version).
 pub fn pasted(metadata: Option<&str>, text: Option<&str>) -> Option<Pasted> {
     if let Some(rich) = metadata.and_then(parse_text_payload) {
         return Some(Pasted::Rich(rich));
     }
     let text = text?;
-    if from_clipboard(text).is_some() {
+    if is_newer_payload(text) {
+        return Some(Pasted::Newer);
+    }
+    if is_mindweave_payload(text) {
         return None;
     }
     Some(Pasted::Plain(text.to_string()))
@@ -1139,9 +1146,17 @@ impl EditorWindow {
                 else {
                     return;
                 };
+                if content == Pasted::Newer {
+                    window.push_notification(
+                        Notification::warning("This was copied from a newer version of Mindweave."),
+                        cx,
+                    );
+                    return;
+                }
                 self.with_text(window, cx, |ed, text, _| match &content {
                     Pasted::Rich(rich) => ed.paste_rich(text, rich),
                     Pasted::Plain(plain) => ed.paste_plain(text, plain),
+                    Pasted::Newer => {}
                 });
             }
             _ => {
@@ -1866,6 +1881,16 @@ mod tests {
         let shapes = mindweave_core::to_clipboard(&[Shape::new_text_box((0., 0.))]);
         assert_eq!(pasted(None, Some(&shapes)), None);
         assert_eq!(pasted(None, None), None);
+        // Shapes this build cannot read are never pasted as their JSON:
+        // from a newer Mindweave (refused with a notice), or too large.
+        let newer = shapes.replace("\"version\":2", "\"version\":99");
+        assert_ne!(newer, shapes);
+        assert_eq!(pasted(None, Some(&newer)), Some(Pasted::Newer));
+        let big = format!(
+            "{{\"mindweave\":\"shapes\",\"pad\":\"{}\"}}",
+            "x".repeat(mindweave_core::MAX_CLIPBOARD_BYTES)
+        );
+        assert_eq!(pasted(None, Some(&big)), None);
     }
 
     #[test]
