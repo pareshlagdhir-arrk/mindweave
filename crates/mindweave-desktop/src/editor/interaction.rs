@@ -18,6 +18,7 @@ use mindweave_core::{
 use uuid::Uuid;
 
 use super::shape_paint::{shape_geometry, CanvasGeometry};
+use super::text_edit::on_line_label;
 use super::tool::Tool;
 use super::{EditorWindow, GestureOwner};
 use crate::libraries::Libraries;
@@ -822,13 +823,24 @@ impl EditorWindow {
     }
 
     /// The topmost selectable shape at canvas point `at`, hit-tested
-    /// against the outlines cached by the last paint.
+    /// against the outlines cached by the last paint, and for lines and
+    /// arrows also their labels as last laid out.
     pub(super) fn shape_at(&mut self, at: Pt, cx: &mut Context<Self>) -> Option<Uuid> {
         let libs = cx.global::<Libraries>().0.clone();
         let tolerance = HIT_TOLERANCE_PX / self.session.page().viewport.zoom;
         let cache = &mut self.geometry_cache;
+        let layouts = &mut self.text_layouts;
         hit_shape_with(&self.session, tolerance, |shape, tol| {
-            outline_hit(cache.outline(shape, &libs), at, tol)
+            if outline_hit(cache.outline(shape, &libs), at, tol) {
+                return true;
+            }
+            let label_size = shape
+                .label
+                .as_ref()
+                .filter(|_| shape.is_line_like_label())
+                .and_then(|l| layouts.cached(shape.id, &l.text, None))
+                .map(|layout| layout.size());
+            on_line_label(shape, label_size, at)
         })
     }
 

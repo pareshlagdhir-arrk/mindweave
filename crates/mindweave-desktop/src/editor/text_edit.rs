@@ -874,6 +874,20 @@ pub fn target_area(shape: &Shape, size: (f32, f32), frame: &TextFrame) -> Area {
     }
 }
 
+/// Whether canvas point `at` is on `shape`'s line label, laid out `size`
+/// big (`None`: not laid out): a line or arrow is selected and edited from
+/// its label as well as its stroke. Other shapes' labels lie inside their
+/// outline.
+pub fn on_line_label(shape: &Shape, size: Option<(f32, f32)>, at: Pt) -> bool {
+    let has_text = shape.label.as_ref().is_some_and(|l| !l.text.is_empty());
+    match size {
+        Some(size) if shape.is_line_like_label() && has_text => {
+            target_area(shape, size, &text_frame(shape, size)).contains(at)
+        }
+        _ => false,
+    }
+}
+
 /// The target's text placement and click area, as last painted.
 #[derive(Clone, Copy, Debug)]
 struct EditGeometry {
@@ -1516,9 +1530,9 @@ impl EntityInputHandler for EditorWindow {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        byte_to_utf16, enter_target, finish_text_session, parse_text_payload, pasted, press_hit,
-        start_new_text_box, start_text_session, target_area, text_payload, text_target_at,
-        utf16_to_byte, Lines, Motion, Pasted, TextEditor, TextTarget, Toggle, Unit,
+        byte_to_utf16, enter_target, finish_text_session, on_line_label, parse_text_payload,
+        pasted, press_hit, start_new_text_box, start_text_session, target_area, text_payload,
+        text_target_at, utf16_to_byte, Lines, Motion, Pasted, TextEditor, TextTarget, Toggle, Unit,
     };
     use crate::editor::interaction::hit_shape;
     use crate::editor::{GestureOwner, SessionGesture};
@@ -2019,6 +2033,56 @@ mod tests {
                 ..Frame::default()
             },
         )
+    }
+
+    #[test]
+    fn a_line_label_selects_and_edits_its_line() {
+        use crate::editor::interaction::{hit_shape_with, outline_hit};
+        use crate::editor::shape_paint::shape_geometry;
+        let libs = LibraryRegistry::new(builtin_libraries(), None).0;
+        let (_dir, mut s) = session();
+        let def = libs.shape("basic-shapes", "line").unwrap();
+        let mut line = Shape::new(
+            def,
+            "basic-shapes",
+            Frame {
+                x: 0.,
+                y: 300.,
+                w: 100.,
+                h: 0.,
+                ..Frame::default()
+            },
+        );
+        let mut label = Label::new_shape_label();
+        label.text.insert(0, "label", &RunStyle::default());
+        line.label = Some(label);
+        let id = line.id;
+        s.add_shapes(vec![line]);
+        // The label laid out 40 × 16, centred on the line.
+        let hit = |s: &DocumentSession, at| {
+            hit_shape_with(s, 1., |shape, tol| {
+                outline_hit(&shape_geometry(shape, &libs), at, tol)
+                    || on_line_label(shape, Some((40., 16.)), at)
+            })
+        };
+        // Off the stroke but on the label (and its background patch).
+        assert_eq!(hit(&s, (50., 308.)), Some(id));
+        assert_eq!(hit(&s, (29., 291.)), Some(id));
+        assert_eq!(
+            text_target_at(hit(&s, (50., 308.)), (50., 308.)),
+            TextTarget::Existing(id)
+        );
+        // Past the label: nothing.
+        assert_eq!(hit(&s, (50., 320.)), None);
+        assert_eq!(hit(&s, (20., 308.)), None);
+        // Without a layout, or without text, only the stroke counts.
+        let shape = s.find_shape(id).unwrap().clone();
+        assert!(!on_line_label(&shape, None, (50., 308.)));
+        s.update_shapes(&[id], |sh| sh.label = Some(Label::new_shape_label()));
+        assert_eq!(hit(&s, (50., 308.)), None);
+        // Other shapes' labels are inside their outline already.
+        let text_box = Shape::new_text_box((0., 0.));
+        assert!(!on_line_label(&text_box, Some((40., 16.)), (2., 2.)));
     }
 
     #[test]
