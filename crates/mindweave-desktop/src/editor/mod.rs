@@ -281,10 +281,19 @@ impl EditorWindow {
 
     /// Applies `f` to the session, redraws, and refreshes the window title
     /// (on the next render). The selection is cleared when the active page
-    /// or layer changes, and otherwise loses shapes no longer there.
+    /// or layer changes, and otherwise loses shapes no longer there. Any
+    /// edit but a Text section size step first ends a run of size steps,
+    /// so it is an undo step of its own.
     pub fn update_session(&mut self, f: impl FnOnce(&mut DocumentSession), cx: &mut Context<Self>) {
         let scope = self.selection_scope();
-        f(&mut self.session);
+        let text = &mut self.properties.text;
+        text_properties::edit_session(
+            &mut text.size_steps,
+            &mut self.session_gesture,
+            &mut self.session,
+            text.size_step_edit,
+            f,
+        );
         self.prune_selection(scope);
         cx.notify();
     }

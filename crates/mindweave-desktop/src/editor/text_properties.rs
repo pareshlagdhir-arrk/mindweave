@@ -34,7 +34,7 @@ use super::properties_panel::{field_row, FIELD_GAP, SWATCH_SIZE};
 use super::shape_properties::{format_number, SECTION_GAP};
 use super::text_edit::{TextEditor, Toggle};
 use super::text_layout::refresh_installed_fonts;
-use super::{hex_to_hsla, parse_number, section_label, EditorWindow, GestureOwner};
+use super::{hex_to_hsla, parse_number, section_label, EditorWindow, GestureOwner, SessionGesture};
 use crate::app_state::AppState;
 use crate::libraries::lucide_icon_path;
 
@@ -199,6 +199,79 @@ pub(super) fn size_display(size: Option<&Mixed<f32>>) -> (Option<f32>, &'static 
     }
 }
 
+/// Commits size field text `text`, which the user `typed` (or not) over
+/// `shown`: `apply` gets the size to apply (`None`: nothing to apply) and
+/// returns the text's size afterwards. Returns what the field must show
+/// then, even while it keeps focus (the per-frame sync leaves a focused
+/// field alone).
+#[must_use = "the size field must show the result"]
+pub(super) fn commit_size(
+    text: &str,
+    typed: bool,
+    shown: Option<f32>,
+    apply: impl FnOnce(Option<f32>) -> Option<Mixed<f32>>,
+) -> (Option<f32>, &'static str) {
+    let size = typed.then(|| typed_size(text, shown)).flatten();
+    size_display(apply(size).as_ref())
+}
+
+/// The undo step that groups size steps (wheel, ↑ and ↓) made while not
+/// editing: the session's gesture, held by [`GestureOwner::Size`].
+#[derive(Debug, Default)]
+pub(super) struct SizeSteps {
+    /// Whether the group holds the gesture.
+    open: bool,
+    /// Counts steps, so only the last one's idle timer ends the group.
+    count: u64,
+}
+
+impl SizeSteps {
+    /// Opens the group unless it is open (or another gesture is), and
+    /// counts a step; returns the step's number while the group is open.
+    pub(super) fn begin(
+        &mut self,
+        gesture: &mut SessionGesture,
+        session: &mut DocumentSession,
+    ) -> Option<u64> {
+        if !self.open {
+            self.open = gesture.begin(session, GestureOwner::Size);
+        }
+        self.open.then(|| {
+            self.count += 1;
+            self.count
+        })
+    }
+
+    /// Ends the group if it is open; returns whether it was.
+    pub(super) fn end(
+        &mut self,
+        gesture: &mut SessionGesture,
+        session: &mut DocumentSession,
+    ) -> bool {
+        std::mem::take(&mut self.open) && gesture.end(session, GestureOwner::Size)
+    }
+
+    /// Whether step number `count` is still the last one.
+    fn is_last(&self, count: u64) -> bool {
+        self.open && self.count == count
+    }
+}
+
+/// Applies edit `f` to `session`. Any edit but a size step (`size_step`)
+/// first ends the size steps' group, so it is an undo step of its own.
+pub(super) fn edit_session(
+    steps: &mut SizeSteps,
+    gesture: &mut SessionGesture,
+    session: &mut DocumentSession,
+    size_step: bool,
+    f: impl FnOnce(&mut DocumentSession),
+) {
+    if !size_step {
+        steps.end(gesture, session);
+    }
+    f(session);
+}
+
 /// The size to apply from size field text `text` when it showed `shown`
 /// (`None`: "Mixed"): a number, clamped to the allowed sizes, unless it is
 /// what was shown.
@@ -339,10 +412,10 @@ pub(super) struct TextFields {
     palette: Entity<ColorPalette>,
     /// The palette has previewed a colour drag since it opened.
     previewing: bool,
-    /// The section holds the session's gesture for size steps.
-    size_steps: bool,
-    /// Counts size steps, so only the last one's idle timer ends them.
-    size_step_count: u64,
+    /// The undo step grouping size steps.
+    pub(super) size_steps: SizeSteps,
+    /// A size step is being applied (see [`edit_session`]).
+    pub(super) size_step_edit: bool,
     /// The size field had focus at the last sync, so it was not updated.
     size_left_alone: bool,
     fonts: Entity<FontPicker>,
@@ -400,8 +473,8 @@ impl TextFields {
             wheel_carry: 0.,
             palette,
             previewing: false,
-            size_steps: false,
-            size_step_count: 0,
+            size_steps: SizeSteps::default(),
+            size_step_edit: false,
             size_left_alone: false,
             fonts,
             summary: None,
@@ -544,18 +617,13 @@ impl EditorWindow {
         let text = fields.size.read(cx).value().to_string();
         let shows = fields.size_shows;
         self.properties.text.size_typed = false;
-        if let Some(size) = typed.then(|| typed_size(&text, shows)).flatten() {
-            if self.text_summary().is_some() {
-                self.apply_text_change(
-                    TextChange::Style(StyleChange::Size(size)),
-                    false,
-                    window,
-                    cx,
-                );
+        let (size, placeholder) = commit_size(&text, typed, shows, |size| {
+            if let Some(size) = size.filter(|_| self.text_summary().is_some()) {
+                let change = TextChange::Style(StyleChange::Size(size));
+                self.apply_text_change(change, false, window, cx);
             }
-        }
-        let summary = self.text_summary();
-        let (size, placeholder) = size_display(summary.as_ref().map(|s| &s.style.size));
+            Some(self.text_summary()?.style.size)
+        });
         self.properties
             .text
             .show_size(size, placeholder, window, cx);
@@ -587,12 +655,14 @@ impl EditorWindow {
         };
         let size = step_size(base, steps);
         self.begin_size_steps(window, cx);
+        self.properties.text.size_step_edit = true;
         self.apply_text_change(
             TextChange::Style(StyleChange::Size(size)),
             false,
             window,
             cx,
         );
+        self.properties.text.size_step_edit = false;
         let fields = &mut self.properties.text;
         fields.show_size(Some(size), "", window, cx);
         // Steps arriving before the next sync go on from this size.
@@ -608,21 +678,18 @@ impl EditorWindow {
         if self.text_edit.is_some() {
             return;
         }
-        let fields = &mut self.properties.text;
-        if !fields.size_steps {
-            fields.size_steps = self
-                .session_gesture
-                .begin(&mut self.session, GestureOwner::Size);
-        }
-        if !self.properties.text.size_steps {
+        let Some(count) = self
+            .properties
+            .text
+            .size_steps
+            .begin(&mut self.session_gesture, &mut self.session)
+        else {
             return;
-        }
-        self.properties.text.size_step_count += 1;
-        let count = self.properties.text.size_step_count;
+        };
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(SIZE_STEPS_IDLE).await;
             this.update(cx, |this, cx| {
-                if this.properties.text.size_step_count == count {
+                if this.properties.text.size_steps.is_last(count) {
                     this.finish_size_steps(cx);
                 }
             })
@@ -634,10 +701,10 @@ impl EditorWindow {
     /// Ends the undo step of size steps, if one is open, without
     /// notifying (see [`Self::finish_size_steps`]).
     pub(super) fn end_size_steps(&mut self) -> bool {
-        std::mem::take(&mut self.properties.text.size_steps)
-            && self
-                .session_gesture
-                .end(&mut self.session, GestureOwner::Size)
+        self.properties
+            .text
+            .size_steps
+            .end(&mut self.session_gesture, &mut self.session)
     }
 
     /// Ends the undo step of size steps, if one is open.
@@ -1281,8 +1348,9 @@ impl Render for FontPicker {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        apply_to_objects, filter_fonts, font_rows, merge_summaries, size_display, step_size,
-        summarize_objects, typed_size, wheel_steps, TextChange, SIZE_PRESETS, WHEEL_STEP_PX,
+        apply_to_objects, commit_size, edit_session, filter_fonts, font_rows, merge_summaries,
+        size_display, step_size, summarize_objects, typed_size, wheel_steps, SizeSteps, TextChange,
+        SIZE_PRESETS, WHEEL_STEP_PX,
     };
     use crate::editor::text_edit::Toggle;
     use crate::editor::{GestureOwner, SessionGesture};
@@ -1509,6 +1577,72 @@ mod tests {
         assert_eq!(size(&s), 19.);
         assert!(s.undo());
         assert_eq!(size(&s), 16.);
+    }
+
+    #[test]
+    fn a_commit_tells_the_field_what_to_show() {
+        // "5000" applies 1000 and the field shows 1000.
+        let mut applied = None;
+        let shown = commit_size("5000", true, Some(16.), |size| {
+            applied = size;
+            Some(Mixed::Same(size.unwrap_or(16.)))
+        });
+        assert_eq!(applied, Some(1000.));
+        assert_eq!(shown, (Some(1000.), ""));
+        // "abc" applies nothing and the field goes back to the size.
+        let shown = commit_size("abc", true, Some(16.), |size| {
+            assert_eq!(size, None);
+            Some(Mixed::Same(16.))
+        });
+        assert_eq!(shown, (Some(16.), ""));
+        // Text only shown, not typed, is never applied.
+        let shown = commit_size("20", false, Some(16.), |size| {
+            assert_eq!(size, None);
+            Some(Mixed::Mixed)
+        });
+        assert_eq!(shown, (None, "Mixed"));
+    }
+
+    #[test]
+    fn an_unrelated_edit_ends_the_size_steps_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("u.mindweave")).unwrap();
+        let boxed = text_box("ab", RunStyle::default());
+        let ids = [boxed.id];
+        s.add_shapes(vec![boxed.clone()]);
+        let style = |s: &DocumentSession| {
+            s.find_shape(boxed.id)
+                .unwrap()
+                .label
+                .as_ref()
+                .unwrap()
+                .text
+                .style_at(1)
+        };
+        let mut g = SessionGesture::default();
+        let mut steps = SizeSteps::default();
+        let size_to = |v: f32| {
+            move |s: &mut DocumentSession| {
+                apply_to_objects(s, &ids, &TextChange::Style(StyleChange::Size(v)))
+            }
+        };
+        // Two ↑ clicks: one group.
+        for v in [17., 18.] {
+            assert!(steps.begin(&mut g, &mut s).is_some());
+            edit_session(&mut steps, &mut g, &mut s, true, size_to(v));
+        }
+        // Then Bold, within the idle time: its own step.
+        edit_session(&mut steps, &mut g, &mut s, false, |s| {
+            apply_to_objects(s, &ids, &TextChange::Toggle(Toggle::Bold))
+        });
+        assert!(style(&s).bold && style(&s).size == 18.);
+        assert!(s.undo());
+        assert!(!style(&s).bold);
+        assert_eq!(style(&s).size, 18.);
+        assert!(s.undo());
+        assert_eq!(style(&s).size, 16.);
+        // Nothing is left holding the gesture.
+        assert!(g.begin(&mut s, GestureOwner::Pointer));
     }
 
     #[test]
