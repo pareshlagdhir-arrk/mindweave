@@ -75,7 +75,7 @@ Diagrams need words. Users must be able to put text anywhere on the canvas and i
 
 - Text boxes carry the same `Style` as shapes (fill, stroke, stroke width, opacity; default no fill, no stroke, opacity 100%), drawn as the box background/border behind the text with 4-unit padding, so the Style section works for mixed selections.
 - Sidebar changes applied to whole selected objects (not editing) change only that one property in every run of their text (e.g. setting the font keeps per-word bold); selected shapes without a label are skipped. No separate object-level default style.
-- Text boxes are a new object kind next to library shapes (not a "text" library shape), because they size from content and have no geometry.
+- Text boxes are stored as a built-in object kind inside the existing shape list (a `Shape` with the reserved library id `mindweave` and shape id `text`, its text in the same `label` field shapes use, plus `auto_width`). They size from content and have no outline geometry, but reusing the shape list means selection, transforms, layers, clipboard and undo already work for them. Their `frame.h` is derived from layout and is not part of the dirty comparison.
 - Rich text stored as paragraphs → runs (structural, not HTML).
 - Default text style: app UI font family (system default via gpui), 16 canvas units, Auto colour (contrast), left aligned; shape labels default centre/middle, 14 units.
 - Typing undo inside an edit session groups by word; the committed session is one document undo step.
