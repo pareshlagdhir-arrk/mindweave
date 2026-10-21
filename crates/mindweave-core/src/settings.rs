@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::color::normalize_hex_color;
+use crate::line::LineProps;
+use crate::shape::{Shape, Style};
 
 pub const MAX_RECENT: usize = 20;
 /// How many recently picked colours the colour palette remembers.
@@ -41,6 +43,12 @@ pub struct AppSettings {
     /// Font families picked in the Text section's font list, newest
     /// first; at most [`MAX_RECENT_FONTS`].
     pub recent_fonts: Vec<String>,
+    /// The style last set on a shape in Properties, given to new shapes.
+    pub shape_style: Option<Style>,
+    /// The style and line properties last set on a line, given to new
+    /// lines (their ends are never attached).
+    pub line_style: Option<Style>,
+    pub line_props: Option<LineProps>,
 }
 
 impl Default for AppSettings {
@@ -54,6 +62,9 @@ impl Default for AppSettings {
             show_properties: true,
             recent_colors: Vec::new(),
             recent_fonts: Vec::new(),
+            shape_style: None,
+            line_style: None,
+            line_props: None,
         }
     }
 }
@@ -63,6 +74,61 @@ fn normalized(path: &Path) -> PathBuf {
 }
 
 impl AppSettings {
+    /// Gives a new `shape` the style last set on its kind: lines take the
+    /// remembered line style and properties, other library shapes the
+    /// remembered shape style. Text boxes and images keep their own.
+    pub fn apply_remembered_style(&self, shape: &mut Shape) {
+        if shape.is_text_box() || shape.is_image() {
+            return;
+        }
+        if shape.is_line() {
+            if let Some(style) = &self.line_style {
+                shape.style = style.clone();
+            }
+            if let (Some(remembered), Some(props)) = (&self.line_props, shape.line.as_mut()) {
+                *props = LineProps {
+                    start: None,
+                    end: None,
+                    vertical: props.vertical,
+                    ..remembered.clone()
+                };
+            }
+        } else if let Some(style) = &self.shape_style {
+            shape.style = style.clone();
+        }
+        shape.normalize();
+    }
+
+    /// Remembers `shape`'s style for new shapes of its kind (see
+    /// [`Self::apply_remembered_style`]). Returns whether anything changed.
+    pub fn remember_style(&mut self, shape: &Shape) -> bool {
+        if shape.is_text_box() || shape.is_image() {
+            return false;
+        }
+        let before = (
+            self.shape_style.clone(),
+            self.line_style.clone(),
+            self.line_props.clone(),
+        );
+        if shape.is_line() {
+            self.line_style = Some(shape.style.clone());
+            self.line_props = shape.line.clone().map(|p| LineProps {
+                start: None,
+                end: None,
+                vertical: false,
+                ..p
+            });
+        } else {
+            self.shape_style = Some(shape.style.clone());
+        }
+        before
+            != (
+                self.shape_style.clone(),
+                self.line_style.clone(),
+                self.line_props.clone(),
+            )
+    }
+
     /// Moves or inserts `path` at the front of the recent list.
     pub fn touch_recent(&mut self, path: &Path, now: u64) {
         let key = normalized(path);
@@ -161,6 +227,54 @@ pub fn save_settings(s: &AppSettings, path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_shapes_take_the_style_last_set_on_their_kind() {
+        let libs = crate::library::builtin_libraries();
+        let new = |id: &str| {
+            Shape::new(
+                libs[0].shape(id).unwrap(),
+                "basic-shapes",
+                crate::geometry::Frame::default(),
+            )
+        };
+        let mut settings = AppSettings::default();
+        // Nothing remembered: the library's theme colours.
+        let mut r = new("rectangle");
+        settings.apply_remembered_style(&mut r);
+        assert_eq!(r.style.fill.as_deref(), Some("auto"));
+        assert_eq!(r.style.stroke.as_deref(), Some("auto"));
+
+        let mut red = new("ellipse");
+        red.style.fill = Some("#FF0000".into());
+        red.style.stroke_width = 4.0;
+        assert!(settings.remember_style(&red));
+        assert!(!settings.remember_style(&red));
+        let mut line = new("line");
+        line.style.dash = crate::line::LineDash::Dashed;
+        let props = line.line.as_mut().unwrap();
+        props.end_head = crate::line::ArrowHead::Triangle;
+        props.start = Some(uuid::Uuid::new_v4());
+        settings.remember_style(&line);
+
+        let mut star = new("star");
+        settings.apply_remembered_style(&mut star);
+        assert_eq!(star.style, red.style);
+        let mut l = new("line");
+        settings.apply_remembered_style(&mut l);
+        assert_eq!(l.style.dash, crate::line::LineDash::Dashed);
+        let p = l.line.unwrap();
+        assert_eq!(p.end_head, crate::line::ArrowHead::Triangle);
+        assert_eq!(p.start, None);
+        // Text boxes keep their own style and are never remembered.
+        let mut t = Shape::new_text_box((0.0, 0.0));
+        assert!(!settings.remember_style(&t));
+        settings.apply_remembered_style(&mut t);
+        assert_eq!(t.style, Style::default());
+        // Settings without the new fields still load.
+        let old: AppSettings = serde_json::from_str(r#"{"theme":"x"}"#).unwrap();
+        assert_eq!(old.shape_style, None);
+    }
 
     fn touch(dir: &std::path::Path, name: &str) -> PathBuf {
         let p = dir.join(name);

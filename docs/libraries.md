@@ -130,8 +130,8 @@ A shape needs exactly one of `primitive` and `svg`.
 
 | Field          | Type   | Default     | Meaning |
 |----------------|--------|-------------|---------|
-| `fill`         | string | `"#F5F5F5"` | Fill colour as `"#RRGGBB"`, or `"none"` for no fill. |
-| `stroke`       | string | `"#7F8EA3"` | Outline colour as `"#RRGGBB"`, or `"none"` for no outline. |
+| `fill`         | string | `"auto"` | Fill colour as `"#RRGGBB"`, `"auto"` for the canvas colour of the current theme, or `"none"` for no fill. |
+| `stroke`       | string | `"auto"` | Outline colour as `"#RRGGBB"`, `"auto"` for the theme's text colour (white in dark themes, dark in light ones), or `"none"` for no outline. |
 | `stroke_width` | number | `1.5`       | Outline width in canvas units, from 0 to 100. |
 | `opacity`      | number | `1.0`       | From 0 (invisible) to 1 (opaque). |
 
@@ -269,7 +269,7 @@ name = "Rectangle"
 icon = "square"
 default_size = [120, 80]
 primitive = "rect"
-style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 
 [[shape.param]]
 key = "corner_radius"
@@ -285,7 +285,7 @@ name = "Ellipse"
 icon = "circle"
 default_size = [120, 80]
 primitive = "ellipse"
-style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 
 [[shape]]
 id = "line"
@@ -293,7 +293,7 @@ name = "Line"
 icon = "minus"
 default_size = [120, 60]
 primitive = "line"
-style = { fill = "none", stroke = "#7F8EA3", stroke_width = 2, opacity = 1.0 }
+style = { fill = "none", stroke = "auto", stroke_width = 2, opacity = 1.0 }
 
 [[shape]]
 id = "triangle"
@@ -301,7 +301,7 @@ name = "Triangle"
 icon = "triangle"
 default_size = [120, 80]
 primitive = "polygon"
-style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 
 [[shape.param]]
 key = "sides"
@@ -317,7 +317,7 @@ name = "Diamond"
 icon = "diamond"
 default_size = [120, 80]
 svg = "shapes/diamond.svg"
-style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 
 [[shape]]
 id = "star"
@@ -325,7 +325,7 @@ name = "Star"
 icon = "star"
 default_size = [120, 80]
 primitive = "star"
-style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 
 [[shape.param]]
 key = "points"

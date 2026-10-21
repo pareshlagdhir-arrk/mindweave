@@ -11,7 +11,7 @@ use gpui_kit::component::{TitleBar, WindowExt as _};
 use gpui_kit::*;
 use mindweave_core::{
     load_settings, rename_document, save_settings, settings_path, AppSettings, DocumentSession,
-    FormatError, WindowSize,
+    FormatError, Shape, WindowSize,
 };
 
 use crate::actions::{self, NewFile, OpenFile, Quit, ShowDashboard, ToggleThemePicker};
@@ -124,6 +124,34 @@ impl AppState {
             );
         }
         cx.set_menus(native_menus(cx));
+    }
+
+    /// Remembers the style of each kind among `shapes` (the first line and
+    /// the first other shape) for new shapes, saving the settings when it
+    /// changed. Menus are left alone: nothing in them depends on it.
+    pub fn remember_styles<'a>(cx: &mut App, shapes: impl IntoIterator<Item = &'a Shape>) {
+        let state = cx.global_mut::<AppState>();
+        let (mut line, mut other) = (false, false);
+        let mut changed = false;
+        for shape in shapes {
+            let kind = if shape.is_line() {
+                &mut line
+            } else {
+                &mut other
+            };
+            if !*kind {
+                *kind = true;
+                changed |= state.settings.remember_style(shape);
+            }
+        }
+        if changed {
+            if let Err(err) = save_settings(&state.settings, &state.settings_path) {
+                eprintln!(
+                    "Mindweave: could not save settings to {}: {err}",
+                    state.settings_path.display()
+                );
+            }
+        }
     }
 
     /// Asks where to create a new document, creates it, and opens it.

@@ -13,6 +13,7 @@ use gpui_kit::*;
 use mindweave_core::geometry::{Frame, Rect};
 use mindweave_core::{
     resize, selection_bounds, translate, DocumentSession, Handle, LibraryRegistry, ParamDef, Shape,
+    AUTO_COLOR,
 };
 use uuid::Uuid;
 
@@ -684,6 +685,9 @@ impl EditorWindow {
             if let Some(value) = parse_number(&text) {
                 let libs = cx.global::<Libraries>().0.clone();
                 self.update_session(|s| apply_number(s, &ids, kind, value, &libs), cx);
+                if matches!(kind, NumberKind::StrokeWidth | NumberKind::Opacity) {
+                    self.remember_selection_style(cx);
+                }
             }
         }
         let text = shown_text(self.summarize_shapes(&ids, cx).as_ref(), kind);
@@ -728,6 +732,7 @@ impl EditorWindow {
             |s| s.update_shapes(&ids, |shape| *which.slot(shape) = color.clone()),
             cx,
         );
+        self.remember_selection_style(cx);
     }
 }
 
@@ -942,16 +947,30 @@ fn color_row(
 ) -> AnyElement {
     let field = editor.properties.shape.color(which);
     let value = which.of(summary);
+    let auto = matches!(value, Value::Same(Some(hex)) if hex == AUTO_COLOR);
     let (label, set) = match value {
+        Value::Same(Some(_)) if auto => ("Auto".to_string(), false),
         Value::Same(Some(hex)) => (hex.clone(), true),
         Value::Same(None) => ("None".to_string(), false),
         Value::Mixed => ("Mixed".to_string(), false),
     };
     let removable = *value != Value::Same(None);
     let remove = div()
-        .w(px(RESET_WIDTH))
+        .w(px(RESET_WIDTH * 2.))
         .flex()
         .justify_end()
+        .when(!auto, |slot| {
+            slot.child(
+                Button::new(("auto-style-color", which as usize))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::empty().path(lucide_icon_path("sun-moon", cx)))
+                    .tooltip("Use Theme Colour")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_style_color(which, Some(AUTO_COLOR.to_string()), cx);
+                    })),
+            )
+        })
         .when(removable, |slot| {
             slot.child(
                 Button::new(("no-style-color", which as usize))

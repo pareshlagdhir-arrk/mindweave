@@ -636,6 +636,17 @@ impl EditorWindow {
         self.arrange(Arrange::ToBack, window, cx);
     }
 
+    /// Remembers the selection's style for new shapes, after a style edit
+    /// in Properties.
+    pub(super) fn remember_selection_style(&mut self, cx: &mut Context<Self>) {
+        let shapes: Vec<Shape> = self
+            .selection
+            .iter()
+            .filter_map(|id| self.session.find_shape(*id).cloned())
+            .collect();
+        AppState::remember_styles(cx, &shapes);
+    }
+
     /// A right press at canvas point `at`: a shape (its whole group)
     /// becomes the selection unless it is already selected, so the menu
     /// acts on it; empty canvas clears the selection.

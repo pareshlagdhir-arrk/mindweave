@@ -18,6 +18,7 @@ use super::interaction::{
 use super::shape_gallery;
 use super::shape_paint::{
     paint_highlight, paint_line_ends, paint_marquee, paint_preview, paint_selection, paint_shapes,
+    AutoColors,
 };
 use super::text_paint::{
     auto_color, canvas_background, text_background, text_box_wrap, TextPaint, TEXT_BOX_PADDING,
@@ -402,6 +403,7 @@ impl EditorWindow {
         self.layout_text_boxes(window, canvas, cx);
         let page = self.session.page();
         let viewport = page.viewport;
+        let auto = AutoColors::new(page.canvas.background.as_deref(), cx);
         let mut text = TextPaint {
             layouts: &mut self.text_layouts,
             glyphs: &mut self.glyph_outlines,
@@ -420,7 +422,14 @@ impl EditorWindow {
         );
         self.paint_text_edit(bounds, window, cx);
         self.text_layouts.end_frame();
-        if let Some(shape) = self.placement_preview(&libs) {
+        let preview = match self.gesture {
+            Gesture::Placing { .. } => {
+                let remembered = &cx.global::<crate::app_state::AppState>().settings;
+                self.placement_preview(&libs, remembered)
+            }
+            _ => None,
+        };
+        if let Some(shape) = preview {
             paint_preview(
                 window,
                 cx,
@@ -429,6 +438,7 @@ impl EditorWindow {
                 &libs,
                 &viewport,
                 PREVIEW_OPACITY,
+                auto,
             );
         }
         let accent = cx.theme().primary;

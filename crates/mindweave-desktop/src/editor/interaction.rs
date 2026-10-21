@@ -23,7 +23,9 @@ use super::shape_paint::{shape_geometry, CanvasGeometry};
 use super::text_edit::on_line_label;
 use super::tool::Tool;
 use super::{EditorWindow, GestureOwner};
+use crate::app_state::AppState;
 use crate::libraries::Libraries;
+use mindweave_core::AppSettings;
 
 /// Opacity of the shape previewed while placing, times its own.
 pub const PREVIEW_OPACITY: f32 = 0.6;
@@ -532,6 +534,9 @@ impl EditorWindow {
         let Some(mut shape) = placement_shape(&gesture, &cx.global::<Libraries>().0) else {
             return;
         };
+        cx.global::<AppState>()
+            .settings
+            .apply_remembered_style(&mut shape);
         attach_ends(&mut shape, ends);
         let id = shape.id;
         self.update_session(|s| s.add_shapes(vec![shape]), cx);
@@ -973,8 +978,13 @@ impl EditorWindow {
 
     /// The shape being placed, for the preview: a line already meets the
     /// shapes it will attach to.
-    pub(super) fn placement_preview(&self, libs: &LibraryRegistry) -> Option<Shape> {
+    pub(super) fn placement_preview(
+        &self,
+        libs: &LibraryRegistry,
+        remembered: &AppSettings,
+    ) -> Option<Shape> {
         let mut shape = preview_shape(&self.gesture, libs)?;
+        remembered.apply_remembered_style(&mut shape);
         attach_ends(&mut shape, self.line_ends);
         if let Some(props) = shape.line.as_mut() {
             let target = |id: Option<Uuid>| {

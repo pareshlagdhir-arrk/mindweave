@@ -192,6 +192,7 @@ fn dropdown_row(
                                     |s| s.update_shapes(&ids, |shape| field.apply(shape, &choice)),
                                     cx,
                                 );
+                                this.remember_selection_style(cx);
                             })
                             .ok();
                         }),
@@ -240,6 +241,7 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> O
                 },
                 cx,
             );
+            this.remember_selection_style(cx);
         }));
     Some(
         div()

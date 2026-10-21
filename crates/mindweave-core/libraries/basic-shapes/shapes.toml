@@ -4,7 +4,7 @@ name = "Rectangle"
 icon = "square"
 default_size = [120, 80]
 primitive = "rect"
-style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 
 [[shape.param]]
 key = "corner_radius"
@@ -20,7 +20,7 @@ name = "Ellipse"
 icon = "circle"
 default_size = [120, 80]
 primitive = "ellipse"
-style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 
 [[shape]]
 id = "line"
@@ -28,7 +28,7 @@ name = "Line"
 icon = "minus"
 default_size = [120, 60]
 primitive = "line"
-style = { fill = "none", stroke = "#7F8EA3", stroke_width = 2, opacity = 1.0 }
+style = { fill = "none", stroke = "auto", stroke_width = 2, opacity = 1.0 }
 
 [[shape]]
 id = "triangle"
@@ -36,7 +36,7 @@ name = "Triangle"
 icon = "triangle"
 default_size = [120, 80]
 primitive = "polygon"
-style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 
 [[shape.param]]
 key = "sides"
@@ -52,7 +52,7 @@ name = "Diamond"
 icon = "diamond"
 default_size = [120, 80]
 svg = "shapes/diamond.svg"
-style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 
 [[shape]]
 id = "star"
@@ -60,7 +60,7 @@ name = "Star"
 icon = "star"
 default_size = [120, 80]
 primitive = "star"
-style = { fill = "#F5F5F5", stroke = "#7F8EA3", stroke_width = 1.5, opacity = 1.0 }
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 
 [[shape.param]]
 key = "points"

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::color::normalize_hex_color;
+use crate::color::normalize_style_color;
 use crate::geometry::{Frame, Pt};
 use crate::image::{ImageData, IMAGE_SHAPE};
 use crate::library::ShapeDef;
@@ -325,7 +325,7 @@ impl Shape {
             1.0
         };
         for c in [&mut s.fill, &mut s.stroke] {
-            *c = c.as_deref().and_then(normalize_hex_color);
+            *c = c.as_deref().and_then(normalize_style_color);
         }
         if self.is_text_box() {
             self.text_box.get_or_insert_with(TextBoxProps::default);
@@ -480,7 +480,7 @@ mod tests {
         );
         assert_eq!(s.library, "basic-shapes");
         assert_eq!(s.shape, "rectangle");
-        assert_eq!(s.style.fill.as_deref(), Some("#F5F5F5"));
+        assert_eq!(s.style.fill.as_deref(), Some("auto"));
         assert_eq!(s.param("corner_radius"), Some(0.0));
         assert_eq!((s.frame.w, s.frame.h), (120.0, 80.0));
     }

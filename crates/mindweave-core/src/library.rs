@@ -19,7 +19,7 @@ use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 use toml::{Table, Value};
 
-use crate::color::normalize_hex_color;
+use crate::color::{normalize_style_color, AUTO_COLOR};
 use crate::geometry::{primitive_geometry, scale_unit, Geometry, Primitive};
 use crate::svg::parse_outline;
 
@@ -61,8 +61,8 @@ const MAX_NOTICE_WARNINGS: usize = 5;
 
 const DEFAULT_ICON: &str = "shapes";
 const DEFAULT_SIZE: (f32, f32) = (120.0, 80.0);
-const DEFAULT_FILL: &str = "#F5F5F5";
-const DEFAULT_STROKE: &str = "#7F8EA3";
+const DEFAULT_FILL: &str = AUTO_COLOR;
+const DEFAULT_STROKE: &str = AUTO_COLOR;
 const DEFAULT_STROKE_WIDTH: f32 = 1.5;
 const DEFAULT_OPACITY: f32 = 1.0;
 
@@ -805,9 +805,9 @@ fn load_style(table: &Table, context: &str, report: &mut LoadReport) -> StyleDef
     let mut colour = |key: &str, default: &str| match table.get(key) {
         None => Some(default.to_owned()),
         Some(Value::String(s)) if s.trim() == "none" => None,
-        Some(Value::String(s)) => normalize_hex_color(s).or_else(|| {
+        Some(Value::String(s)) => normalize_style_color(s).or_else(|| {
             report.notices.push(format!(
-                "{context}: `{key}` \"{}\" is not a #RRGGBB colour; no {key} is used",
+                "{context}: `{key}` \"{}\" is not a #RRGGBB colour or \"auto\"; no {key} is used",
                 quote(s)
             ));
             None
@@ -1181,8 +1181,8 @@ version = "1.0.0"
         assert_eq!(rect.source, ShapeSource::Primitive(Primitive::Rect));
         assert_eq!(rect.default_size, (120.0, 80.0));
         assert_eq!(rect.style, StyleDefaults::default());
-        assert_eq!(rect.style.fill.as_deref(), Some("#F5F5F5"));
-        assert_eq!(rect.style.stroke.as_deref(), Some("#7F8EA3"));
+        assert_eq!(rect.style.fill.as_deref(), Some("auto"));
+        assert_eq!(rect.style.stroke.as_deref(), Some("auto"));
         assert_eq!(
             rect.params,
             [ParamDef {
@@ -1199,7 +1199,7 @@ version = "1.0.0"
         assert_eq!(line.default_size, (120.0, 60.0));
         let line_style = StyleDefaults {
             fill: None,
-            stroke: Some("#7F8EA3".into()),
+            stroke: Some("auto".into()),
             stroke_width: 2.0,
             opacity: 1.0,
         };

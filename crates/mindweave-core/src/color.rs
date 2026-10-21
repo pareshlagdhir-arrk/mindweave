@@ -23,6 +23,25 @@ pub fn normalize_hex_color(text: &str) -> Option<String> {
     parse_hex_color(text).map(format_hex_color)
 }
 
+/// A shape colour that follows the theme: fill in the canvas colour,
+/// stroke in the theme's text colour.
+pub const AUTO_COLOR: &str = "auto";
+
+/// A style colour (`#RRGGBB` or [`AUTO_COLOR`]) normalised, or `None` when
+/// it is neither.
+pub fn normalize_style_color(text: &str) -> Option<String> {
+    if text.trim().eq_ignore_ascii_case(AUTO_COLOR) {
+        Some(AUTO_COLOR.to_string())
+    } else {
+        normalize_hex_color(text)
+    }
+}
+
+/// Whether a style colour is [`AUTO_COLOR`].
+pub fn is_auto_color(color: Option<&str>) -> bool {
+    color == Some(AUTO_COLOR)
+}
+
 /// WCAG relative luminance of an sRGB colour, 0 (black) to 1 (white).
 pub fn relative_luminance((r, g, b): (u8, u8, u8)) -> f32 {
     let linear = |c: u8| {
