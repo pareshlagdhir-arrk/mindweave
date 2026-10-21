@@ -14,6 +14,7 @@ use mindweave_core::{
 use uuid::Uuid;
 
 use super::hex_to_hsla;
+use super::text_paint::{paint_shape_text, TextPaint};
 
 /// Outline colour of a placeholder.
 const PLACEHOLDER_COLOR: &str = "#7F8EA3";
@@ -38,13 +39,17 @@ pub struct CanvasGeometry {
     pub placeholder: bool,
 }
 
-/// The canvas outline of `shape`, or its frame's box when its library
-/// shape is not installed.
+/// The canvas outline of `shape`: a text box's filled box, or its library
+/// shape, or its frame's box when that is not installed.
 pub fn shape_geometry(shape: &Shape, libs: &LibraryRegistry) -> CanvasGeometry {
     let f = &shape.frame;
-    let (local, placeholder) = match libs.shape(&shape.library, &shape.shape) {
-        Some(def) => (def.local_geometry(f.w, f.h, &|k| shape.param(k)), false),
-        None => (box_geometry(f.w, f.h), true),
+    let (local, placeholder) = if shape.is_text_box() {
+        (box_geometry(f.w, f.h, FillRole::Shape), false)
+    } else {
+        match libs.shape(&shape.library, &shape.shape) {
+            Some(def) => (def.local_geometry(f.w, f.h, &|k| shape.param(k)), false),
+            None => (box_geometry(f.w, f.h, FillRole::None), true),
+        }
     };
     let geometry = to_canvas(&local, f);
     let aabb = bounds(&geometry).unwrap_or_else(|| frame_aabb(f));
@@ -55,8 +60,8 @@ pub fn shape_geometry(shape: &Shape, libs: &LibraryRegistry) -> CanvasGeometry {
     }
 }
 
-/// The closed, unfilled box `0..w × 0..h`.
-fn box_geometry(w: f32, h: f32) -> Geometry {
+/// The closed box `0..w × 0..h`, filled as `fill`.
+fn box_geometry(w: f32, h: f32, fill: FillRole) -> Geometry {
     use mindweave_core::geometry::SubPath;
     Geometry {
         paths: vec![SubPath {
@@ -67,7 +72,7 @@ fn box_geometry(w: f32, h: f32) -> Geometry {
                 PathCmd::LineTo((0., h)),
                 PathCmd::Close,
             ],
-            fill: FillRole::None,
+            fill,
         }],
     }
 }
@@ -200,7 +205,9 @@ fn style_color(hex: Option<&str>, opacity: f32) -> Option<Hsla> {
 }
 
 /// Paints the visible layers of `page`, bottom layer first and each
-/// layer's shapes back to front, skipping shapes outside `bounds`.
+/// layer's shapes back to front (each with its text), skipping shapes
+/// outside `bounds`.
+#[allow(clippy::too_many_arguments)]
 pub fn paint_shapes(
     window: &mut Window,
     cx: &mut App,
@@ -209,6 +216,7 @@ pub fn paint_shapes(
     libs: &LibraryRegistry,
     vp: &Viewport,
     cache: &mut GeometryCache,
+    text: &mut TextPaint,
 ) {
     let painter = ShapePainter::new(bounds, vp, 1., cx);
     cache.begin_frame();
@@ -217,26 +225,27 @@ pub fn paint_shapes(
         for layer in page.layers.iter().rev().filter(|l| l.visible) {
             for shape in &layer.objects {
                 let entry = cache.entry(shape, libs);
-                if !painter.visible(&shape.style, &entry.outline) {
-                    continue;
+                let visible = painter.visible(&shape.style, &entry.outline);
+                if visible {
+                    let stale = entry
+                        .tessellation
+                        .as_ref()
+                        .is_none_or(|t| t.zoom != vp.zoom || t.style != shape.style);
+                    if stale {
+                        entry.tessellation = Some(Tessellation {
+                            zoom: vp.zoom,
+                            style: shape.style.clone(),
+                            paths: painter.tessellate(&shape.style, &entry.outline),
+                        });
+                    }
+                    if let Some(t) = &entry.tessellation {
+                        painter.paint_paths(&t.paths, window);
+                    }
+                    if entry.outline.placeholder {
+                        painter.paint_label(shape, &entry.outline, window, cx);
+                    }
                 }
-                let stale = entry
-                    .tessellation
-                    .as_ref()
-                    .is_none_or(|t| t.zoom != vp.zoom || t.style != shape.style);
-                if stale {
-                    entry.tessellation = Some(Tessellation {
-                        zoom: vp.zoom,
-                        style: shape.style.clone(),
-                        paths: painter.tessellate(&shape.style, &entry.outline),
-                    });
-                }
-                if let Some(t) = &entry.tessellation {
-                    painter.paint_paths(&t.paths, window);
-                }
-                if entry.outline.placeholder {
-                    painter.paint_label(shape, &entry.outline, window, cx);
-                }
+                paint_shape_text(window, cx, bounds, vp, shape, visible, text);
             }
         }
     });

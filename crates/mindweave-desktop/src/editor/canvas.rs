@@ -17,6 +17,9 @@ use super::interaction::{
 };
 use super::shape_gallery;
 use super::shape_paint::{paint_marquee, paint_preview, paint_selection, paint_shapes};
+use super::text_paint::{
+    auto_color, canvas_background, text_background, text_box_wrap, TextPaint, TEXT_BOX_PADDING,
+};
 use super::tool::Tool;
 use super::{hex_to_hsla, EditorWindow};
 use crate::actions::{ZoomIn, ZoomOut, ZoomReset};
@@ -335,8 +338,19 @@ impl EditorWindow {
         cx: &mut Context<Self>,
     ) {
         let libs = cx.global::<Libraries>().0.clone();
+        let canvas = canvas_background(
+            self.session.page().canvas.background.as_deref(),
+            cx.theme().background,
+        );
+        self.text_layouts.begin_frame();
+        self.layout_text_boxes(window, canvas, cx);
         let page = self.session.page();
         let viewport = page.viewport;
+        let mut text = TextPaint {
+            layouts: &mut self.text_layouts,
+            glyphs: &mut self.glyph_outlines,
+            canvas,
+        };
         paint_shapes(
             window,
             cx,
@@ -345,7 +359,9 @@ impl EditorWindow {
             &libs,
             &viewport,
             &mut self.geometry_cache,
+            &mut text,
         );
+        self.text_layouts.end_frame();
         if let Some(shape) = self.placement_preview(&libs) {
             paint_preview(
                 window,
@@ -380,6 +396,47 @@ impl EditorWindow {
                 );
             }
         }
+    }
+
+    /// Lays out the active page's text boxes and stores the size their text
+    /// gives each (see `DocumentSession::set_text_box_layout`). It runs
+    /// every frame and compares with every box's frame, so sizes left stale
+    /// by undo, redo or opening a file are corrected before painting.
+    /// Layouts cached at another zoom are reused for sizing, so zooming
+    /// does not lay out every box again.
+    fn layout_text_boxes(
+        &mut self,
+        window: &mut Window,
+        canvas: (u8, u8, u8),
+        cx: &mut Context<Self>,
+    ) {
+        let page = self.session.page();
+        let zoom = page.viewport.zoom;
+        let mut changes = Vec::new();
+        for shape in page.layers.iter().flat_map(|l| &l.objects) {
+            let Some(label) = shape.label.as_ref().filter(|_| shape.is_text_box()) else {
+                continue;
+            };
+            let background = text_background(shape.style.fill.as_deref(), canvas);
+            let color = auto_color(background, shape.style.opacity);
+            let wrap = text_box_wrap(shape);
+            let (w, h) = self
+                .text_layouts
+                .size(window, shape.id, &label.text, wrap, zoom, color);
+            let (w, h) = (w + 2. * TEXT_BOX_PADDING, h + 2. * TEXT_BOX_PADDING);
+            let f = &shape.frame;
+            if (shape.auto_width() && f.w != w) || f.h != h {
+                changes.push((shape.id, w, h));
+            }
+        }
+        if changes.is_empty() {
+            return;
+        }
+        for (id, w, h) in changes {
+            self.session.set_text_box_layout(id, w, h);
+        }
+        // The selection chrome and the sidebar were drawn with the old size.
+        cx.notify();
     }
 
     /// A point relative to the canvas origin, in canvas coordinates.

@@ -14,7 +14,11 @@ mindweave-core = { path = "../mindweave-core" }
 rfd.workspace = true
 serde_json.workspace = true
 trash.workspace = true
+unicode-segmentation.workspace = true
 uuid.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+font-kit.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

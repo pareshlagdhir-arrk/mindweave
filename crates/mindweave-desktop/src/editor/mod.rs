@@ -10,6 +10,8 @@ mod shape_gallery;
 mod shape_paint;
 mod shape_properties;
 mod status_bar;
+mod text_layout;
+mod text_paint;
 pub mod tool;
 mod toolbar;
 
@@ -37,6 +39,8 @@ use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
 use interaction::{Gesture, Press, NUDGE_FAR_STEP, NUDGE_STEP};
 use shape_paint::GeometryCache;
+use text_layout::TextLayoutCache;
+use text_paint::GlyphOutlines;
 use tool::{Tool, ToolState, BASIC_SHAPES};
 use uuid::Uuid;
 
@@ -147,6 +151,10 @@ pub struct EditorWindow {
     pub selection: Vec<Uuid>,
     /// Canvas outlines of the shapes painted last frame.
     geometry_cache: GeometryCache,
+    /// Text layouts of the active page's labels and text boxes.
+    text_layouts: TextLayoutCache,
+    /// Glyph outlines for drawing rotated text.
+    glyph_outlines: GlyphOutlines,
     properties: properties_panel::PropertyFields,
     /// The title last given to the window.
     window_title: String,
@@ -189,6 +197,8 @@ impl EditorWindow {
             press: Press::default(),
             selection: Vec::new(),
             geometry_cache: GeometryCache::default(),
+            text_layouts: TextLayoutCache::default(),
+            glyph_outlines: GlyphOutlines::default(),
             properties,
             window_title,
             _subscriptions,
