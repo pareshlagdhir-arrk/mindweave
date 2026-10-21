@@ -37,6 +37,7 @@ pub use library::{
 pub use session::DocumentSession;
 pub use settings::{
     load_settings, save_settings, settings_path, AppSettings, RecentFile, WindowSize, MAX_RECENT,
+    MAX_RECENT_COLORS, MAX_RECENT_FONTS,
 };
 pub use shape::{Label, Shape, Style, TextBoxProps, VAlign, TEXT_LIBRARY, TEXT_SHAPE};
 pub use text::{

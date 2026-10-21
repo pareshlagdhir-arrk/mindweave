@@ -16,8 +16,9 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
 use mindweave_core::{
-    from_clipboard, DocumentSession, EditKind, EditSnapshot, Label, RichText, RunStyle, Shape,
-    StyleChange, StyleSummary, TextHistory, LINE_BREAK, MAX_CLIPBOARD_BYTES, MAX_PASTE_CHARS,
+    from_clipboard, DocumentSession, EditKind, EditSnapshot, HAlign, Label, RichText, RunStyle,
+    Shape, StyleChange, StyleSummary, TextHistory, LINE_BREAK, MAX_CLIPBOARD_BYTES,
+    MAX_PASTE_CHARS,
 };
 use serde_json::{json, Value};
 use unicode_segmentation::UnicodeSegmentation;
@@ -198,7 +199,7 @@ impl Toggle {
     }
 
     /// The value turning it on or off over a range with `summary` sets.
-    fn value(self, summary: &StyleSummary) -> bool {
+    pub(super) fn value(self, summary: &StyleSummary) -> bool {
         StyleSummary::toggle_value(match self {
             Toggle::Bold => &summary.bold,
             Toggle::Italic => &summary.italic,
@@ -207,7 +208,7 @@ impl Toggle {
         })
     }
 
-    fn change(self, on: bool) -> StyleChange {
+    pub(super) fn change(self, on: bool) -> StyleChange {
         match self {
             Toggle::Bold => StyleChange::Bold(on),
             Toggle::Italic => StyleChange::Italic(on),
@@ -276,6 +277,9 @@ pub struct TextEditor {
     composing_from: Option<EditSnapshot>,
     /// Where Up and Down aim, in canvas units from the text's left edge.
     goal_x: Option<f32>,
+    /// A colour drag from the Properties panel is being previewed: its
+    /// changes join the undo step its first preview recorded.
+    style_preview: bool,
 }
 
 impl TextEditor {
@@ -295,6 +299,7 @@ impl TextEditor {
             }),
             composing_from: None,
             goal_x: None,
+            style_preview: false,
         }
     }
 
@@ -329,6 +334,7 @@ impl TextEditor {
         self.anchor = anchor;
         self.typing_style = None;
         self.goal_x = None;
+        self.style_preview = false;
         self.history.break_group();
     }
 
@@ -442,6 +448,55 @@ impl TextEditor {
         if *text != before.text {
             self.history.record(before, EditKind::Style);
         }
+    }
+
+    /// Sets one property from the Properties panel over the selection (one
+    /// undo step), or with nothing selected, for the text typed next. A
+    /// caret in an empty paragraph also gives the paragraph the style, so
+    /// it survives a click back into the text. With `preview` (a colour
+    /// drag), changes up to [`Self::end_style_preview`] are one undo step.
+    pub fn apply_style(&mut self, text: &mut RichText, change: &StyleChange, preview: bool) {
+        let sel = self.selection();
+        let before = self.snapshot(text);
+        if sel.is_empty() {
+            let mut style = self
+                .typing_style
+                .take()
+                .unwrap_or_else(|| text.style_at(self.caret));
+            change.apply_to(&mut style);
+            self.typing_style = Some(style);
+            if !text.paragraph_range(self.caret).is_empty() {
+                return;
+            }
+        }
+        text.apply(sel, change);
+        if *text != before.text {
+            self.record_style(before, preview);
+        }
+    }
+
+    /// Aligns the paragraphs the selection touches (a caret: its
+    /// paragraph), as one undo step.
+    pub fn set_align(&mut self, text: &mut RichText, align: HAlign) {
+        let before = self.snapshot(text);
+        text.set_align(self.selection(), align);
+        if *text != before.text {
+            self.record_style(before, false);
+        }
+    }
+
+    /// Ends a colour drag's preview: the next change is a step of its own.
+    pub fn end_style_preview(&mut self) {
+        self.style_preview = false;
+    }
+
+    /// Records a style change made from `before`; a preview after another
+    /// joins its step.
+    fn record_style(&mut self, before: EditSnapshot, preview: bool) {
+        if !(preview && self.style_preview) {
+            self.history.record(before, EditKind::Style);
+        }
+        self.style_preview = preview;
     }
 
     /// The selection as plain text (line breaks as newlines) and as a
@@ -972,7 +1027,7 @@ impl EditorWindow {
     /// Runs `f` on the editor and a copy of the target's text with its
     /// current layout, then stores the text back in the target when it
     /// changed. `None` when not editing or the target is gone.
-    fn with_text<R>(
+    pub(super) fn with_text<R>(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1598,6 +1653,81 @@ mod tests {
         assert!(!text.style_at(3).strike);
         assert!(ed.undo(&mut text));
         assert!(!text.style_at(1).strike);
+    }
+
+    #[test]
+    fn sidebar_styles_apply_to_the_selection_or_the_typing_style() {
+        let mut text = plain("abc");
+        let mut ed = editor(&text);
+        // A caret in text: the typing style only, no text change.
+        let before = text.clone();
+        ed.apply_style(&mut text, &StyleChange::Size(30.), false);
+        assert_eq!(text, before);
+        assert_eq!(ed.typing_style.as_ref().map(|s| s.size), Some(30.));
+        ed.apply_style(&mut text, &StyleChange::Bold(true), false);
+        let typing = ed.typing_style.clone().unwrap();
+        assert!(typing.bold && typing.size == 30.);
+        ed.type_text(&mut text, "d");
+        assert_eq!(text.style_at(4).size, 30.);
+
+        // A selection: one undo step per change.
+        let mut text = plain("abc");
+        let mut ed = editor(&text);
+        ed.select(2, 0);
+        ed.apply_style(&mut text, &StyleChange::Font(Some("Georgia".into())), false);
+        assert_eq!(text.style_at(1).font.as_deref(), Some("Georgia"));
+        assert_eq!(text.style_at(3).font, None);
+        ed.apply_style(&mut text, &StyleChange::Size(20.), false);
+        assert!(ed.undo(&mut text));
+        assert_eq!(text.style_at(1).size, RunStyle::default().size);
+        assert_eq!(text.style_at(1).font.as_deref(), Some("Georgia"));
+        assert!(ed.undo(&mut text));
+        assert_eq!(text.style_at(1).font, None);
+
+        // Colour previews from a drag are one undo step until it ends.
+        let mut text = plain("abc");
+        let mut ed = editor(&text);
+        ed.select(3, 0);
+        for hex in ["#110000", "#220000", "#330000"] {
+            ed.apply_style(&mut text, &StyleChange::Color(Some(hex.into())), true);
+        }
+        ed.end_style_preview();
+        ed.apply_style(&mut text, &StyleChange::Color(Some("#440000".into())), true);
+        assert_eq!(text.style_at(1).color.as_deref(), Some("#440000"));
+        assert!(ed.undo(&mut text));
+        assert_eq!(text.style_at(1).color.as_deref(), Some("#330000"));
+        assert!(ed.undo(&mut text));
+        assert_eq!(text.style_at(1).color, None);
+        assert!(!ed.undo(&mut text));
+    }
+
+    #[test]
+    fn a_caret_in_an_empty_paragraph_keeps_the_sidebar_style() {
+        // An empty new box: the style stays with the paragraph, so a click
+        // into the box before typing does not lose it.
+        let mut text = plain("");
+        let mut ed = editor(&text);
+        ed.apply_style(&mut text, &StyleChange::Size(40.), false);
+        ed.select(0, 0);
+        assert_eq!(ed.typing_style, None);
+        ed.type_text(&mut text, "x");
+        assert_eq!(text.style_at(1).size, 40.);
+    }
+
+    #[test]
+    fn sidebar_alignment_applies_to_the_touched_paragraphs() {
+        let mut text = plain("one");
+        text.insert(3, "\ntwo", &RunStyle::default());
+        let mut ed = editor(&text);
+        ed.select(1, 1);
+        ed.set_align(&mut text, HAlign::Center);
+        assert_eq!(text.paragraphs[0].align, HAlign::Center);
+        assert_eq!(text.paragraphs[1].align, HAlign::Left);
+        ed.select(5, 0);
+        ed.set_align(&mut text, HAlign::Right);
+        assert!(text.paragraphs.iter().all(|p| p.align == HAlign::Right));
+        assert!(ed.undo(&mut text));
+        assert_eq!(text.paragraphs[1].align, HAlign::Left);
     }
 
     #[test]

@@ -142,7 +142,9 @@ pub enum StyleChange {
 }
 
 impl StyleChange {
-    fn apply_to(&self, style: &mut RunStyle) {
+    /// Sets this property on `style` (then sanitised: sizes clamped,
+    /// invalid colours dropped).
+    pub fn apply_to(&self, style: &mut RunStyle) {
         match self {
             StyleChange::Bold(v) => style.bold = *v,
             StyleChange::Italic(v) => style.italic = *v,

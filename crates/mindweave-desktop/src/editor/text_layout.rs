@@ -10,7 +10,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
-use std::sync::OnceLock;
+use std::sync::{Arc, RwLock};
 
 use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
@@ -166,8 +166,10 @@ impl TextLayout {
         forced: Option<&[Range<usize>]>,
     ) -> TextLayout {
         let text_system = window.text_system().clone();
+        let (installed, _) = installed_fonts(&text_system);
         let mut builder = Builder {
             text_system: &text_system,
+            installed,
             default_family: window.text_style().font().family,
             default_color,
             zoom,
@@ -340,6 +342,8 @@ impl TextLayout {
 /// Builds the lines of a layout, one hard line at a time.
 struct Builder<'a> {
     text_system: &'a WindowTextSystem,
+    /// The installed font families.
+    installed: Arc<HashSet<String>>,
     default_family: SharedString,
     default_color: Hsla,
     zoom: f32,
@@ -366,11 +370,11 @@ struct Segment {
 
 impl Builder<'_> {
     fn family(&mut self, style: &RunStyle) -> SharedString {
-        let text_system = self.text_system;
+        let installed = &self.installed;
         resolve_family(
             style.font.as_deref(),
             &self.default_family,
-            &mut |name| font_installed(text_system, name),
+            &mut |name| installed.contains(name),
             self.missing_font,
         )
     }
@@ -556,12 +560,75 @@ fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
     out
 }
 
-/// Whether font family `name` is installed. The list is read once.
-fn font_installed(text_system: &TextSystem, name: &str) -> bool {
-    static FAMILIES: OnceLock<HashSet<String>> = OnceLock::new();
-    FAMILIES
-        .get_or_init(|| text_system.all_font_names().into_iter().collect())
-        .contains(name)
+/// The installed font families, and a generation that moves on whenever
+/// they change.
+struct InstalledFonts {
+    families: Arc<HashSet<String>>,
+    generation: u64,
+}
+
+impl InstalledFonts {
+    fn new(names: impl IntoIterator<Item = String>) -> Self {
+        InstalledFonts {
+            families: Arc::new(names.into_iter().collect()),
+            generation: 0,
+        }
+    }
+
+    /// Replaces the families with `names`; returns whether they changed
+    /// (then the generation moves on).
+    fn replace(&mut self, names: impl IntoIterator<Item = String>) -> bool {
+        let families: HashSet<String> = names.into_iter().collect();
+        if families == *self.families {
+            return false;
+        }
+        self.families = Arc::new(families);
+        self.generation += 1;
+        true
+    }
+}
+
+/// Read when first needed, and again by [`refresh_installed_fonts`].
+static INSTALLED: RwLock<Option<InstalledFonts>> = RwLock::new(None);
+
+/// The installed font families and their generation.
+fn installed_fonts(text_system: &TextSystem) -> (Arc<HashSet<String>>, u64) {
+    if let Some(fonts) = INSTALLED.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        return (fonts.families.clone(), fonts.generation);
+    }
+    let mut slot = INSTALLED.write().unwrap_or_else(|e| e.into_inner());
+    let fonts = slot.get_or_insert_with(|| InstalledFonts::new(text_system.all_font_names()));
+    (fonts.families.clone(), fonts.generation)
+}
+
+/// Takes `names` as the installed font families (the font list read them
+/// as it opened), so fonts installed while the app runs are drawn, and no
+/// longer reported missing, from the next frame.
+pub(super) fn refresh_installed_fonts(names: &[String]) {
+    let mut slot = INSTALLED.write().unwrap_or_else(|e| e.into_inner());
+    match slot.as_mut() {
+        Some(fonts) => {
+            fonts.replace(names.iter().cloned());
+        }
+        None => *slot = Some(InstalledFonts::new(names.iter().cloned())),
+    }
+}
+
+/// What layouts depend on beyond their text: the window's default font
+/// family and the installed font set.
+fn fonts_key(window: &Window) -> u64 {
+    let (_, generation) = installed_fonts(window.text_system());
+    let mut h = DefaultHasher::new();
+    window.text_style().font().family.hash(&mut h);
+    generation.hash(&mut h);
+    h.finish()
+}
+
+/// Adds `name` to `missing` unless it is there.
+fn note_missing(missing: &mut Vec<String>, name: &str) {
+    if !missing.iter().any(|m| m == name) {
+        missing.push(name.to_string());
+    }
 }
 
 /// A hash of everything in `text` that affects its layout and look.
@@ -591,20 +658,23 @@ struct ContentKey {
     text: u64,
     wrap: Option<u32>,
     color: [u32; 4],
+    /// See [`fonts_key`].
+    fonts: u64,
 }
 
 impl ContentKey {
-    fn new(text: &RichText, wrap: Option<f32>, color: Hsla) -> Self {
+    fn new(text: &RichText, wrap: Option<f32>, color: Hsla, fonts: u64) -> Self {
         ContentKey {
             text: text_hash(text),
             wrap: wrap.map(f32::to_bits),
             color: [color.h, color.s, color.l, color.a].map(f32::to_bits),
+            fonts,
         }
     }
 
     /// Whether layouts for both keys have the same size.
     fn same_size(&self, other: &Self) -> bool {
-        self.text == other.text && self.wrap == other.wrap
+        self.text == other.text && self.wrap == other.wrap && self.fonts == other.fonts
     }
 }
 
@@ -615,6 +685,9 @@ pub(super) struct CacheEntry {
     pub layout: TextLayout,
     /// Glyph outlines last painted rotated (see `text_paint`).
     pub rotated: Option<RotatedPaths>,
+    /// Font families the text names that are not installed (drawn in the
+    /// default font), each once.
+    missing: Vec<String>,
     used: u64,
 }
 
@@ -624,12 +697,23 @@ pub(super) struct CacheEntry {
 pub struct TextLayoutCache {
     entries: HashMap<Uuid, CacheEntry>,
     frame: u64,
+    /// The fonts this frame's layouts use (see [`fonts_key`]).
+    fonts: u64,
 }
 
 impl TextLayoutCache {
     /// Starts a frame; entries not used by [`Self::end_frame`] are dropped.
-    pub fn begin_frame(&mut self) {
+    /// A change of the default font or of the installed fonts lays every
+    /// text out again.
+    pub fn begin_frame(&mut self, window: &Window) {
         self.frame = self.frame.wrapping_add(1);
+        self.fonts = fonts_key(window);
+    }
+
+    /// The font families object `id`'s text names that are not installed,
+    /// as found when it was last laid out (none when it has no layout).
+    pub fn missing_fonts(&self, id: Uuid) -> &[String] {
+        self.entries.get(&id).map_or(&[], |e| &e.missing)
     }
 
     /// Drops the entries not used since [`Self::begin_frame`].
@@ -656,7 +740,7 @@ impl TextLayoutCache {
         wrap: Option<f32>,
         color: Hsla,
     ) -> (f32, f32) {
-        let key = ContentKey::new(text, wrap, color);
+        let key = ContentKey::new(text, wrap, color, self.fonts);
         let frame = self.frame;
         if let Some(e) = self.entries.get_mut(&id) {
             if e.content.same_size(&key) {
@@ -672,7 +756,7 @@ impl TextLayoutCache {
     /// The layout cached for `id` when its text and wrap width match `text`
     /// and `wrap` (at any zoom and colour), kept for this frame.
     pub fn cached(&mut self, id: Uuid, text: &RichText, wrap: Option<f32>) -> Option<&TextLayout> {
-        let key = ContentKey::new(text, wrap, Hsla::default());
+        let key = ContentKey::new(text, wrap, Hsla::default(), self.fonts);
         let frame = self.frame;
         let e = self.entries.get_mut(&id)?;
         if !e.content.same_size(&key) {
@@ -693,7 +777,7 @@ impl TextLayoutCache {
         zoom: f32,
         color: Hsla,
     ) -> &mut CacheEntry {
-        let key = ContentKey::new(text, wrap, color);
+        let key = ContentKey::new(text, wrap, color, self.fonts);
         let hit = self
             .entries
             .get(&id)
@@ -717,12 +801,16 @@ impl TextLayoutCache {
         zoom: f32,
         color: Hsla,
     ) -> &mut CacheEntry {
-        let layout = TextLayout::layout(window, text, wrap, zoom, color, &mut |_| {});
+        let mut missing = Vec::new();
+        let layout = TextLayout::layout(window, text, wrap, zoom, color, &mut |name| {
+            note_missing(&mut missing, name)
+        });
         let entry = CacheEntry {
             content,
             zoom,
             layout,
             rotated: None,
+            missing,
             used: self.frame,
         };
         self.entries.insert(id, entry);
@@ -943,11 +1031,45 @@ pub(super) fn align_offset(align: HAlign, available: f32, width: f32) -> f32 {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        align_offset, break_lines, forced_breaks, hard_lines, max_font_size, resolve_family,
-        should_greek, size_segments, text_run, visible_end,
+        align_offset, break_lines, forced_breaks, hard_lines, max_font_size, note_missing,
+        resolve_family, should_greek, size_segments, text_run, visible_end, ContentKey,
+        InstalledFonts,
     };
     use gpui_kit::{FontStyle, FontWeight, Hsla, SharedString};
-    use mindweave_core::{HAlign, RunStyle};
+    use mindweave_core::{HAlign, RichText, RunStyle};
+
+    #[test]
+    fn the_installed_font_set_moves_on_only_when_it_changes() {
+        let mut fonts = InstalledFonts::new(["Arial".to_string(), "Menlo".to_string()]);
+        let generation = fonts.generation;
+        assert!(fonts.families.contains("Menlo"));
+        // The same families in another order: nothing to lay out again.
+        assert!(!fonts.replace(["Menlo".to_string(), "Arial".to_string()]));
+        assert_eq!(fonts.generation, generation);
+        // A font installed while running: layouts keyed on the old set are
+        // stale, so the generation moves on.
+        assert!(fonts.replace(["Menlo", "Arial", "Georgia"].map(String::from)));
+        assert_ne!(fonts.generation, generation);
+        assert!(fonts.families.contains("Georgia"));
+    }
+
+    #[test]
+    fn layouts_are_keyed_on_the_fonts_they_were_drawn_with() {
+        let text = RichText::new(RunStyle::default(), HAlign::Left);
+        let a = ContentKey::new(&text, None, gpui_kit::black(), 1);
+        let b = ContentKey::new(&text, None, gpui_kit::black(), 2);
+        assert!(a.same_size(&a));
+        assert!(!a.same_size(&b), "another default font or font set");
+    }
+
+    #[test]
+    fn missing_families_are_noted_once() {
+        let mut missing = Vec::new();
+        note_missing(&mut missing, "Nope Sans");
+        note_missing(&mut missing, "Gone Serif");
+        note_missing(&mut missing, "Nope Sans");
+        assert_eq!(missing, ["Nope Sans", "Gone Serif"]);
+    }
 
     fn black() -> Hsla {
         gpui_kit::black()

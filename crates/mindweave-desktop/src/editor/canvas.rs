@@ -251,6 +251,7 @@ fn register_input(
                 // of its own.
                 editor.finish_color_edit(cx);
                 editor.commit_focused_shape_number(window, cx);
+                editor.commit_focused_text_size(window, cx);
                 editor.focus_handle.focus(window, cx);
                 let pans = match event.button {
                     MouseButton::Middle => true,
@@ -391,7 +392,7 @@ impl EditorWindow {
             self.session.page().canvas.background.as_deref(),
             cx.theme().background,
         );
-        self.text_layouts.begin_frame();
+        self.text_layouts.begin_frame(window);
         self.layout_text_boxes(window, canvas, cx);
         let page = self.session.page();
         let viewport = page.viewport;

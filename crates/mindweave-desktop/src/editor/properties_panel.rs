@@ -14,6 +14,7 @@ use gpui_kit::*;
 use mindweave_core::{BackgroundPattern, CanvasSettings, DocumentSession};
 
 use super::shape_properties::{self, ShapeFields};
+use super::text_properties::TextFields;
 use super::{
     hex_to_hsla, hsla_to_hex, parse_number, section_label, EditorWindow, GestureOwner,
     SessionGesture, SMALL_TEXT_SIZE,
@@ -210,6 +211,7 @@ pub(super) struct PropertyFields {
     numbers: Vec<NumberField>,
     colors: Vec<ColorField>,
     pub(super) shape: ShapeFields,
+    pub(super) text: TextFields,
     /// A colour picker (canvas or shape) is being dragged: its changes are
     /// one undo step, ended when the picker closes.
     color_edit: bool,
@@ -303,12 +305,14 @@ impl PropertyFields {
             .collect();
 
         let shape = ShapeFields::new(window, cx);
+        let text = TextFields::new(window, cx);
         (
             Self {
                 pattern,
                 numbers,
                 colors,
                 shape,
+                text,
                 color_edit: false,
             },
             subscriptions,
@@ -381,7 +385,7 @@ impl EditorWindow {
             .colors
             .iter()
             .any(|f| f.state.read(cx).is_open());
-        if !canvas_open && !self.shape_picker_open(cx) {
+        if !canvas_open && !self.shape_picker_open(cx) && !self.text_palette_open(cx) {
             self.finish_color_edit(cx);
         }
     }
@@ -477,6 +481,7 @@ impl EditorWindow {
         }
 
         self.sync_shape_properties(window, cx);
+        self.sync_text_properties(window, cx);
         self.finish_closed_color_edit(cx);
     }
 }

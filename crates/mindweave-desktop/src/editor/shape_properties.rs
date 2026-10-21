@@ -19,6 +19,7 @@ use uuid::Uuid;
 use super::properties_panel::{
     field_row, FIELD_GAP, NUMBER_INPUT_WIDTH, RESET_WIDTH, ROW_HEIGHT, SWATCH_SIZE,
 };
+use super::text_properties;
 use super::{hex_to_hsla, hsla_to_hex, parse_number, section_label, EditorWindow, SMALL_TEXT_SIZE};
 use crate::libraries::Libraries;
 
@@ -26,7 +27,7 @@ use crate::libraries::Libraries;
 const STROKE_WIDTH_MAX: f32 = 100.0;
 const STROKE_WIDTH_STEP: f32 = 0.5;
 /// Space above each section heading after the first.
-const SECTION_GAP: f32 = 12.;
+pub(super) const SECTION_GAP: f32 = 12.;
 
 /// A value shared by every selected shape, or `Mixed` when they differ.
 #[derive(Clone, Debug, PartialEq)]
@@ -179,6 +180,9 @@ pub(super) struct Summary {
     /// "Library · Shape", "Missing library", or "Mixed" for different kinds.
     pub title: String,
     pub bounds: Rect,
+    /// Every selected shape is a text box, whose height fits its text: H
+    /// is shown but cannot be edited.
+    pub height_read_only: bool,
     pub rotation: Value<f32>,
     pub fill: Value<Option<String>>,
     pub stroke: Value<Option<String>>,
@@ -225,6 +229,7 @@ pub(super) fn summarize(shapes: &[&Shape], libs: &LibraryRegistry) -> Option<Sum
         count: shapes.len(),
         title,
         bounds: shown_bounds(&frames)?,
+        height_read_only: shapes.iter().all(|s| s.is_text_box()),
         rotation: common_number(frames.iter().map(|f| f.rotation), same)?,
         fill: color(|s| s.style.fill.as_deref())?,
         stroke: color(|s| s.style.stroke.as_deref())?,
@@ -648,7 +653,14 @@ impl EditorWindow {
             .as_ref()
             .is_some_and(|shown| shown.as_deref().unwrap_or("") == text);
         let ids = field.ids.clone();
-        if !unchanged {
+        let read_only = *kind == NumberKind::Bounds(BoundsField::H)
+            && self
+                .properties
+                .shape
+                .summary
+                .as_ref()
+                .is_some_and(|s| s.height_read_only);
+        if !unchanged && !read_only {
             if let Some(value) = parse_number(&text) {
                 let libs = cx.global::<Libraries>().0.clone();
                 self.update_session(|s| apply_number(s, &ids, kind, value, &libs), cx);
@@ -733,12 +745,13 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
             )
         });
     let pair = |a: BoundsField, b: BoundsField| {
+        let read_only = |f: BoundsField| f == BoundsField::H && summary.height_read_only;
         h_flex()
             .h(px(ROW_HEIGHT))
             .flex_none()
             .gap(px(FIELD_GAP))
-            .child(labelled_input(fields, a, muted))
-            .child(labelled_input(fields, b, muted))
+            .child(labelled_input(fields, a, read_only(a), muted))
+            .child(labelled_input(fields, b, read_only(b), muted))
     };
     let number =
         |kind: NumberKind, suffix: Option<&'static str>| number_input(fields, &kind, suffix, muted);
@@ -766,6 +779,7 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
             None,
             number(NumberKind::Rotation, Some("°")),
         ))
+        .children(text_properties::render(editor, cx))
         .child(section_label("Style", cx).mt(px(SECTION_GAP)))
         .child(color_row(editor, summary, StyleColor::Fill, cx))
         .child(color_row(editor, summary, StyleColor::Stroke, cx))
@@ -786,8 +800,9 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
         })
 }
 
-/// Half a row: an X, Y, W or H field with its letter inside.
-fn labelled_input(fields: &ShapeFields, field: BoundsField, muted: Hsla) -> Div {
+/// Half a row: an X, Y, W or H field with its letter inside; `read_only`
+/// shows it disabled (a text box's height follows its text).
+fn labelled_input(fields: &ShapeFields, field: BoundsField, read_only: bool, muted: Hsla) -> Div {
     let letter = match field {
         BoundsField::X => "X",
         BoundsField::Y => "Y",
@@ -801,6 +816,7 @@ fn labelled_input(fields: &ShapeFields, field: BoundsField, muted: Hsla) -> Div 
             slot.child(
                 Input::new(&field.input)
                     .small()
+                    .disabled(read_only)
                     .prefix(div().text_color(muted).child(letter)),
             )
         })
@@ -1089,6 +1105,19 @@ mod tests {
         assert!(both.bounds.w > 30.0);
 
         assert_eq!(summarize(&[], &libs), None);
+    }
+
+    #[test]
+    fn height_is_read_only_for_text_boxes() {
+        let libs = libs();
+        let rect = shape(&libs, "rectangle", frame(0.0, 0.0, 10.0, 10.0));
+        let a = Shape::new_text_box((0.0, 0.0));
+        let b = Shape::new_text_box((5.0, 5.0));
+        assert!(summarize(&[&a], &libs).unwrap().height_read_only);
+        assert!(summarize(&[&a, &b], &libs).unwrap().height_read_only);
+        // A shape among them can still be resized by H.
+        assert!(!summarize(&[&a, &rect], &libs).unwrap().height_read_only);
+        assert!(!summarize(&[&rect], &libs).unwrap().height_read_only);
     }
 
     #[test]

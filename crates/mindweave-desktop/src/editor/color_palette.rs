@@ -38,15 +38,19 @@ use super::{hex_to_hsla, hsla_to_hex, SMALL_TEXT_SIZE};
 use crate::app_state::AppState;
 
 /// The preset swatches, five per row: neutrals, then hues around the
-/// wheel, then pink, rose and brown. Mid-to-dark tones, so each reads on
-/// light and dark backgrounds alike.
+/// wheel, then pink, sky and brown. The hues are mid-to-dark tones that read
+/// on light and dark backgrounds alike; the neutrals cannot all do that
+/// (black and dark grey vanish on a dark canvas, white and light grey on a
+/// light one), so they are there for contrast with a chosen fill.
 pub(crate) const PRESET_COLORS: [&str; 20] = [
-    "#000000", "#4D4D4D", "#808080", "#C8C8C8", "#FFFFFF", // neutrals
+    "#000000", "#666666", "#808080", "#C8C8C8", "#FFFFFF", // neutrals
     "#DC2626", "#EA580C", "#D97706", "#EAB308", "#65A30D", // red .. lime
     "#16A34A", "#0D9488", "#0891B2", "#2563EB", "#4F46E5", // green .. indigo
-    "#7C3AED", "#9333EA", "#DB2777", "#E11D48", "#92400E", // violet .. brown
+    "#7C3AED", "#9333EA", "#DB2777", "#38BDF8", "#92400E", // violet, pink, sky, brown
 ];
 const COLUMNS: usize = 5;
+/// How many recent colours the palette shows.
+const MAX_RECENT_SWATCHES: usize = mindweave_core::MAX_RECENT_COLORS;
 const SWATCH: f32 = 20.;
 const GAP: f32 = 4.;
 /// The content width: five swatches and the gaps between them.
@@ -70,29 +74,55 @@ pub(crate) enum ColorPick {
 
 pub(crate) type OnPick = Rc<dyn Fn(ColorPick, &mut Window, &mut App)>;
 
-/// The palette's state; render it with [`palette_popover`].
-// Used by Task 7 (the sidebar Text section), which wires it into the text
-// colour control and removes this allowance.
-#[allow(dead_code)]
-pub(crate) struct ColorPalette {
-    /// The custom picker: its sliders and hex field.
-    picker: Entity<ColorPickerState>,
-    /// The colour shown as chosen: `None` is Auto.
-    current: Option<String>,
-    on_pick: OnPick,
+/// What the palette owes its caller for the previews of one opening.
+#[derive(Debug, Default)]
+struct Previews {
     /// The last colour previewed since the palette opened, unless a later
     /// choice replaced it.
     previewed: Option<String>,
     /// Whether the palette previewed since it opened, so the caller is owed
     /// an [`ColorPick::EndPreview`].
     previewing: bool,
+}
+
+impl Previews {
+    /// The palette opened: nothing previewed yet.
+    fn open(&mut self) {
+        *self = Self::default();
+    }
+
+    /// A custom-picker drag reached `hex`.
+    fn preview(&mut self, hex: &str) {
+        self.previewed = Some(hex.to_string());
+        self.previewing = true;
+    }
+
+    /// A choice (`Set`) was made: it replaces the drag's colour.
+    fn chose(&mut self) {
+        self.previewed = None;
+    }
+
+    /// The palette closed: whether an `EndPreview` is owed, and the colour
+    /// the last drag ended on unless a later choice replaced it.
+    fn close(&mut self) -> (bool, Option<String>) {
+        let this = std::mem::take(self);
+        (this.previewing, this.previewed)
+    }
+}
+
+/// The palette's state; render it with [`palette_popover`].
+pub(crate) struct ColorPalette {
+    /// The custom picker: its sliders and hex field.
+    picker: Entity<ColorPickerState>,
+    /// The colour shown as chosen: `None` is Auto.
+    current: Option<String>,
+    on_pick: OnPick,
+    previews: Previews,
     /// The popover showing the palette, while one is.
     popover: Option<WeakEntity<PopoverState>>,
     _subscription: Subscription,
 }
 
-// Used by Task 7; see `ColorPalette`.
-#[allow(dead_code)]
 impl ColorPalette {
     pub(crate) fn new(
         on_pick: impl Fn(ColorPick, &mut Window, &mut App) + 'static,
@@ -112,8 +142,7 @@ impl ColorPalette {
                 // The picker stays open while the palette is; only a hex
                 // committed with Enter closes it.
                 if picker.read(cx).is_open() {
-                    this.previewed = Some(hex.clone());
-                    this.previewing = true;
+                    this.previews.preview(&hex);
                     let on_pick = this.on_pick.clone();
                     // Outside this palette's update, so the caller may read
                     // or update it.
@@ -131,8 +160,7 @@ impl ColorPalette {
             picker,
             current: None,
             on_pick: Rc::new(on_pick),
-            previewed: None,
-            previewing: false,
+            previews: Previews::default(),
             popover: None,
             _subscription: subscription,
         }
@@ -149,9 +177,16 @@ impl ColorPalette {
     }
 
     /// Readies the custom picker as the popover opens.
+    /// Whether the palette is showing.
+    pub(crate) fn is_open(&self, cx: &App) -> bool {
+        self.popover
+            .as_ref()
+            .and_then(|p| p.upgrade())
+            .is_some_and(|p| p.read(cx).is_open())
+    }
+
     fn opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.previewed = None;
-        self.previewing = false;
+        self.previews.open();
         let start = self
             .current
             .as_deref()
@@ -170,18 +205,16 @@ impl ColorPalette {
         self.picker
             .update(cx, |picker, cx| picker.set_open(false, cx));
         self.popover = None;
-        let previewed = self.previewed.take();
+        let (previewing, previewed) = self.previews.close();
         if previewed.is_some() {
             self.current = previewed.clone();
         }
-        (std::mem::take(&mut self.previewing), previewed)
+        (previewing, previewed)
     }
 }
 
 /// A popover opened by `trigger` that shows `palette`. Style it further
 /// (e.g. its anchor) as any [`Popover`].
-// Used by Task 7; see `ColorPalette`.
-#[allow(dead_code)]
 pub(crate) fn palette_popover(
     id: impl Into<ElementId>,
     palette: &Entity<ColorPalette>,
@@ -228,7 +261,7 @@ fn choose(
     let Ok((on_pick, popover)) = palette.update(cx, |palette, cx| {
         palette.current = color.clone();
         // A choice after a drag replaces the drag's colour.
-        palette.previewed = None;
+        palette.previews.chose();
         cx.notify();
         (palette.on_pick.clone(), palette.popover.clone())
     }) else {
@@ -268,12 +301,20 @@ fn is_current(current: Option<&str>, swatch: &str) -> bool {
     current.is_some_and(|c| c.eq_ignore_ascii_case(swatch))
 }
 
-/// The recent colours the palette can show: valid ones, uppercase, in order.
+/// The recent colours the palette can show: valid ones, uppercase, in
+/// order, each once, at most [`MAX_RECENT_SWATCHES`] (the settings file may
+/// have been edited by hand).
 fn recent_swatches(recent: &[String]) -> Vec<String> {
-    recent
-        .iter()
-        .filter_map(|c| normalize_hex_color(c))
-        .collect()
+    let mut shown: Vec<String> = Vec::new();
+    for color in recent.iter().filter_map(|c| normalize_hex_color(c)) {
+        if shown.len() == MAX_RECENT_SWATCHES {
+            break;
+        }
+        if !shown.contains(&color) {
+            shown.push(color);
+        }
+    }
+    shown
 }
 
 impl Render for ColorPalette {
@@ -459,7 +500,7 @@ fn custom_picker(
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
-    use super::{is_current, recent_swatches, PRESET_COLORS};
+    use super::{is_current, recent_swatches, Previews, PRESET_COLORS};
     use mindweave_core::color::normalize_hex_color;
 
     #[test]
@@ -471,6 +512,10 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), 20);
+        // The dark grey sits between black and mid grey; one rose-red only.
+        assert!(PRESET_COLORS.contains(&"#666666"));
+        assert!(!PRESET_COLORS.contains(&"#4D4D4D"));
+        assert!(!PRESET_COLORS.contains(&"#E11D48"));
     }
 
     #[test]
@@ -484,5 +529,44 @@ mod tests {
     fn recent_swatches_skip_invalid_entries() {
         let recent = ["#abcdef".to_string(), "oops".into(), "#000000".into()];
         assert_eq!(recent_swatches(&recent), ["#ABCDEF", "#000000"]);
+    }
+
+    #[test]
+    fn recent_swatches_are_deduped_and_capped_at_eight() {
+        // A hand-edited settings file may repeat colours or hold too many.
+        let recent: Vec<String> = ["#ABCDEF", "#abcdef", "#000000"]
+            .into_iter()
+            .map(String::from)
+            .chain((0..10).map(|i| format!("#1111{i:02}")))
+            .collect();
+        let shown = recent_swatches(&recent);
+        assert_eq!(shown.len(), 8);
+        assert_eq!(&shown[..3], ["#ABCDEF", "#000000", "#111100"]);
+    }
+
+    #[test]
+    fn previews_end_when_the_palette_closes() {
+        // Preview, preview, close: the caller is owed an EndPreview, and the
+        // drag's last colour is remembered.
+        let mut p = Previews::default();
+        p.open();
+        p.preview("#110000");
+        p.preview("#220000");
+        assert_eq!(p.close(), (true, Some("#220000".to_string())));
+        // Nothing carries over to the next opening.
+        p.open();
+        assert_eq!(p.close(), (false, None));
+
+        // A swatch after a drag: its Set replaces the drag's colour, and
+        // closing still ends the previews.
+        p.open();
+        p.preview("#330000");
+        p.chose();
+        assert_eq!(p.close(), (true, None));
+
+        // A swatch alone: no EndPreview.
+        p.open();
+        p.chose();
+        assert_eq!(p.close(), (false, None));
     }
 }

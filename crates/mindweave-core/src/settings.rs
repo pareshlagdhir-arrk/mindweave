@@ -9,6 +9,8 @@ use crate::color::normalize_hex_color;
 pub const MAX_RECENT: usize = 20;
 /// How many recently picked colours the colour palette remembers.
 pub const MAX_RECENT_COLORS: usize = 8;
+/// How many recently picked font families the font list shows first.
+pub const MAX_RECENT_FONTS: usize = 5;
 const DEFAULT_THEME: &str = "Mindweave One Dark";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -36,6 +38,9 @@ pub struct AppSettings {
     /// Colours picked in the colour palette, newest first, as uppercase
     /// `#RRGGBB`; at most [`MAX_RECENT_COLORS`].
     pub recent_colors: Vec<String>,
+    /// Font families picked in the Text section's font list, newest
+    /// first; at most [`MAX_RECENT_FONTS`].
+    pub recent_fonts: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -48,6 +53,7 @@ impl Default for AppSettings {
             show_layers: true,
             show_properties: true,
             recent_colors: Vec::new(),
+            recent_fonts: Vec::new(),
         }
     }
 }
@@ -104,6 +110,18 @@ impl AppSettings {
         self.recent_colors.retain(|c| *c != color);
         self.recent_colors.insert(0, color);
         self.recent_colors.truncate(MAX_RECENT_COLORS);
+    }
+
+    /// Moves or inserts font family `family` at the front of the recent
+    /// fonts, dropping the oldest beyond [`MAX_RECENT_FONTS`]. A blank name
+    /// is ignored.
+    pub fn push_recent_font(&mut self, family: &str) {
+        if family.trim().is_empty() {
+            return;
+        }
+        self.recent_fonts.retain(|f| f != family);
+        self.recent_fonts.insert(0, family.to_string());
+        self.recent_fonts.truncate(MAX_RECENT_FONTS);
     }
 
     pub fn recent_existing(&self) -> Vec<&RecentFile> {
@@ -258,6 +276,28 @@ mod tests {
         // Old settings files without the field load with no recent colours.
         let old: AppSettings = serde_json::from_str(r#"{"theme": "X"}"#).unwrap();
         assert!(old.recent_colors.is_empty());
+    }
+
+    #[test]
+    fn recent_fonts_dedupe_and_cap() {
+        let mut s = AppSettings::default();
+        assert!(s.recent_fonts.is_empty());
+        s.push_recent_font("Georgia");
+        s.push_recent_font("Menlo");
+        // Picking a font again moves it to the front, once.
+        s.push_recent_font("Georgia");
+        assert_eq!(s.recent_fonts, ["Georgia", "Menlo"]);
+        // Blank names are ignored; names are kept as given otherwise.
+        s.push_recent_font("   ");
+        assert_eq!(s.recent_fonts, ["Georgia", "Menlo"]);
+        for name in ["A", "B", "C", "D", "E", "F"] {
+            s.push_recent_font(name);
+        }
+        assert_eq!(s.recent_fonts.len(), MAX_RECENT_FONTS);
+        assert_eq!(s.recent_fonts, ["F", "E", "D", "C", "B"]);
+        // Old settings files without the field load with no recent fonts.
+        let old: AppSettings = serde_json::from_str(r#"{"theme": "X"}"#).unwrap();
+        assert!(old.recent_fonts.is_empty());
     }
 
     #[test]

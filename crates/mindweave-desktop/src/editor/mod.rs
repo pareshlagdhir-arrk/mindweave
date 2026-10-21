@@ -14,6 +14,7 @@ mod status_bar;
 mod text_edit;
 mod text_layout;
 mod text_paint;
+mod text_properties;
 pub mod tool;
 mod toolbar;
 
@@ -376,13 +377,16 @@ impl EditorWindow {
         .detach();
     }
 
-    /// Ends text editing (its undo step), ends a colour picker's undo
+    /// Applies a text size being typed (to the text it was typed for), ends
+    /// text editing (its undo step), ends a colour picker's undo
     /// step, then applies edits that otherwise wait for Enter or blur: an
     /// open rename and a Properties number being typed (each its own undo
     /// step). Undo, Redo, Save, Close, Quit, the edit actions and page and
     /// layer switches call this first, so keyboard shortcuts and clicks do
     /// not skip or misplace them.
     pub fn commit_pending_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A text size typed while editing belongs to the edited text.
+        self.commit_focused_text_size(window, cx);
         self.end_text_edit(window, cx);
         self.finish_color_edit(cx);
         if self.rename.is_some() {
