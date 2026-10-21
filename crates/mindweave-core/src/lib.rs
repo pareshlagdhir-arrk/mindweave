@@ -12,6 +12,7 @@ pub mod session;
 pub mod settings;
 pub mod shape;
 pub mod svg;
+pub mod text;
 pub mod transform;
 pub mod viewport;
 
@@ -34,6 +35,10 @@ pub use settings::{
     load_settings, save_settings, settings_path, AppSettings, RecentFile, WindowSize, MAX_RECENT,
 };
 pub use shape::{Shape, Style};
+pub use text::{
+    HAlign, Mixed, Paragraph, RichText, Run, RunStyle, StyleChange, StyleSummary,
+    DEFAULT_FONT_SIZE, LABEL_FONT_SIZE, LINE_BREAK, MAX_FONT_SIZE, MIN_FONT_SIZE,
+};
 pub use transform::{
     drag_create, frame_aabb, handle_positions, marquee_selects, resize, rotate,
     rotate_handle_position, selection_bounds, translate, Handle, CLICK_DRAG_THRESHOLD,
