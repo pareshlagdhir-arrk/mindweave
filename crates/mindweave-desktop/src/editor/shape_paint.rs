@@ -14,6 +14,7 @@ use mindweave_core::{
 use uuid::Uuid;
 
 use super::hex_to_hsla;
+use super::images::ImageCache;
 use super::text_paint::{paint_shape_text, TextPaint};
 
 /// Outline colour of a placeholder.
@@ -55,7 +56,7 @@ pub fn shape_geometry_with(shape: &Shape, libs: &LibraryRegistry, jumps: &[f32])
     let f = &shape.frame;
     let style = &shape.style;
     let line = shape.line.as_ref().filter(|_| shape.is_line());
-    let (local, placeholder) = if shape.is_text_box() {
+    let (local, placeholder) = if shape.is_text_box() || shape.is_image() {
         (box_geometry(f.w, f.h, FillRole::Shape), false)
     } else if let Some(props) = line {
         (
@@ -300,11 +301,13 @@ pub fn paint_shapes(
     libs: &LibraryRegistry,
     vp: &Viewport,
     cache: &mut GeometryCache,
+    images: &mut ImageCache,
     text: &mut TextPaint,
 ) {
     let painter = ShapePainter::new(bounds, vp, 1., cx);
     cache.begin_frame();
     cache.update_jumps(page);
+    images.begin_frame();
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
         // Layers are stored top first.
         for layer in page.layers.iter().rev().filter(|l| l.visible) {
@@ -312,6 +315,18 @@ pub fn paint_shapes(
                 let entry = cache.entry(shape, libs);
                 let visible = painter.visible(&shape.style, &entry.outline);
                 if visible {
+                    if let Some(data) = shape.image.as_ref().filter(|_| shape.is_image()) {
+                        if let Some(image) = images.get(data, cx) {
+                            let r = screen_rect(&frame_aabb(&shape.frame), vp, 0.);
+                            let at = Bounds::new(
+                                bounds.origin + point(px(r.x), px(r.y)),
+                                size_of(r.w, r.h),
+                            );
+                            window
+                                .paint_image(bounds, at, Corners::default(), image, 0, false)
+                                .ok();
+                        }
+                    }
                     let stale = entry
                         .tessellation
                         .as_ref()
@@ -335,6 +350,7 @@ pub fn paint_shapes(
         }
     });
     cache.end_frame();
+    images.end_frame(window);
 }
 
 /// Paints `shape` as a placement preview, at `opacity` times its own.

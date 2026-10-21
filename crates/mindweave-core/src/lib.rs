@@ -1,5 +1,6 @@
 //! Mindweave core: pure-Rust document model and file format.
 
+pub mod arrange;
 pub mod clipboard;
 pub mod color;
 pub mod document;
@@ -7,6 +8,7 @@ pub mod files;
 pub mod format;
 pub mod geometry;
 pub mod history;
+pub mod image;
 pub mod library;
 pub mod line;
 pub mod session;
@@ -18,6 +20,7 @@ pub mod text_history;
 pub mod transform;
 pub mod viewport;
 
+pub use arrange::{expand_to_units, unit_members, unit_of, whole_units_only, Arrange};
 pub use clipboard::{
     duplicate, from_clipboard, is_mindweave_payload, is_newer_payload, plain_text_box,
     prepare_paste, to_clipboard, CLIPBOARD_MARKER, CLIPBOARD_VERSION, MAX_CLIPBOARD_BYTES,
@@ -29,6 +32,10 @@ pub use color::{
 pub use document::{BackgroundPattern, CanvasSettings, Document, Layer, Page, Viewport};
 pub use files::{rename_document, validate_new_stem, RenameError, MAX_STEM_LEN};
 pub use format::{load, save, FormatError, FORMAT_VERSION};
+pub use image::{
+    collect_images, image_id, placed_size, resolve_images, ImageData, ImageFormat, ImageStore,
+    StoredImage, IMAGE_SHAPE, MAX_IMAGE_BYTES,
+};
 pub use library::{
     builtin_libraries, load_library, user_libraries_dir, Charge, DirFiles, EmbeddedFiles, Icon,
     Library, LibraryError, LibraryFiles, LibraryRegistry, LoadReport, ParamDef, ShapeDef,

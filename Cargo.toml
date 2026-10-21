@@ -23,5 +23,6 @@ roxmltree = "=0.21.1"
 svgtypes = "=0.16.1"
 toml = "=1.1.8"
 unicode-segmentation = "=1.13.3"
+base64 = "=0.22.1"
 # The version gpui uses: rotated text is drawn from its glyph outlines.
 font-kit = { package = "zed-font-kit", version = "=0.14.1-zed", default-features = false, features = ["source"] }

@@ -9,9 +9,10 @@ use gpui_kit::component::{h_flex, ActiveTheme as _, Sizable as _, TitleBar};
 use gpui_kit::*;
 
 use crate::actions::{
-    self, CloseWindow, Cut, Delete, Duplicate, NewFile, NotImplemented, OpenFile, Paste, Quit,
-    Redo, Save, SelectAll, ShowDashboard, ToggleLayers, ToggleProperties, ToggleThemePicker, Undo,
-    ZoomIn, ZoomOut, ZoomReset,
+    self, BringForward, BringToFront, CloseWindow, Cut, Delete, Duplicate, Group, NewFile,
+    NotImplemented, OpenFile, Paste, Quit, Redo, Save, SelectAll, SendBackward, SendToBack,
+    ShowDashboard, ToggleLayers, ToggleProperties, ToggleThemePicker, Undo, Ungroup, ZoomIn,
+    ZoomOut, ZoomReset,
 };
 use crate::app_state::AppState;
 
@@ -157,11 +158,13 @@ pub(crate) fn menus(kind: WindowKind, panels: PanelState, include_quit: bool) ->
         MenuSpec {
             name: "Arrange",
             entries: vec![
-                later("Bring to Front"),
-                later("Send to Back"),
+                item("Bring to Front", BringToFront, editor),
+                item("Bring Forward", BringForward, editor),
+                item("Send Backward", SendBackward, editor),
+                item("Send to Back", SendToBack, editor),
                 Separator,
-                later("Group"),
-                later("Ungroup"),
+                item("Group", Group, editor),
+                item("Ungroup", Ungroup, editor),
             ],
         },
         MenuSpec {
@@ -339,12 +342,27 @@ mod tests {
         for kind in [WindowKind::Dashboard, WindowKind::Editor] {
             let unbuilt: Vec<_> = items(kind, true)
                 .into_iter()
-                .filter(|(menu, ..)| ["Arrange", "Help"].contains(menu))
+                .filter(|(menu, ..)| *menu == "Help")
                 .collect();
             assert!(!unbuilt.is_empty());
             assert!(
                 unbuilt.iter().all(|(_, _, enabled, _)| !enabled),
                 "{unbuilt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn arrange_menu_works_in_the_editor_only() {
+        for (kind, enabled) in [(WindowKind::Dashboard, false), (WindowKind::Editor, true)] {
+            let arrange: Vec<_> = items(kind, true)
+                .into_iter()
+                .filter(|(menu, ..)| *menu == "Arrange")
+                .collect();
+            assert_eq!(arrange.len(), 6);
+            assert!(
+                arrange.iter().all(|(_, _, e, _)| *e == enabled),
+                "{arrange:?}"
             );
         }
     }

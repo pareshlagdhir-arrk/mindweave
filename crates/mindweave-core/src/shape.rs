@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::color::normalize_hex_color;
 use crate::geometry::{Frame, Pt};
+use crate::image::{ImageData, IMAGE_SHAPE};
 use crate::library::ShapeDef;
 use crate::line::{ArrowHead, LineDash, LineProps, LINE_LIBRARY, LINE_SHAPE, OLD_ARROW_SHAPE};
 use crate::text::{HAlign, RichText, RunStyle, DEFAULT_FONT_SIZE, LABEL_FONT_SIZE};
@@ -147,6 +148,13 @@ pub struct Shape {
     /// Set on lines only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<LineProps>,
+    /// The picture of an image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageData>,
+    /// The groups the shape is in, outermost first (see
+    /// [`crate::arrange`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Uuid>,
     /// Fields this version does not know, written back unchanged.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -178,6 +186,8 @@ impl Shape {
             label: None,
             text_box: None,
             line: None,
+            image: None,
+            groups: Vec::new(),
             extra: serde_json::Map::new(),
         }
         .normalized()
@@ -219,8 +229,26 @@ impl Shape {
             }),
             text_box: Some(TextBoxProps::default()),
             line: None,
+            image: None,
+            groups: Vec::new(),
             extra: serde_json::Map::new(),
         }
+    }
+
+    /// A new image showing `data` in `frame`, with no fill or stroke.
+    pub fn new_image(data: ImageData, frame: Frame) -> Shape {
+        let mut s = Shape::new_text_box((frame.x, frame.y));
+        s.shape = IMAGE_SHAPE.to_string();
+        s.frame = frame;
+        s.label = None;
+        s.text_box = None;
+        s.image = Some(data);
+        s.normalized()
+    }
+
+    /// Whether this is an image.
+    pub fn is_image(&self) -> bool {
+        self.library == TEXT_LIBRARY && self.shape == IMAGE_SHAPE
     }
 
     pub fn is_text_box(&self) -> bool {
@@ -321,6 +349,13 @@ impl Shape {
         } else {
             self.line = None;
         }
+        if self.is_image() {
+            // Pictures are drawn upright and unmirrored.
+            let f = &mut self.frame;
+            (f.rotation, f.flip_x, f.flip_y) = (0.0, false, false);
+        } else {
+            self.image = None;
+        }
     }
 }
 
@@ -345,6 +380,32 @@ mod tests {
                 ..RunStyle::default()
             }
         );
+    }
+
+    #[test]
+    fn images_stay_upright_and_only_images_hold_pictures() {
+        let data = ImageData::from_file_bytes(b"GIF89a..".to_vec()).unwrap();
+        let mut img = Shape::new_image(
+            data.clone(),
+            Frame {
+                w: 10.0,
+                h: 5.0,
+                ..Frame::default()
+            },
+        );
+        assert!(img.is_image() && !img.is_text_box());
+        assert!(img.label.is_none());
+        img.frame.rotation = 30.0;
+        img.frame.flip_x = true;
+        img.normalize();
+        assert_eq!((img.frame.rotation, img.frame.flip_x), (0.0, false));
+        // Files hold the picture's id; the bytes are stored beside.
+        let back: Shape = serde_json::from_str(&serde_json::to_string(&img).unwrap()).unwrap();
+        assert_eq!(back.image.as_ref().map(|d| &d.id), Some(&data.id));
+        let mut t = Shape::new_text_box((0.0, 0.0));
+        t.image = Some(data);
+        t.normalize();
+        assert!(t.image.is_none());
     }
 
     #[test]

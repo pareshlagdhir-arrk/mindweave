@@ -274,6 +274,9 @@ fn register_input(
                 if pans {
                     editor.pan_drag = Some(event.position);
                     cx.notify();
+                } else if event.button == MouseButton::Right {
+                    let at = editor.to_canvas(local(event.position, bounds));
+                    editor.select_for_menu(at, cx);
                 } else if event.button == MouseButton::Left {
                     let at = editor.to_canvas(local(event.position, bounds));
                     // The second click of a double click on a gallery
@@ -412,6 +415,7 @@ impl EditorWindow {
             &libs,
             &viewport,
             &mut self.geometry_cache,
+            &mut self.image_cache,
             &mut text,
         );
         self.paint_text_edit(bounds, window, cx);

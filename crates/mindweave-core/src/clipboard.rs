@@ -1,8 +1,9 @@
 //! Clipboard payloads for shapes, plain-text paste, and duplicating shapes.
 //!
 //! Shapes (with their labels, and text boxes) are copied as JSON text:
-//! `{"mindweave":"shapes","version":2,"shapes":[...]}`. Version 1 payloads
-//! (shapes without text) are still read. Clipboard text comes from any
+//! `{"mindweave":"shapes","version":3,"shapes":[...],"images":{...}}`,
+//! each picture stored once in `images` (see [`crate::image`]). Version 1
+//! payloads (shapes without text) and 2 (without images) are still read. Clipboard text comes from any
 //! application, so reading it never panics and rejects anything that is
 //! not such a payload.
 
@@ -12,6 +13,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 
 use crate::geometry::{Frame, Pt, Rect};
+use crate::image::{collect_images, resolve_images, ImageStore};
 use crate::shape::Shape;
 use crate::text::RunStyle;
 use crate::transform::{selection_bounds, DUPLICATE_OFFSET};
@@ -19,7 +21,7 @@ use crate::transform::{selection_bounds, DUPLICATE_OFFSET};
 /// Value of the `"mindweave"` key that marks a shapes payload.
 pub const CLIPBOARD_MARKER: &str = "shapes";
 /// Payload version this build writes; it reads this and every older one.
-pub const CLIPBOARD_VERSION: u64 = 2;
+pub const CLIPBOARD_VERSION: u64 = 3;
 /// Oldest payload version this build reads.
 const OLDEST_CLIPBOARD_VERSION: u64 = 1;
 /// Most characters (graphemes) of plain text pasted into a new text box.
@@ -27,7 +29,7 @@ pub const MAX_PASTE_CHARS: usize = 100_000;
 /// Most shapes accepted from one payload.
 pub const MAX_CLIPBOARD_SHAPES: usize = 10_000;
 /// Longest clipboard text parsed, in bytes.
-pub const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_CLIPBOARD_BYTES: usize = 64 * 1024 * 1024;
 /// The `"mindweave"` key must start within this many bytes of the opening
 /// brace, so other JSON is rejected without being parsed.
 const MARKER_WINDOW: usize = 64;
@@ -42,6 +44,8 @@ pub fn to_clipboard(shapes: &[Shape]) -> String {
         mindweave: &'a str,
         version: u64,
         shapes: &'a [Shape],
+        #[serde(skip_serializing_if = "ImageStore::is_empty")]
+        images: ImageStore,
     }
     let shapes: Vec<Shape> = shapes
         .iter()
@@ -54,6 +58,7 @@ pub fn to_clipboard(shapes: &[Shape]) -> String {
     let payload = Payload {
         mindweave: CLIPBOARD_MARKER,
         version: CLIPBOARD_VERSION,
+        images: collect_images(&shapes),
         shapes: &shapes,
     };
     // Serialising plain data to a string does not fail; an empty string
@@ -81,14 +86,17 @@ pub fn from_clipboard(text: &str) -> Option<Vec<Shape>> {
         Value::Array(items) if items.len() <= MAX_CLIPBOARD_SHAPES => items,
         _ => return None,
     };
-    items
+    let images: ImageStore = match obj.remove("images") {
+        Some(images) => serde_json::from_value(images).ok()?,
+        None => ImageStore::new(),
+    };
+    let mut shapes: Vec<Shape> = items
         .into_iter()
-        .map(|item| {
-            let mut s: Shape = serde_json::from_value(item).ok()?;
-            s.normalize();
-            Some(s)
-        })
-        .collect()
+        .map(|item| serde_json::from_value(item).ok())
+        .collect::<Option<_>>()?;
+    resolve_images(&mut shapes, &images);
+    shapes.iter_mut().for_each(Shape::normalize);
+    Some(shapes)
 }
 
 /// A new text box at `at` holding plain `text` (from another application)
@@ -164,13 +172,18 @@ pub fn prepare_paste(mut shapes: Vec<Shape>, view: &Rect) -> Vec<Shape> {
     shapes
 }
 
-/// Gives `shapes` fresh ids. Line ends attached to one of `shapes` follow
-/// it to its new id; ends attached to anything else are let go.
+/// Gives `shapes` fresh ids, and their groups too, so copies form groups
+/// of their own. Line ends attached to one of `shapes` follow it to its
+/// new id; ends attached to anything else are let go.
 fn renew_ids(shapes: &mut [Shape]) {
     let ids: std::collections::HashMap<Uuid, Uuid> =
         shapes.iter().map(|s| (s.id, Uuid::new_v4())).collect();
+    let mut groups: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
     for s in shapes.iter_mut() {
         s.id = ids[&s.id];
+        for g in &mut s.groups {
+            *g = *groups.entry(*g).or_insert_with(Uuid::new_v4);
+        }
         if let Some(line) = &mut s.line {
             line.start = line.start.and_then(|id| ids.get(&id).copied());
             line.end = line.end.and_then(|id| ids.get(&id).copied());
@@ -205,6 +218,30 @@ mod tests {
     use crate::text::RunStyle;
 
     #[test]
+    fn copies_of_a_group_form_a_new_group() {
+        let (mut a, mut b) = (shape(0., 0., 10., 10.), shape(20., 0., 10., 10.));
+        let g = Uuid::new_v4();
+        a.groups = vec![g];
+        b.groups = vec![g];
+        let copies = duplicate(&[a, b]);
+        assert_ne!(copies[0].groups, vec![g]);
+        assert_eq!(copies[0].groups, copies[1].groups);
+        assert_eq!(copies[0].groups.len(), 1);
+    }
+
+    #[test]
+    fn copied_images_carry_each_picture_once() {
+        let pic = crate::image::ImageData::from_file_bytes(b"GIF89a-copied".to_vec()).unwrap();
+        let shapes: Vec<Shape> = (0..3)
+            .map(|_| Shape::new_image(pic.clone(), Frame::default()))
+            .collect();
+        let text = to_clipboard(&shapes);
+        assert_eq!(text.matches("R0lGODlhLWNvcGllZA==").count(), 1);
+        let back = from_clipboard(&text).unwrap();
+        assert_eq!(back, shapes);
+    }
+
+    #[test]
     fn copied_lines_stay_attached_only_to_copied_shapes() {
         let (a, b) = (shape(0., 0., 10., 10.), shape(50., 0., 10., 10.));
         let mut line = shape(10., 5., 40., 0.);
@@ -229,13 +266,13 @@ mod tests {
         let current = to_clipboard(&[Shape::new_text_box((0., 0.))]);
         assert!(is_mindweave_payload(&current));
         assert!(!is_newer_payload(&current));
-        let newer = current.replace("\"version\":2", "\"version\":99");
+        let newer = current.replace("\"version\":3", "\"version\":99");
         assert!(from_clipboard(&newer).is_none());
         assert!(is_mindweave_payload(&newer));
         assert!(is_newer_payload(&newer));
         // Too large to read: still a payload, not known to be newer.
         let big = format!(
-            "{{\"mindweave\":\"shapes\",\"version\":2,\"pad\":\"{}\"}}",
+            "{{\"mindweave\":\"shapes\",\"version\":3,\"pad\":\"{}\"}}",
             "x".repeat(MAX_CLIPBOARD_BYTES)
         );
         assert!(from_clipboard(&big).is_none());
@@ -278,7 +315,7 @@ mod tests {
         let text = to_clipboard(&shapes);
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["mindweave"], "shapes");
-        assert_eq!(v["version"], 2);
+        assert_eq!(v["version"], 3);
         assert_eq!(v["shapes"].as_array().unwrap().len(), 2);
         assert_eq!(from_clipboard(&text), Some(shapes));
         assert_eq!(from_clipboard(&to_clipboard(&[])), Some(vec![]));
@@ -288,9 +325,9 @@ mod tests {
     fn from_clipboard_rejects_foreign_text() {
         let good = to_clipboard(&[shape(0.0, 0.0, 10.0, 10.0)]);
         let truncated = &good[..good.len() / 2];
-        let version_3 = good.replace("\"version\":2", "\"version\":3");
+        let version_3 = good.replace("\"version\":3", "\"version\":4");
         assert_ne!(version_3, good);
-        let version_0 = good.replace("\"version\":2", "\"version\":0");
+        let version_0 = good.replace("\"version\":3", "\"version\":0");
         let other_marker = good.replace("\"mindweave\":\"shapes\"", "\"mindweave\":\"pages\"");
         assert_ne!(other_marker, good);
         for text in [
@@ -333,7 +370,7 @@ mod tests {
         tb.text_box.as_mut().unwrap().auto_width = false;
         let shapes = vec![a, tb];
         let payload = to_clipboard(&shapes);
-        assert!(payload.starts_with(r#"{"mindweave":"shapes","version":2,"#));
+        assert!(payload.starts_with(r#"{"mindweave":"shapes","version":3,"#));
         let back = from_clipboard(&payload).unwrap();
         assert_eq!(back, shapes);
         assert!(back.iter().all(|s| s.extra.is_empty()));
@@ -388,7 +425,8 @@ mod tests {
         let mut huge = to_clipboard(&[]);
         huge.push_str(&" ".repeat(MAX_CLIPBOARD_BYTES));
         assert_eq!(from_clipboard(&huge), None);
-        assert_eq!(MAX_CLIPBOARD_BYTES, 16 * 1024 * 1024);
+        // Room for a few embedded images.
+        assert_eq!(MAX_CLIPBOARD_BYTES, 64 * 1024 * 1024);
     }
 
     #[test]
@@ -398,7 +436,7 @@ mod tests {
         let good = to_clipboard(&[shape(0.0, 0.0, 10.0, 10.0)]);
         assert!(from_clipboard(&format!("\n  {good}  \n")).is_some());
         let reordered = good.replacen(
-            r#"{"mindweave":"shapes","version":2,"#,
+            r#"{"mindweave":"shapes","version":3,"#,
             r#"{"version":2,"mindweave":"shapes","#,
             1,
         );

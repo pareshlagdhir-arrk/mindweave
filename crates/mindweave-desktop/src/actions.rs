@@ -49,6 +49,13 @@ actions!(
         Duplicate,
         Delete,
         SelectAll,
+        /// The Arrange menu: groups and stacking order of the selection.
+        Group,
+        Ungroup,
+        BringToFront,
+        BringForward,
+        SendBackward,
+        SendToBack,
         /// Stands in for menu items that are not built yet. Nothing handles
         /// it, so the native menu always shows such items disabled.
         NotImplemented,
@@ -169,6 +176,12 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("backspace", Delete, editor),
         KeyBinding::new("delete", Delete, editor),
         KeyBinding::new("cmd-a", SelectAll, editor),
+        KeyBinding::new("cmd-g", Group, editor),
+        KeyBinding::new("cmd-shift-g", Ungroup, editor),
+        KeyBinding::new("cmd-shift-]", BringToFront, editor),
+        KeyBinding::new("cmd-]", BringForward, editor),
+        KeyBinding::new("cmd-[", SendBackward, editor),
+        KeyBinding::new("cmd-shift-[", SendToBack, editor),
     ];
     bindings.extend(text_key_bindings());
     bindings
@@ -277,6 +290,12 @@ mod tests {
             ("backspace", "mindweave::Delete"),
             ("delete", "mindweave::Delete"),
             ("cmd-a", "mindweave::SelectAll"),
+            ("cmd-g", "mindweave::Group"),
+            ("cmd-shift-g", "mindweave::Ungroup"),
+            ("cmd-shift-]", "mindweave::BringToFront"),
+            ("cmd-]", "mindweave::BringForward"),
+            ("cmd-[", "mindweave::SendBackward"),
+            ("cmd-shift-[", "mindweave::SendToBack"),
         ];
         let expected: Vec<(String, &str)> =
             expected.iter().map(|(k, a)| (k.to_string(), *a)).collect();

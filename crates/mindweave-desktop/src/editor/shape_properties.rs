@@ -7,7 +7,7 @@ use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{Frame, Rect};
@@ -21,7 +21,8 @@ use super::properties_panel::{
 };
 use super::{hex_to_hsla, hsla_to_hex, parse_number, section_label, EditorWindow, SMALL_TEXT_SIZE};
 use super::{line_properties, text_properties};
-use crate::libraries::Libraries;
+use crate::actions::{BringForward, BringToFront, Group, SendBackward, SendToBack, Ungroup};
+use crate::libraries::{lucide_icon_path, Libraries};
 
 /// Stroke widths run from 0 to this, in steps of [`STROKE_WIDTH_STEP`].
 const STROKE_WIDTH_MAX: f32 = 100.0;
@@ -202,11 +203,20 @@ pub(super) fn summarize(shapes: &[&Shape], libs: &LibraryRegistry) -> Option<Sum
         .iter()
         .all(|s| s.library == first.library && s.shape == first.shape);
     let def = libs.shape(&first.library, &first.shape);
-    let title = if !same_kind {
+    let one_group = shapes.len() > 1
+        && first
+            .groups
+            .first()
+            .is_some_and(|g| shapes.iter().all(|s| s.groups.first() == Some(g)));
+    let title = if one_group {
+        "Group".to_string()
+    } else if !same_kind {
         "Mixed".to_string()
     } else if first.is_text_box() {
-        // Text boxes belong to no shape library.
+        // Text boxes and images belong to no shape library.
         "Text".to_string()
+    } else if first.is_image() {
+        "Image".to_string()
     } else {
         match (libs.libraries().iter().find(|l| l.id == first.library), def) {
             (None, _) => "Missing library".to_string(),
@@ -784,6 +794,7 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
     panel
         .child(section_label("Shape", cx))
         .child(title)
+        .child(arrange_row(cx))
         .child(section_label("Transform", cx).mt(px(SECTION_GAP)))
         .child(pair(BoundsField::X, BoundsField::Y))
         .child(pair(BoundsField::W, BoundsField::H))
@@ -815,6 +826,70 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
                 .child(section_label("Shape properties", cx).mt(px(SECTION_GAP)))
                 .children(params)
         })
+}
+
+/// Buttons for the Arrange menu's commands: stacking order, then group
+/// and ungroup.
+fn arrange_row(cx: &mut Context<EditorWindow>) -> impl IntoElement {
+    let button = |id: &'static str,
+                  icon: &str,
+                  tip: &'static str,
+                  action: fn() -> Box<dyn Action>,
+                  cx: &App| {
+        Button::new(id)
+            .ghost()
+            .small()
+            .icon(Icon::empty().path(lucide_icon_path(icon, cx)))
+            .tooltip(tip)
+            .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
+    };
+    h_flex()
+        .h(px(ROW_HEIGHT))
+        .flex_none()
+        .gap(px(2.))
+        .child(button(
+            "arrange-front",
+            "bring-to-front",
+            "Bring to Front (⇧⌘])",
+            || Box::new(BringToFront),
+            cx,
+        ))
+        .child(button(
+            "arrange-forward",
+            "arrow-up",
+            "Bring Forward (⌘])",
+            || Box::new(BringForward),
+            cx,
+        ))
+        .child(button(
+            "arrange-backward",
+            "arrow-down",
+            "Send Backward (⌘[)",
+            || Box::new(SendBackward),
+            cx,
+        ))
+        .child(button(
+            "arrange-back",
+            "send-to-back",
+            "Send to Back (⇧⌘[)",
+            || Box::new(SendToBack),
+            cx,
+        ))
+        .child(div().flex_1())
+        .child(button(
+            "arrange-group",
+            "group",
+            "Group (⌘G)",
+            || Box::new(Group),
+            cx,
+        ))
+        .child(button(
+            "arrange-ungroup",
+            "ungroup",
+            "Ungroup (⇧⌘G)",
+            || Box::new(Ungroup),
+            cx,
+        ))
 }
 
 /// Half a row: an X, Y, W or H field with its letter inside; `read_only`
@@ -1145,6 +1220,19 @@ mod tests {
         let s = summarize(&[&rect, &ellipse], &libs).unwrap();
         assert_eq!(s.title, "Mixed");
         assert!(s.params.is_empty());
+    }
+
+    #[test]
+    fn one_group_is_titled_group() {
+        let libs = libs();
+        let g = uuid::Uuid::new_v4();
+        let mut a = shape(&libs, "rectangle", frame(0., 0., 10., 10.));
+        let mut b = shape(&libs, "ellipse", frame(20., 0., 10., 10.));
+        a.groups = vec![g];
+        b.groups = vec![g];
+        assert_eq!(summarize(&[&a, &b], &libs).unwrap().title, "Group");
+        b.groups.clear();
+        assert_eq!(summarize(&[&a, &b], &libs).unwrap().title, "Mixed");
     }
 
     #[test]

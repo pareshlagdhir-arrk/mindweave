@@ -1,12 +1,17 @@
-//! `.mindweave` file format: pretty-printed JSON with a top-level `version`.
+//! `.mindweave` file format: pretty-printed JSON with a top-level
+//! `version`. Version 4 adds `images`: each picture the document shows,
+//! stored once by id (see [`crate::image`]).
 
 use std::path::Path;
 
 use thiserror::Error;
 
 use crate::document::Document;
+use crate::image::{collect_images, resolve_images, ImageStore};
 
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
+/// Top-level key of the stored pictures.
+const IMAGES_KEY: &str = "images";
 
 #[derive(Debug, Error)]
 pub enum FormatError {
@@ -22,7 +27,7 @@ pub enum FormatError {
 
 pub fn load(path: &Path) -> Result<Document, FormatError> {
     let text = std::fs::read_to_string(path)?;
-    let value: serde_json::Value = serde_json::from_str(&text)?;
+    let mut value: serde_json::Value = serde_json::from_str(&text)?;
     // Check the version before the full parse so newer formats report clearly.
     if let Some(v) = value.get("version").and_then(|v| v.as_u64()) {
         if v > u64::from(FORMAT_VERSION) {
@@ -31,7 +36,17 @@ pub fn load(path: &Path) -> Result<Document, FormatError> {
             ));
         }
     }
+    let images: ImageStore = match value.as_object_mut().and_then(|o| o.remove(IMAGES_KEY)) {
+        Some(images) => serde_json::from_value(images)?,
+        None => ImageStore::new(),
+    };
     let mut doc: Document = serde_json::from_value(value)?;
+    let shapes = doc
+        .pages
+        .iter_mut()
+        .flat_map(|p| p.layers.iter_mut())
+        .flat_map(|l| l.objects.iter_mut());
+    resolve_images(shapes, &images);
     if doc.pages.is_empty() || doc.pages.iter().any(|p| p.layers.is_empty()) {
         return Err(FormatError::Empty);
     }
@@ -48,7 +63,17 @@ pub fn load(path: &Path) -> Result<Document, FormatError> {
 }
 
 pub fn save(doc: &Document, path: &Path) -> Result<(), FormatError> {
-    let json = serde_json::to_string_pretty(doc)?;
+    let mut value = serde_json::to_value(doc)?;
+    let images = collect_images(
+        doc.pages
+            .iter()
+            .flat_map(|p| &p.layers)
+            .flat_map(|l| &l.objects),
+    );
+    if let (Some(obj), false) = (value.as_object_mut(), images.is_empty()) {
+        obj.insert(IMAGES_KEY.to_string(), serde_json::to_value(&images)?);
+    }
+    let json = serde_json::to_string_pretty(&value)?;
     let tmp = path.with_extension("mindweave.tmp");
     std::fs::write(&tmp, json)?;
     if let Err(e) = std::fs::rename(&tmp, path) {
@@ -67,7 +92,7 @@ mod tests {
     #[test]
     fn new_document_has_one_page_one_layer() {
         let d = Document::new();
-        assert_eq!(d.version, 3);
+        assert_eq!(d.version, 4);
         assert_eq!(d.pages.len(), 1);
         assert_eq!(d.pages[0].name, "Page 1");
         assert_eq!(d.pages[0].layers[0].name, "Layer 1");
@@ -97,6 +122,32 @@ mod tests {
     }
 
     #[test]
+    fn each_picture_is_saved_once_and_shared_on_load() {
+        use crate::image::ImageData;
+        use crate::shape::Shape;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mindweave");
+        let pic = ImageData::from_file_bytes(b"GIF89a-picture-bytes".to_vec()).unwrap();
+        let mut d = Document::new();
+        let frame = crate::geometry::Frame::default();
+        d.pages[0].layers[0].objects = (0..10)
+            .map(|_| Shape::new_image(pic.clone(), frame))
+            .collect();
+        save(&d, &path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        // The bytes appear once, however many images show them.
+        assert_eq!(text.matches("R0lGODlhLXBpY3R1cmUtYnl0ZXM=").count(), 1);
+        let back = load(&path).unwrap();
+        assert_eq!(back, d);
+        let objects = &back.pages[0].layers[0].objects;
+        let bytes = |i: usize| objects[i].image.as_ref().unwrap().bytes.clone();
+        assert!(std::sync::Arc::ptr_eq(&bytes(0), &bytes(9)));
+        // A document without images has no images key.
+        save(&Document::new(), &path).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("\"images\""));
+    }
+
+    #[test]
     fn saved_json_is_pretty_and_lowercase_pattern() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.mindweave");
@@ -104,17 +155,17 @@ mod tests {
         let s = fs::read_to_string(&path).unwrap();
         assert!(s.contains("\n  "));
         assert!(s.contains("\"pattern\": \"dots\""));
-        assert!(s.contains("\"version\": 3"));
+        assert!(s.contains("\"version\": 4"));
     }
 
     #[test]
     fn load_rejects_newer_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.mindweave");
-        fs::write(&path, r#"{"version":4,"pages":[],"active_page":0}"#).unwrap();
+        fs::write(&path, r#"{"version":5,"pages":[],"active_page":0}"#).unwrap();
         assert!(matches!(
             load(&path),
-            Err(FormatError::UnsupportedVersion(4))
+            Err(FormatError::UnsupportedVersion(5))
         ));
     }
 
@@ -265,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_file_loads_and_saves_as_v3() {
+    fn v1_file_loads_and_saves_as_current() {
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = (
             dir.path().join("a.mindweave"),
@@ -276,9 +327,9 @@ mod tests {
         v["pages"][0]["layers"][0]["objects"] = serde_json::json!([]);
         fs::write(&a, v.to_string()).unwrap();
         let d = load(&a).unwrap();
-        assert_eq!(d.version, 3);
+        assert_eq!(d.version, 4);
         save(&d, &b).unwrap();
-        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 3"));
+        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 4"));
     }
 
     #[test]
@@ -293,7 +344,7 @@ mod tests {
         // A version 2 file (no labels or text boxes) loads unchanged.
         fs::write(&a, SHAPE_DOC).unwrap();
         let mut d = load(&a).unwrap();
-        assert_eq!(d.version, 3);
+        assert_eq!(d.version, 4);
         let objects = &mut d.pages[0].layers[0].objects;
         assert_eq!(objects[0].label, None);
         assert_eq!(objects[0].text_box, None);
@@ -319,7 +370,7 @@ mod tests {
 
         save(&d, &b).unwrap();
         let saved = fs::read_to_string(&b).unwrap();
-        assert!(saved.contains("\"version\": 3"));
+        assert!(saved.contains("\"version\": 4"));
         let back = load(&b).unwrap();
         assert_eq!(back, d);
         let shapes = &back.pages[0].layers[0].objects;

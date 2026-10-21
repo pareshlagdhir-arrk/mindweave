@@ -1,11 +1,15 @@
-//! The editor status bar. Left: page and layer. Right: pointer position,
-//! zoom (resets it) and theme name (opens the theme picker).
+//! The editor status bar. Left: the Layers sidebar button, page and
+//! layer. Right: pointer position, zoom (resets it), theme name (opens the
+//! theme picker) and the Properties sidebar button.
 
-use gpui_kit::component::{h_flex, ActiveTheme as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::{h_flex, ActiveTheme as _, Icon, Selectable as _, Sizable as _};
 use gpui_kit::*;
 
 use super::{EditorWindow, SMALL_TEXT_SIZE};
-use crate::actions::{ToggleThemePicker, ZoomReset};
+use crate::actions::{ToggleLayers, ToggleProperties, ToggleThemePicker, ZoomReset};
+use crate::app_state::AppState;
+use crate::libraries::lucide_icon_path;
 
 const STATUS_BAR_HEIGHT: f32 = 24.;
 const ITEM_GAP: f32 = 16.;
@@ -21,16 +25,37 @@ pub(super) fn render(editor: &EditorWindow, cx: &App) -> impl IntoElement {
         .map(|l| l.name.as_str())
         .unwrap_or_default();
 
+    let settings = &cx.global::<AppState>().settings;
+    let layers = sidebar_button(
+        "toggle-layers",
+        "panel-left",
+        settings.show_layers,
+        "Layers",
+        "⌘B",
+        || Box::new(ToggleLayers),
+        cx,
+    );
+    let properties = sidebar_button(
+        "toggle-properties",
+        "panel-right",
+        settings.show_properties,
+        "Properties",
+        "⌥⌘B",
+        || Box::new(ToggleProperties),
+        cx,
+    );
+
     h_flex()
         .h(px(STATUS_BAR_HEIGHT))
         .flex_none()
-        .px(px(12.))
+        .px(px(6.))
         .gap(px(ITEM_GAP))
         .bg(theme.status_bar)
         .border_t_1()
         .border_color(theme.status_bar_border)
         .text_size(px(SMALL_TEXT_SIZE))
         .text_color(theme.muted_foreground)
+        .child(layers)
         .child(page_label(doc.active_page, doc.pages.len()))
         .child(format!("Layer: {layer_name}"))
         .child(div().flex_1())
@@ -51,6 +76,32 @@ pub(super) fn render(editor: &EditorWindow, cx: &App) -> impl IntoElement {
                 .child(theme.theme_name().clone())
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleThemePicker), cx)),
         )
+        .child(properties)
+}
+
+/// A button showing or hiding sidebar `name`, highlighted while shown.
+fn sidebar_button(
+    id: &'static str,
+    icon: &str,
+    shown: bool,
+    name: &str,
+    keys: &str,
+    action: fn() -> Box<dyn Action>,
+    cx: &App,
+) -> impl IntoElement {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .icon(Icon::empty().path(lucide_icon_path(icon, cx)))
+        .selected(shown)
+        .tooltip(sidebar_tooltip(name, shown, keys))
+        .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
+}
+
+/// "Hide Layers (⌘B)" or "Show Layers (⌘B)".
+fn sidebar_tooltip(name: &str, shown: bool, keys: &str) -> String {
+    let verb = if shown { "Hide" } else { "Show" };
+    format!("{verb} {name} ({keys})")
 }
 
 /// "Page {i} of {n}" for the zero-based `active` page.
@@ -70,7 +121,16 @@ fn zoom_label(percent: u32) -> String {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
-    use super::{cursor_label, page_label, zoom_label};
+    use super::{cursor_label, page_label, sidebar_tooltip, zoom_label};
+
+    #[test]
+    fn sidebar_tooltips_say_what_a_click_does() {
+        assert_eq!(sidebar_tooltip("Layers", true, "⌘B"), "Hide Layers (⌘B)");
+        assert_eq!(
+            sidebar_tooltip("Properties", false, "⌥⌘B"),
+            "Show Properties (⌥⌘B)"
+        );
+    }
 
     #[test]
     fn page_label_is_one_based() {

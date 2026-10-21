@@ -3,6 +3,7 @@
 
 mod canvas;
 mod color_palette;
+mod images;
 mod interaction;
 mod layers_panel;
 mod line_properties;
@@ -23,6 +24,7 @@ use std::collections::HashSet;
 use std::future::Future;
 
 use gpui_kit::component::input::{self, Escape, Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _};
@@ -30,16 +32,17 @@ use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
 use mindweave_core::{
     duplicate, format_hex_color, from_clipboard, is_mindweave_payload, is_newer_payload,
-    parse_hex_color, plain_text_box, prepare_paste, to_clipboard, DocumentSession, Shape, Viewport,
-    MAX_CLIPBOARD_SHAPES,
+    parse_hex_color, plain_text_box, prepare_paste, to_clipboard, unit_members, Arrange,
+    DocumentSession, Shape, Viewport, MAX_CLIPBOARD_SHAPES,
 };
 
 // `Copy` is used by path: importing it would hide the derivable trait.
 use crate::actions::{
-    self, Cancel, CloseWindow, Cut, Delete, Duplicate, EditText, NudgeDown, NudgeDownFar,
-    NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp, NudgeUpFar, Paste, Redo, Save,
-    SelectAll, ToggleLayers, ToggleProperties, ToolEllipse, ToolHand, ToolLine, ToolPointer,
-    ToolRectangle, ToolText, Undo, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
+    self, BringForward, BringToFront, Cancel, CloseWindow, Cut, Delete, Duplicate, EditText, Group,
+    NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp,
+    NudgeUpFar, Paste, Redo, Save, SelectAll, SendBackward, SendToBack, ToggleLayers,
+    ToggleProperties, ToolEllipse, ToolHand, ToolLine, ToolPointer, ToolRectangle, ToolText, Undo,
+    Ungroup, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
 };
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
@@ -211,6 +214,8 @@ pub struct EditorWindow {
     attach_highlight: Option<Uuid>,
     /// Canvas outlines of the shapes painted last frame.
     geometry_cache: GeometryCache,
+    /// Pictures decoded for painting.
+    image_cache: images::ImageCache,
     /// Text layouts of the active page's labels and text boxes.
     text_layouts: TextLayoutCache,
     /// Glyph outlines for drawing rotated text.
@@ -271,6 +276,7 @@ impl EditorWindow {
             line_ends: [None; 2],
             attach_highlight: None,
             geometry_cache: GeometryCache::default(),
+            image_cache: images::ImageCache::default(),
             text_layouts: TextLayoutCache::default(),
             glyph_outlines: GlyphOutlines::default(),
             session_gesture: SessionGesture::default(),
@@ -590,6 +596,60 @@ impl EditorWindow {
         self.request_close(window, cx);
     }
 
+    fn on_group(&mut self, _: &Group, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_action(window, cx);
+        let ids = self.selection.clone();
+        self.update_session(
+            |s| {
+                s.group_shapes(&ids);
+            },
+            cx,
+        );
+    }
+
+    fn on_ungroup(&mut self, _: &Ungroup, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_action(window, cx);
+        let ids = self.selection.clone();
+        self.update_session(|s| s.ungroup_shapes(&ids), cx);
+    }
+
+    /// Moves the selection in the stacking order as one undo step.
+    fn arrange(&mut self, how: Arrange, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_action(window, cx);
+        let ids = self.selection.clone();
+        self.update_session(|s| s.arrange_shapes(&ids, how), cx);
+    }
+
+    fn on_bring_to_front(&mut self, _: &BringToFront, window: &mut Window, cx: &mut Context<Self>) {
+        self.arrange(Arrange::ToFront, window, cx);
+    }
+
+    fn on_bring_forward(&mut self, _: &BringForward, window: &mut Window, cx: &mut Context<Self>) {
+        self.arrange(Arrange::Forward, window, cx);
+    }
+
+    fn on_send_backward(&mut self, _: &SendBackward, window: &mut Window, cx: &mut Context<Self>) {
+        self.arrange(Arrange::Backward, window, cx);
+    }
+
+    fn on_send_to_back(&mut self, _: &SendToBack, window: &mut Window, cx: &mut Context<Self>) {
+        self.arrange(Arrange::ToBack, window, cx);
+    }
+
+    /// A right press at canvas point `at`: a shape (its whole group)
+    /// becomes the selection unless it is already selected, so the menu
+    /// acts on it; empty canvas clears the selection.
+    pub(super) fn select_for_menu(&mut self, at: Pt, cx: &mut Context<Self>) {
+        match self.shape_at(at, cx) {
+            Some(id) if self.selection.contains(&id) => {}
+            Some(id) => {
+                self.selection = unit_members(self.session.shapes_on_active_layer(), id);
+            }
+            None => self.selection.clear(),
+        }
+        cx.notify();
+    }
+
     fn on_toggle_layers(&mut self, _: &ToggleLayers, _: &mut Window, cx: &mut Context<Self>) {
         AppState::update_settings(cx, |s| s.show_layers = !s.show_layers);
     }
@@ -830,7 +890,19 @@ impl EditorWindow {
             return;
         }
         self.begin_edit_action(window, cx);
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        // A Mindweave payload is text; anything else that is a picture,
+        // or picture files, is placed as images.
+        let payload = item.text().filter(|t| is_mindweave_payload(t));
+        if payload.is_none() {
+            if let Some(files) = images::clipboard_pictures(&item) {
+                self.place_pictures(files, window, cx);
+                return;
+            }
+        }
+        let Some(text) = item.text() else {
             return;
         };
         match paste_plan(&text, &self.visible_canvas()) {
@@ -936,13 +1008,34 @@ impl EditorWindow {
         }
     }
 
-    /// The canvas area.
+    /// The canvas area, with its right-click menu.
     fn render_canvas(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus = self.focus_handle.clone();
         div()
+            .id("canvas-area")
             .flex_1()
             .min_h_0()
             .child(canvas::canvas(cx.entity(), self.session.page()))
+            .context_menu(move |menu, _, _| canvas_menu(menu, focus.clone()))
     }
+}
+
+/// The canvas's right-click menu, acting on the selection.
+fn canvas_menu(menu: PopupMenu, focus: FocusHandle) -> PopupMenu {
+    menu.action_context(focus)
+        .menu("Cut", Box::new(Cut))
+        .menu("Copy", Box::new(actions::Copy))
+        .menu("Paste", Box::new(Paste))
+        .menu("Duplicate", Box::new(Duplicate))
+        .menu("Delete", Box::new(Delete))
+        .separator()
+        .menu("Bring to Front", Box::new(BringToFront))
+        .menu("Bring Forward", Box::new(BringForward))
+        .menu("Send Backward", Box::new(SendBackward))
+        .menu("Send to Back", Box::new(SendToBack))
+        .separator()
+        .menu("Group", Box::new(Group))
+        .menu("Ungroup", Box::new(Ungroup))
 }
 
 /// The selection after a session edit: empty when the active page or
@@ -1156,6 +1249,12 @@ impl Render for EditorWindow {
         text_edit::on_text_actions(root, cx)
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_close_window))
+            .on_action(cx.listener(Self::on_group))
+            .on_action(cx.listener(Self::on_ungroup))
+            .on_action(cx.listener(Self::on_bring_to_front))
+            .on_action(cx.listener(Self::on_bring_forward))
+            .on_action(cx.listener(Self::on_send_backward))
+            .on_action(cx.listener(Self::on_send_to_back))
             .on_action(cx.listener(Self::on_toggle_layers))
             .on_action(cx.listener(Self::on_toggle_properties))
             .on_action(cx.listener(Self::on_zoom_in))
@@ -1396,10 +1495,10 @@ mod tests {
         };
         let payload = mindweave_core::to_clipboard(&[Shape::new_text_box((10., 10.))]);
         assert!(matches!(paste_plan(&payload, &view), PastePlan::Shapes(s) if s.len() == 1));
-        let newer = payload.replace("\"version\":2", "\"version\":99");
+        let newer = payload.replace("\"version\":3", "\"version\":99");
         assert_eq!(paste_plan(&newer, &view), PastePlan::Newer);
         let big = format!(
-            "{{\"mindweave\":\"shapes\",\"version\":2,\"pad\":\"{}\"}}",
+            "{{\"mindweave\":\"shapes\",\"version\":3,\"pad\":\"{}\"}}",
             "x".repeat(MAX_CLIPBOARD_BYTES)
         );
         assert_eq!(paste_plan(&big, &view), PastePlan::Nothing);

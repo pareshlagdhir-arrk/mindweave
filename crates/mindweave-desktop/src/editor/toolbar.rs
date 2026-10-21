@@ -231,11 +231,14 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
     let more = library
         .filter(|_| shown < buttons.len())
         .map(|library| shape_gallery::more_button(editor, library, active_hidden, cx));
-    let button_elements: Vec<AnyElement> = buttons
+    let mut button_elements: Vec<AnyElement> = buttons
         .into_iter()
         .take(shown)
         .map(|b| tool_button(editor, b, cx).into_any_element())
         .collect();
+    if library.is_none() {
+        button_elements.push(image_button(cx).into_any_element());
+    }
     let this = cx.entity().downgrade();
 
     h_flex().h(px(TOOL_ROW_HEIGHT)).px(px(ROW_PADDING)).child(
@@ -303,6 +306,32 @@ fn home_buttons() -> Vec<ToolButton> {
             tooltip: "Text (T)".into(),
         },
     ]
+}
+
+/// Home's Image button: imports picture files. An action, not a tool.
+fn image_button(cx: &mut Context<EditorWindow>) -> impl IntoElement {
+    let theme = cx.theme();
+    let hover_bg = theme.list_hover;
+    div()
+        .id("import-image")
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(BUTTON_SIZE))
+        .rounded(theme.radius)
+        .hover(move |style| style.bg(hover_bg))
+        .child(button_icon(
+            ButtonIcon::Svg(lucide_icon_path("image", cx)),
+            theme.muted_foreground,
+        ))
+        .tooltip(|window, cx| {
+            Tooltip::new("Import Image (PNG, JPEG, GIF, WebP, SVG…)").build(window, cx)
+        })
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.import_images(window, cx);
+            this.focus_handle.focus(window, cx);
+        }))
 }
 
 /// The button placing `shape` of library `library`.

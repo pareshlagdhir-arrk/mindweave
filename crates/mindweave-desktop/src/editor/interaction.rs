@@ -13,8 +13,9 @@ use mindweave_core::geometry::{hit_test, line_endpoints, FillRole, Frame, Primit
 use mindweave_core::line::target_of;
 use mindweave_core::{
     drag_create, handle_positions, line_frame, marquee_selects, resize_with_text_boxes, rotate,
-    rotate_handle_position, route_line, selection_bounds, translate, DocumentSession, Handle,
-    LibraryRegistry, LineEnd, Shape, ShapeDef, ShapeSource, CLICK_DRAG_THRESHOLD,
+    rotate_handle_position, route_line, selection_bounds, translate, unit_members,
+    whole_units_only, DocumentSession, Handle, LibraryRegistry, LineEnd, Shape, ShapeDef,
+    ShapeSource, CLICK_DRAG_THRESHOLD,
 };
 use uuid::Uuid;
 
@@ -176,27 +177,31 @@ pub fn press_target(
     press_kind(handle, shape, shift)
 }
 
-/// The selection after pressing shape `hit`, and the selection to apply
-/// instead if the press ends as a click (no drag). An unselected shape is
-/// selected at once (Shift: added), so a drag moves it; on a selected
-/// shape the selection stays for the drag, and a click selects only it
-/// (Shift: deselects it).
+/// The selection after pressing a shape whose unit (its whole group, or
+/// just the shape) is `unit`, and the selection to apply instead if the
+/// press ends as a click (no drag). An unselected unit is selected at once
+/// (Shift: added), so a drag moves it; on a selected unit the selection
+/// stays for the drag, and a click selects only it (Shift: deselects it).
 pub fn press_selection(
     selection: &[Uuid],
-    hit: Uuid,
+    unit: &[Uuid],
     shift: bool,
 ) -> (Vec<Uuid>, Option<Vec<Uuid>>) {
-    let selected = selection.contains(&hit);
+    let selected = unit.iter().all(|id| selection.contains(id));
     match (selected, shift) {
-        (false, false) => (vec![hit], None),
+        (false, false) => (unit.to_vec(), None),
         (false, true) => {
             let mut sel = selection.to_vec();
-            sel.push(hit);
+            sel.extend(unit.iter().filter(|id| !selection.contains(id)));
             (sel, None)
         }
-        (true, false) => (selection.to_vec(), Some(vec![hit])),
+        (true, false) => (selection.to_vec(), Some(unit.to_vec())),
         (true, true) => {
-            let rest = selection.iter().copied().filter(|&id| id != hit).collect();
+            let rest = selection
+                .iter()
+                .copied()
+                .filter(|id| !unit.contains(id))
+                .collect();
             (selection.to_vec(), Some(rest))
         }
     }
@@ -665,7 +670,14 @@ impl EditorWindow {
                 additive,
             },
             PressKind::Move(id) => {
-                let (selection, on_click) = press_selection(&self.selection, id, modifiers.shift);
+                // Cmd+click picks one shape out of its group.
+                let unit = if modifiers.platform {
+                    vec![id]
+                } else {
+                    unit_members(self.session.shapes_on_active_layer(), id)
+                };
+                let (selection, on_click) =
+                    press_selection(&self.selection, &unit, modifiers.shift);
                 self.selection = selection;
                 self.press.on_click = on_click;
                 Gesture::Moving {
@@ -775,13 +787,24 @@ impl EditorWindow {
                 additive,
             } => {
                 self.selection = if press.dragged {
-                    marquee_selection(
-                        self.session.shapes_on_active_layer(),
+                    // Groups are taken only when wholly inside.
+                    let shapes = self.session.shapes_on_active_layer();
+                    let before = self.selection.clone();
+                    let mut sel = marquee_selection(
+                        shapes,
                         self.session.active_layer_selectable(),
                         &marquee_rect(start, current),
                         additive,
-                        &self.selection,
-                    )
+                        &before,
+                    );
+                    let added: Vec<Uuid> = sel
+                        .iter()
+                        .copied()
+                        .filter(|id| !before.contains(id))
+                        .collect();
+                    let whole = whole_units_only(shapes, &added);
+                    sel.retain(|id| before.contains(id) || whole.contains(id));
+                    sel
                 } else if additive {
                     std::mem::take(&mut self.selection)
                 } else {
@@ -1550,16 +1573,16 @@ mod tests {
     fn pressing_a_shape_selects_it_and_a_click_settles_the_selection() {
         let [a, b, c] = ids();
         // Unselected: selected at once (Shift adds), nothing more on click.
-        assert_eq!(press_selection(&[a], b, false), (vec![b], None));
-        assert_eq!(press_selection(&[a], b, true), (vec![a, b], None));
+        assert_eq!(press_selection(&[a], &[b], false), (vec![b], None));
+        assert_eq!(press_selection(&[a], &[b], true), (vec![a, b], None));
         // Selected: the selection stays for a drag; a click selects only it
         // or, with Shift, deselects it.
         assert_eq!(
-            press_selection(&[a, b, c], b, false),
+            press_selection(&[a, b, c], &[b], false),
             (vec![a, b, c], Some(vec![b]))
         );
         assert_eq!(
-            press_selection(&[a, b, c], b, true),
+            press_selection(&[a, b, c], &[b], true),
             (vec![a, b, c], Some(vec![a, c]))
         );
     }

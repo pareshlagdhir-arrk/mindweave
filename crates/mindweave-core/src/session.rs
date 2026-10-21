@@ -173,6 +173,8 @@ fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
         label,
         text_box,
         line,
+        image,
+        groups,
         extra,
     } = a;
     let auto = a.auto_width();
@@ -195,6 +197,8 @@ fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
         && *label == b.label
         && *text_box == b.text_box
         && *line == b.line
+        && *image == b.image
+        && *groups == b.groups
         && *extra == b.extra
 }
 
@@ -680,6 +684,39 @@ impl DocumentSession {
             objects[i] = shape;
         }
         self.reroute_lines();
+    }
+
+    /// Groups the shapes with `ids` on the active layer (at least two) as
+    /// one undo step; returns the new group's id.
+    pub fn group_shapes(&mut self, ids: &[Uuid]) -> Option<Uuid> {
+        let mut objects = self.active_layer().objects.clone();
+        let id = Uuid::new_v4();
+        if !crate::arrange::group(&mut objects, ids, id) {
+            return None;
+        }
+        self.checkpoint();
+        self.active_layer_mut().objects = objects;
+        Some(id)
+    }
+
+    /// Takes the shapes with `ids` on the active layer out of their
+    /// outermost group, as one undo step.
+    pub fn ungroup_shapes(&mut self, ids: &[Uuid]) {
+        let mut objects = self.active_layer().objects.clone();
+        if crate::arrange::ungroup(&mut objects, ids) {
+            self.checkpoint();
+            self.active_layer_mut().objects = objects;
+        }
+    }
+
+    /// Moves the shapes with `ids` on the active layer in the stacking
+    /// order, as one undo step.
+    pub fn arrange_shapes(&mut self, ids: &[Uuid], how: crate::arrange::Arrange) {
+        let mut objects = self.active_layer().objects.clone();
+        if crate::arrange::arrange(&mut objects, ids, how) {
+            self.checkpoint();
+            self.active_layer_mut().objects = objects;
+        }
     }
 
     /// Sets or clears the label of shape `id` on the active layer as one
@@ -1206,6 +1243,35 @@ mod tests {
         props.start = start;
         props.end = end;
         s
+    }
+
+    #[test]
+    fn group_ungroup_and_order_are_single_undo_steps() {
+        let (_d, mut s) = new_session("g.mindweave");
+        let (a, b, c) = (rect(0.0), rect(20.0), rect(40.0));
+        let (ida, idb, idc) = (a.id, b.id, c.id);
+        s.add_shapes(vec![a, b, c]);
+        let order = |s: &DocumentSession| -> Vec<Uuid> {
+            s.shapes_on_active_layer().iter().map(|x| x.id).collect()
+        };
+        let g = s.group_shapes(&[ida, idc]).unwrap();
+        assert_eq!(order(&s), vec![idb, ida, idc]);
+        assert_eq!(s.find_shape(ida).unwrap().groups, vec![g]);
+        s.undo();
+        assert_eq!(order(&s), vec![ida, idb, idc]);
+        assert!(s.find_shape(ida).unwrap().groups.is_empty());
+        s.redo();
+        s.ungroup_shapes(&[ida, idc]);
+        assert!(s.find_shape(idc).unwrap().groups.is_empty());
+        s.arrange_shapes(&[ida], crate::arrange::Arrange::ToFront);
+        assert_eq!(order(&s), vec![idb, idc, ida]);
+        s.undo();
+        assert_eq!(order(&s), vec![idb, ida, idc]);
+        // Nothing to do leaves no step.
+        assert!(s.group_shapes(&[ida]).is_none());
+        let rev = s.revision();
+        s.arrange_shapes(&[idc], crate::arrange::Arrange::ToFront);
+        assert_eq!(s.revision(), rev);
     }
 
     #[test]
