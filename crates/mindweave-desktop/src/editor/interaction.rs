@@ -340,9 +340,11 @@ pub fn transformed(gesture: &Gesture, p: Pt, shift: bool, alt: bool) -> Option<O
     Some(originals.iter().map(|(id, _)| *id).zip(frames).collect())
 }
 
-/// The text boxes a resize gesture changes, which stop growing with their
-/// text once dragged; none for other gestures.
-pub fn text_box_widths_off(gesture: &Gesture) -> Vec<Uuid> {
+/// The text boxes growing with their text whose width a resize gesture
+/// changes (`frames`, from [`transformed`]): they stop growing with it. A
+/// group resized only taller or shorter keeps its text boxes' widths, so
+/// they keep growing. None for other gestures.
+pub fn text_box_widths_off(gesture: &Gesture, frames: &Originals) -> Vec<Uuid> {
     match gesture {
         Gesture::Resizing {
             originals,
@@ -351,8 +353,11 @@ pub fn text_box_widths_off(gesture: &Gesture) -> Vec<Uuid> {
         } => originals
             .iter()
             .zip(auto_widths)
-            .filter(|(_, w)| w.is_some())
-            .map(|((id, _), _)| *id)
+            .zip(frames)
+            .filter(|(((id, old), auto), (new_id, new))| {
+                **auto == Some(true) && id == new_id && new.w != old.w
+            })
+            .map(|(((id, _), _), _)| *id)
             .collect(),
         _ => Vec::new(),
     }
@@ -670,12 +675,6 @@ impl EditorWindow {
                 return;
             }
             self.press.dragged = true;
-            // Resized text boxes stop growing with their text, once.
-            let widths: Vec<(Uuid, bool)> = text_box_widths_off(&self.gesture)
-                .into_iter()
-                .map(|id| (id, false))
-                .collect();
-            self.set_auto_widths(&widths, cx);
         }
         if let Gesture::Marquee { current, .. } = &mut self.gesture {
             if *current != p {
@@ -683,6 +682,14 @@ impl EditorWindow {
                 cx.notify();
             }
         } else if let Some(frames) = transformed(&self.gesture, p, modifiers.shift, modifiers.alt) {
+            // Text boxes whose width the drag changes stop growing with
+            // their text (once: part of the gesture's undo step).
+            let widths: Vec<(Uuid, bool)> = text_box_widths_off(&self.gesture, &frames)
+                .into_iter()
+                .filter(|id| self.session.find_shape(*id).is_some_and(Shape::auto_width))
+                .map(|id| (id, false))
+                .collect();
+            self.set_auto_widths(&widths, cx);
             self.apply_frames(frames, cx);
         }
     }
@@ -943,8 +950,8 @@ mod tests {
         visible_handles, Gesture, HandleHit, PressKind,
     };
     use gpui_kit::CursorStyle;
-    use mindweave_core::geometry::Frame;
     use mindweave_core::geometry::Rect;
+    use mindweave_core::geometry::{Frame, Pt};
     use mindweave_core::Handle;
     use mindweave_core::{builtin_libraries, DocumentSession, LibraryRegistry, Shape};
     use uuid::Uuid;
@@ -1473,15 +1480,45 @@ mod tests {
         // Top and bottom handles change nothing.
         let out = transformed(&resizing(Handle::S), (150., 90.), false, false).unwrap();
         assert_eq!(out, vec![(a, boxed(0., 0., 100., 20.))]);
-        assert_eq!(text_box_widths_off(&resizing(Handle::E)), vec![a]);
+        // Only a text box whose width changed stops growing with its text.
+        let off = |g: &Gesture, p: Pt, shift: bool| {
+            text_box_widths_off(g, &transformed(g, p, shift, false).unwrap_or_default())
+        };
+        assert_eq!(off(&resizing(Handle::E), (150., 20.), false), vec![a]);
+        assert!(off(&resizing(Handle::E), (100., 40.), false).is_empty());
         let shape = Gesture::Resizing {
             handle: Handle::E,
             start: (0., 0.),
             originals: vec![(a, boxed(0., 0., 100., 20.))],
             auto_widths: vec![None],
         };
-        assert!(text_box_widths_off(&shape).is_empty());
-        assert!(text_box_widths_off(&Gesture::Idle).is_empty());
+        assert!(off(&shape, (50., 0.), false).is_empty());
+        assert!(off(&Gesture::Idle, (50., 0.), false).is_empty());
+    }
+
+    #[test]
+    fn a_group_resized_by_top_or_bottom_keeps_its_text_boxes_growing() {
+        let [a, b, c] = ids();
+        let group = |handle| Gesture::Resizing {
+            handle,
+            start: (100., 100.),
+            originals: vec![
+                (a, boxed(0., 0., 100., 20.)),
+                (b, boxed(0., 50., 100., 50.)),
+                (c, boxed(0., 0., 50., 20.)),
+            ],
+            auto_widths: vec![Some(true), None, Some(false)],
+        };
+        let off = |g: &Gesture, p: Pt, shift: bool| {
+            text_box_widths_off(g, &transformed(g, p, shift, false).unwrap())
+        };
+        // Taller: positions scale, widths stay.
+        assert!(off(&group(Handle::S), (100., 200.), false).is_empty());
+        // Keeping the aspect ratio scales widths too.
+        assert_eq!(off(&group(Handle::S), (100., 200.), true), vec![a]);
+        // Wider: the growing text box stops growing; one already fixed is
+        // left alone.
+        assert_eq!(off(&group(Handle::E), (200., 100.), false), vec![a]);
     }
 
     #[test]

@@ -357,6 +357,12 @@ pub(super) fn apply_number(
                 .collect();
             session.update_shapes(ids, |s| {
                 if let Some(f) = edited.get(&s.id) {
+                    // A text box given a width stops growing with its text.
+                    if f.w != s.frame.w {
+                        if let Some(props) = s.text_box.as_mut() {
+                            props.auto_width = false;
+                        }
+                    }
                     s.frame = *f;
                 }
             });
@@ -1196,6 +1202,56 @@ mod tests {
         assert!(shapes(&s).iter().all(|sh| sh.frame.rotation == 30.0));
         assert!(s.undo());
         assert_eq!(shapes(&s)[0].frame.rotation, 10.0);
+    }
+
+    #[test]
+    fn typing_a_width_stops_a_text_box_growing_with_its_text() {
+        let libs = libs();
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("a.mindweave")).unwrap();
+        let mut text = Shape::new_text_box((0.0, 0.0));
+        text.frame.w = 40.0;
+        let mut fixed = Shape::new_text_box((0.0, 100.0));
+        fixed.frame.w = 40.0;
+        let rect = shape(&libs, "rectangle", frame(60.0, 0.0, 40.0, 40.0));
+        let (t, f, r) = (text.id, fixed.id, rect.id);
+        s.add_shapes(vec![text, fixed, rect]);
+        let get = |s: &DocumentSession, id| s.find_shape(id).unwrap().clone();
+
+        // One text box: its width is set and kept.
+        apply_number(
+            &mut s,
+            &[t],
+            &NumberKind::Bounds(BoundsField::W),
+            120.0,
+            &libs,
+        );
+        assert_eq!(get(&s, t).frame.w, 120.0);
+        assert!(!get(&s, t).auto_width());
+        // One step: undo brings back the width and the growing.
+        assert!(s.undo());
+        assert_eq!(get(&s, t).frame.w, 40.0);
+        assert!(get(&s, t).auto_width());
+
+        // A group's W scales the text box's width too.
+        apply_number(
+            &mut s,
+            &[t, r],
+            &NumberKind::Bounds(BoundsField::W),
+            200.0,
+            &libs,
+        );
+        assert!(get(&s, t).frame.w > 40.0);
+        assert!(!get(&s, t).auto_width());
+        // X moves it without changing its width: it keeps growing.
+        apply_number(
+            &mut s,
+            &[f],
+            &NumberKind::Bounds(BoundsField::X),
+            10.0,
+            &libs,
+        );
+        assert!(get(&s, f).auto_width());
     }
 
     #[test]
