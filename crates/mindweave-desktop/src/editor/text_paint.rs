@@ -162,18 +162,11 @@ pub fn paint_shape_text(
         };
         draw(window, cx, text, &job, &placement);
     } else {
-        let th = if greek {
-            // No layout just for bars: only one already cached.
-            match text.layouts.cached(shape.id, &label.text, wrap) {
-                Some(layout) => layout.size().1,
-                None => return,
-            }
-        } else {
-            let sized = text
-                .layouts
-                .size(window, shape.id, &label.text, wrap, color);
-            sized.1
-        };
+        // Greeked too: the bars come from the zoom-1 layout, which a file
+        // opened (or a label edited) while zoomed out has not had yet.
+        let (_, th) = text
+            .layouts
+            .size(window, shape.id, &label.text, wrap, color);
         let ((_, y), _) = label_origin(f.w, f.h, LABEL_PADDING, th, label.valign);
         let top_left = to_window((f.x, f.y));
         // The frame, from the text's top-left corner.
@@ -290,9 +283,11 @@ struct TextJob<'a> {
 }
 
 /// Paints `job` at `at`: its glyphs, or for greeked text a bar per line
-/// from the layout already cached (nothing when there is none).
+/// from its layout at zoom 1 (laid out when not cached).
 fn draw(window: &mut Window, cx: &mut App, text: &mut TextPaint, job: &TextJob, at: &Placement) {
     if job.greek {
+        text.layouts
+            .size(window, job.id, job.text, job.wrap, job.color);
         if let Some(layout) = text.layouts.cached(job.id, job.text, job.wrap) {
             let bars = layout.greek_bars();
             paint_greek(
