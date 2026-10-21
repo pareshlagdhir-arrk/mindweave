@@ -16,7 +16,9 @@ use super::interaction::{
     ROTATE_HANDLE_OFFSET_PX,
 };
 use super::shape_gallery;
-use super::shape_paint::{paint_marquee, paint_preview, paint_selection, paint_shapes};
+use super::shape_paint::{
+    paint_highlight, paint_line_ends, paint_marquee, paint_preview, paint_selection, paint_shapes,
+};
 use super::text_paint::{
     auto_color, canvas_background, text_background, text_box_wrap, TextPaint, TEXT_BOX_PADDING,
 };
@@ -426,6 +428,16 @@ impl EditorWindow {
             );
         }
         let accent = cx.theme().primary;
+        if let Some(shape) = self
+            .attach_highlight
+            .and_then(|id| self.session.find_shape(id))
+        {
+            let outline = self.geometry_cache.outline(shape, &libs).geometry.clone();
+            paint_highlight(window, bounds, &viewport, &outline, accent);
+        }
+        if let Some(ends) = self.selected_line_ends() {
+            paint_line_ends(window, bounds, &viewport, &ends, accent);
+        }
         if let Some(chrome) = self.selection_chrome() {
             paint_selection(
                 window,

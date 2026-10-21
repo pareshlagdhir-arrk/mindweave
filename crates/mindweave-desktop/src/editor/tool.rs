@@ -5,12 +5,7 @@ pub const HOME_TAB: &str = "home";
 /// The built-in library whose tools have their own keys.
 pub const BASIC_SHAPES: &str = "basic-shapes";
 /// Basic Shapes tools with a key of their own: shape id and key.
-pub const SHAPE_KEYS: [(&str, &str); 4] = [
-    ("rectangle", "R"),
-    ("ellipse", "O"),
-    ("line", "L"),
-    ("arrow", "A"),
-];
+pub const SHAPE_KEYS: [(&str, &str); 3] = [("rectangle", "R"), ("ellipse", "O"), ("line", "L")];
 
 /// What a left drag on the canvas does.
 #[derive(Clone, Debug, PartialEq)]
@@ -178,7 +173,7 @@ mod tests {
         assert_eq!(shape_key(BASIC_SHAPES, "rectangle"), Some("R"));
         assert_eq!(shape_key(BASIC_SHAPES, "ellipse"), Some("O"));
         assert_eq!(shape_key(BASIC_SHAPES, "line"), Some("L"));
-        assert_eq!(shape_key(BASIC_SHAPES, "arrow"), Some("A"));
+        assert_eq!(shape_key(BASIC_SHAPES, "arrow"), None);
         assert_eq!(shape_key(BASIC_SHAPES, "star"), None);
         assert_eq!(shape_key("flowchart", "rectangle"), None);
     }

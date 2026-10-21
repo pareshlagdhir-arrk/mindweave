@@ -1159,7 +1159,6 @@ version = "1.0.0"
                 "rectangle",
                 "ellipse",
                 "line",
-                "arrow",
                 "triangle",
                 "diamond",
                 "star"
@@ -1175,15 +1174,7 @@ version = "1.0.0"
             .collect();
         assert_eq!(
             icons,
-            [
-                "square",
-                "circle",
-                "minus",
-                "arrow-up-right",
-                "triangle",
-                "diamond",
-                "star"
-            ]
+            ["square", "circle", "minus", "triangle", "diamond", "star"]
         );
 
         let rect = lib.shape("rectangle").unwrap();
@@ -1213,12 +1204,8 @@ version = "1.0.0"
             opacity: 1.0,
         };
         assert_eq!(line.style, line_style);
-        let arrow = lib.shape("arrow").unwrap();
-        assert_eq!(arrow.style, line_style);
-        assert_eq!(arrow.default_size, (120.0, 60.0));
-        assert_eq!(arrow.params[0].key, "head_size");
-        assert_eq!((arrow.params[0].min, arrow.params[0].max), (4.0, 100.0));
-        assert_eq!(arrow.params[0].default, 12.0);
+        // Arrows are lines with heads now.
+        assert!(lib.shape("arrow").is_none());
 
         let triangle = lib.shape("triangle").unwrap();
         assert_eq!(triangle.source, ShapeSource::Primitive(Primitive::Polygon));
@@ -1244,7 +1231,7 @@ version = "1.0.0"
         let libs = builtin_libraries();
         assert_eq!(libs.len(), 1);
         assert_eq!(libs[0].id, "basic-shapes");
-        assert_eq!(libs[0].shapes.len(), 7);
+        assert_eq!(libs[0].shapes.len(), 6);
     }
 
     #[test]

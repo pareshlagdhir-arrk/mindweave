@@ -8,6 +8,7 @@ pub mod format;
 pub mod geometry;
 pub mod history;
 pub mod library;
+pub mod line;
 pub mod session;
 pub mod settings;
 pub mod shape;
@@ -33,6 +34,11 @@ pub use library::{
     Library, LibraryError, LibraryFiles, LibraryRegistry, LoadReport, ParamDef, ShapeDef,
     ShapeSource, StyleDefaults, LIBRARY_FORMAT, MAX_FILE_BYTES, MAX_LIBRARY_BYTES, MAX_SHAPES,
     MAX_USER_LIBRARIES,
+};
+pub use line::{
+    double_outline, edge_point, line_frame, line_geometry, line_jumps, route_line, ArrowHead,
+    LineDash, LineEnd, LineJump, LineProps, LineRoute, Target, JUMP_SIZES, LINE_LIBRARY,
+    LINE_SHAPE,
 };
 pub use session::DocumentSession;
 pub use settings::{

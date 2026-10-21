@@ -29,6 +29,9 @@ pub enum FillRole {
     StrokeColor,
     /// Stroke only (lines).
     None,
+    /// Filled with the shape's fill colour but not stroked (the inside of
+    /// a double outline).
+    FillOnly,
 }
 
 /// A run of commands painted the same way. It may hold several contours

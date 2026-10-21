@@ -278,7 +278,8 @@ impl AppState {
         .detach();
     }
 
-    fn open_editor(session: DocumentSession, cx: &mut App) {
+    fn open_editor(mut session: DocumentSession, cx: &mut App) {
+        session.set_libraries(cx.global::<crate::libraries::Libraries>().0.clone());
         let path = session.path.clone();
         let title = session.title();
         let size = cx

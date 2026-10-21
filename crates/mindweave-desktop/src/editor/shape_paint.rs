@@ -8,8 +8,8 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{bounds, to_canvas, FillRole, Frame, Geometry, PathCmd, Pt, Rect};
 use mindweave_core::{
-    frame_aabb, handle_positions, rotate_handle_position, Handle, LibraryRegistry, Page, Shape,
-    Style, Viewport,
+    double_outline, frame_aabb, handle_positions, line_geometry, line_jumps,
+    rotate_handle_position, Handle, LibraryRegistry, LineProps, Page, Shape, Style, Viewport,
 };
 use uuid::Uuid;
 
@@ -37,19 +37,41 @@ pub struct CanvasGeometry {
     pub aabb: Rect,
     /// The library or shape is missing: `geometry` is the frame's box.
     pub placeholder: bool,
+    /// Dash and gap lengths of the stroke, in canvas units; `None` when
+    /// solid.
+    pub dash: Option<[f32; 2]>,
 }
 
 /// The canvas outline of `shape`: a text box's filled box, or its library
-/// shape, or its frame's box when that is not installed.
+/// shape, or its frame's box when that is not installed. Lines are drawn
+/// without jumps (see [`shape_geometry_with`]).
 pub fn shape_geometry(shape: &Shape, libs: &LibraryRegistry) -> CanvasGeometry {
+    shape_geometry_with(shape, libs, &[])
+}
+
+/// [`shape_geometry`], a line jumping at `jumps` (lengths along it). A
+/// double outline is stroked twice; a placeholder ignores the style.
+pub fn shape_geometry_with(shape: &Shape, libs: &LibraryRegistry, jumps: &[f32]) -> CanvasGeometry {
     let f = &shape.frame;
+    let style = &shape.style;
+    let line = shape.line.as_ref().filter(|_| shape.is_line());
     let (local, placeholder) = if shape.is_text_box() {
         (box_geometry(f.w, f.h, FillRole::Shape), false)
+    } else if let Some(props) = line {
+        (
+            line_geometry(f, props, style.stroke_width, style.double, jumps),
+            false,
+        )
     } else {
         match libs.shape(&shape.library, &shape.shape) {
             Some(def) => (def.local_geometry(f.w, f.h, &|k| shape.param(k)), false),
             None => (box_geometry(f.w, f.h, FillRole::None), true),
         }
+    };
+    let local = if style.double && line.is_none() && !placeholder {
+        double_outline(&local, style.stroke_width)
+    } else {
+        local
     };
     let geometry = to_canvas(&local, f);
     let aabb = bounds(&geometry).unwrap_or_else(|| frame_aabb(f));
@@ -57,6 +79,9 @@ pub fn shape_geometry(shape: &Shape, libs: &LibraryRegistry) -> CanvasGeometry {
         geometry,
         aabb,
         placeholder,
+        dash: (!placeholder)
+            .then(|| style.dash.pattern(style.stroke_width))
+            .flatten(),
     }
 }
 
@@ -83,6 +108,8 @@ struct CacheEntry {
     shape: String,
     frame: Frame,
     params: BTreeMap<String, serde_json::Value>,
+    /// What else shapes the outline: see [`GeomKey`].
+    key: GeomKey,
     outline: CanvasGeometry,
     /// The outline tessellated at the last zoom it was painted at.
     tessellation: Option<Tessellation>,
@@ -107,18 +134,52 @@ impl CacheEntry {
     }
 }
 
+/// Besides the frame and library shape, an outline depends on a line's
+/// properties and jumps, the stroke width (heads, double outlines) and
+/// whether the outline is double.
+#[derive(Clone, Debug, PartialEq)]
+struct GeomKey {
+    line: Option<LineProps>,
+    width: f32,
+    double: bool,
+    jumps: Vec<f32>,
+}
+
+fn geom_key(s: &Shape, jumps: &[f32]) -> GeomKey {
+    GeomKey {
+        line: s.line.clone(),
+        width: s.style.stroke_width,
+        double: s.style.double,
+        jumps: jumps.to_vec(),
+    }
+}
+
 /// Canvas outlines of shapes, by shape id, reused across frames while the
 /// shape's frame, parameters and library shape stay the same.
 #[derive(Default)]
 pub struct GeometryCache {
     entries: HashMap<Uuid, CacheEntry>,
     frame: u64,
+    /// Where the page's lines jump, and a fingerprint of the lines it was
+    /// worked out from.
+    jumps: HashMap<Uuid, Vec<f32>>,
+    jumps_of: u64,
 }
 
 impl GeometryCache {
     /// Starts a frame; entries not used by [`Self::end_frame`] are dropped.
     pub fn begin_frame(&mut self) {
         self.frame = self.frame.wrapping_add(1);
+    }
+
+    /// Works out where `page`'s lines jump, unless its lines are as they
+    /// were last time.
+    pub fn update_jumps(&mut self, page: &Page) {
+        let fingerprint = lines_fingerprint(page);
+        if fingerprint != self.jumps_of {
+            self.jumps = line_jumps(page);
+            self.jumps_of = fingerprint;
+        }
     }
 
     /// Drops the entries of shapes not painted since [`Self::begin_frame`].
@@ -135,15 +196,16 @@ impl GeometryCache {
 
     fn entry(&mut self, shape: &Shape, libs: &LibraryRegistry) -> &mut CacheEntry {
         let frame = self.frame;
+        let jumps = self.jumps.get(&shape.id).map_or(&[][..], Vec::as_slice);
         let entry = self
             .entries
             .entry(shape.id)
             .and_modify(|e| {
-                if !e.matches(shape) {
-                    *e = new_entry(shape, libs, frame);
+                if !e.matches(shape) || e.key != geom_key(shape, jumps) {
+                    *e = new_entry(shape, libs, jumps, frame);
                 }
             })
-            .or_insert_with(|| new_entry(shape, libs, frame));
+            .or_insert_with(|| new_entry(shape, libs, jumps, frame));
         entry.used = frame;
         entry
     }
@@ -154,13 +216,35 @@ impl GeometryCache {
     }
 }
 
-fn new_entry(shape: &Shape, libs: &LibraryRegistry, used: u64) -> CacheEntry {
+/// A hash of everything about `page`'s lines that decides where they
+/// jump: their frames, routes and jump styles, and the layers shown.
+fn lines_fingerprint(page: &Page) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for layer in &page.layers {
+        layer.visible.hash(&mut h);
+        for s in &layer.objects {
+            let Some(p) = &s.line else { continue };
+            s.id.hash(&mut h);
+            let f = &s.frame;
+            for v in [f.x, f.y, f.w, f.h, f.rotation, p.jump_size] {
+                v.to_bits().hash(&mut h);
+            }
+            (f.flip_x, f.flip_y, p.vertical).hash(&mut h);
+            (p.route as u8, p.jump as u8).hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+fn new_entry(shape: &Shape, libs: &LibraryRegistry, jumps: &[f32], used: u64) -> CacheEntry {
     CacheEntry {
         library: shape.library.clone(),
         shape: shape.shape.clone(),
         frame: shape.frame,
         params: shape.params.clone(),
-        outline: shape_geometry(shape, libs),
+        key: geom_key(shape, jumps),
+        outline: shape_geometry_with(shape, libs, jumps),
         tessellation: None,
         used,
     }
@@ -220,6 +304,7 @@ pub fn paint_shapes(
 ) {
     let painter = ShapePainter::new(bounds, vp, 1., cx);
     cache.begin_frame();
+    cache.update_jumps(page);
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
         // Layers are stored top first.
         for layer in page.layers.iter().rev().filter(|l| l.visible) {
@@ -345,7 +430,7 @@ impl<'a> ShapePainter<'a> {
         let stroke_color = style_color(style.stroke.as_deref(), opacity);
         for sub in &outline.geometry.paths {
             let color = match sub.fill {
-                FillRole::Shape => fill,
+                FillRole::Shape | FillRole::FillOnly => fill,
                 FillRole::StrokeColor => stroke_color,
                 FillRole::None => None,
             };
@@ -358,12 +443,15 @@ impl<'a> ShapePainter<'a> {
         let width = screen_stroke_width(style.stroke_width, self.vp.zoom);
         if let Some((color, width)) = stroke_color.zip(width) {
             let mut builder = PathBuilder::stroke(px(width));
+            if let Some(dash) = outline.dash {
+                builder = builder.dash_array(&dash.map(|d| px((d * self.vp.zoom).max(1.))));
+            }
             // Arrowheads are already filled with the stroke colour.
             for sub in outline
                 .geometry
                 .paths
                 .iter()
-                .filter(|s| s.fill != FillRole::StrokeColor)
+                .filter(|s| !matches!(s.fill, FillRole::StrokeColor | FillRole::FillOnly))
             {
                 self.append(&mut builder, &sub.cmds);
             }
@@ -503,6 +591,68 @@ pub fn paint_selection(
         }
         window.paint_quad(knob(rotate, half));
     });
+}
+
+/// Paints round handles at a selected line's `ends` (canvas coordinates).
+pub fn paint_line_ends(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    vp: &Viewport,
+    ends: &[Pt],
+    accent: Hsla,
+) {
+    let size = HANDLE_SIZE_PX + 2.;
+    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        for &p in ends {
+            let (x, y) = vp.canvas_to_screen(p);
+            let origin = point(
+                bounds.origin.x + px((x - size / 2.).round()),
+                bounds.origin.y + px((y - size / 2.).round()),
+            );
+            window.paint_quad(quad(
+                Bounds::new(origin, size_of(size, size)),
+                px(size / 2.),
+                gpui_kit::white(),
+                px(1.5),
+                accent,
+                BorderStyle::Solid,
+            ));
+        }
+    });
+}
+
+/// Outlines `outline` (canvas coordinates) in `accent`: the shape a line
+/// end will attach to.
+pub fn paint_highlight(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    vp: &Viewport,
+    outline: &Geometry,
+    accent: Hsla,
+) {
+    let (ox, oy) = vp.canvas_to_screen((0., 0.));
+    let offset = (
+        f32::from(bounds.origin.x) + ox,
+        f32::from(bounds.origin.y) + oy,
+    );
+    let at = |p: Pt| point(px(offset.0 + p.0 * vp.zoom), px(offset.1 + p.1 * vp.zoom));
+    let mut builder = PathBuilder::stroke(px(2.));
+    for sub in &outline.paths {
+        for cmd in &sub.cmds {
+            match *cmd {
+                PathCmd::MoveTo(p) => builder.move_to(at(p)),
+                PathCmd::LineTo(p) => builder.line_to(at(p)),
+                PathCmd::QuadTo { ctrl, to } => builder.curve_to(at(to), at(ctrl)),
+                PathCmd::CubicTo { c1, c2, to } => builder.cubic_bezier_to(at(to), at(c1), at(c2)),
+                PathCmd::Close => builder.close(),
+            }
+        }
+    }
+    if let Ok(path) = builder.build() {
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            window.paint_path(path, accent.opacity(0.8));
+        });
+    }
 }
 
 /// Paints the marquee `rect` (canvas coordinates): a 1px `accent` border

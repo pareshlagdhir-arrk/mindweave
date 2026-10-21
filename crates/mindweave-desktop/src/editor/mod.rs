@@ -5,6 +5,7 @@ mod canvas;
 mod color_palette;
 mod interaction;
 mod layers_panel;
+mod line_properties;
 mod page_tabs;
 mod properties_panel;
 mod shape_gallery;
@@ -37,8 +38,8 @@ use mindweave_core::{
 use crate::actions::{
     self, Cancel, CloseWindow, Cut, Delete, Duplicate, EditText, NudgeDown, NudgeDownFar,
     NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp, NudgeUpFar, Paste, Redo, Save,
-    SelectAll, ToggleLayers, ToggleProperties, ToolArrow, ToolEllipse, ToolHand, ToolLine,
-    ToolPointer, ToolRectangle, ToolText, Undo, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
+    SelectAll, ToggleLayers, ToggleProperties, ToolEllipse, ToolHand, ToolLine, ToolPointer,
+    ToolRectangle, ToolText, Undo, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
 };
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
@@ -204,6 +205,10 @@ pub struct EditorWindow {
     press: Press,
     /// Selected shapes, all on the active layer.
     pub selection: Vec<Uuid>,
+    /// While a line is drawn: the shapes its start and end attach to.
+    line_ends: [Option<Uuid>; 2],
+    /// The shape a line end being drawn or dragged would attach to.
+    attach_highlight: Option<Uuid>,
     /// Canvas outlines of the shapes painted last frame.
     geometry_cache: GeometryCache,
     /// Text layouts of the active page's labels and text boxes.
@@ -263,6 +268,8 @@ impl EditorWindow {
             gesture: Gesture::Idle,
             press: Press::default(),
             selection: Vec::new(),
+            line_ends: [None; 2],
+            attach_highlight: None,
             geometry_cache: GeometryCache::default(),
             text_layouts: TextLayoutCache::default(),
             glyph_outlines: GlyphOutlines::default(),
@@ -642,10 +649,6 @@ impl EditorWindow {
 
     fn on_tool_line(&mut self, _: &ToolLine, window: &mut Window, cx: &mut Context<Self>) {
         self.select_tool(Tool::shape(BASIC_SHAPES, "line"), window, cx);
-    }
-
-    fn on_tool_arrow(&mut self, _: &ToolArrow, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_tool(Tool::shape(BASIC_SHAPES, "arrow"), window, cx);
     }
 
     /// Return: edits the one selected text box or labelled shape.
@@ -1165,7 +1168,6 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_tool_rectangle))
             .on_action(cx.listener(Self::on_tool_ellipse))
             .on_action(cx.listener(Self::on_tool_line))
-            .on_action(cx.listener(Self::on_tool_arrow))
             .on_action(cx.listener(Self::on_cancel))
             .on_action(cx.listener(Self::on_undo))
             .on_action(cx.listener(Self::on_redo))

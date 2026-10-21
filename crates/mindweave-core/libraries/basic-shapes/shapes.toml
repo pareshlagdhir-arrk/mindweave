@@ -31,22 +31,6 @@ primitive = "line"
 style = { fill = "none", stroke = "#7F8EA3", stroke_width = 2, opacity = 1.0 }
 
 [[shape]]
-id = "arrow"
-name = "Arrow"
-icon = "arrow-up-right"
-default_size = [120, 60]
-primitive = "arrow"
-style = { fill = "none", stroke = "#7F8EA3", stroke_width = 2, opacity = 1.0 }
-
-[[shape.param]]
-key = "head_size"
-label = "Head size"
-min = 4
-max = 100
-step = 1
-default = 12
-
-[[shape]]
 id = "triangle"
 name = "Triangle"
 icon = "triangle"

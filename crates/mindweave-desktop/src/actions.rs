@@ -22,7 +22,6 @@ actions!(
         ToolRectangle,
         ToolEllipse,
         ToolLine,
-        ToolArrow,
         ToolText,
         /// Return in the editor: edits the one selected text box or
         /// labelled shape, with all its text selected.
@@ -150,7 +149,6 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("r", ToolRectangle, editor),
         KeyBinding::new("o", ToolEllipse, editor),
         KeyBinding::new("l", ToolLine, editor),
-        KeyBinding::new("a", ToolArrow, editor),
         KeyBinding::new("t", ToolText, editor),
         KeyBinding::new("escape", Cancel, editor),
         KeyBinding::new("enter", EditText, editor),
@@ -259,7 +257,6 @@ mod tests {
             ("r", "mindweave::ToolRectangle"),
             ("o", "mindweave::ToolEllipse"),
             ("l", "mindweave::ToolLine"),
-            ("a", "mindweave::ToolArrow"),
             ("t", "mindweave::ToolText"),
             ("escape", "mindweave::Cancel"),
             ("enter", "mindweave::EditText"),
@@ -320,7 +317,7 @@ mod tests {
                     || EDIT_ACTIONS.iter().any(|a| name.ends_with(a))
             })
             .collect();
-        assert_eq!(tool_bindings.len(), 16 + 10);
+        assert_eq!(tool_bindings.len(), 15 + 10);
         for binding in &tool_bindings {
             let predicate = binding.predicate().expect("tool keys have a context");
             assert!(predicate.eval(&context(&["Root", EDITOR_CONTEXT])));

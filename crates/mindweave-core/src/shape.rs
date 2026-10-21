@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::color::normalize_hex_color;
 use crate::geometry::{Frame, Pt};
 use crate::library::ShapeDef;
+use crate::line::{ArrowHead, LineDash, LineProps, LINE_LIBRARY, LINE_SHAPE, OLD_ARROW_SHAPE};
 use crate::text::{HAlign, RichText, RunStyle, DEFAULT_FONT_SIZE, LABEL_FONT_SIZE};
 
 /// Library id reserved for Mindweave's built-in objects.
@@ -46,6 +47,16 @@ pub struct Style {
     /// From 0 to 1.
     #[serde(default = "one")]
     pub opacity: f32,
+    /// How the stroke is broken up.
+    #[serde(skip_serializing_if = "is_solid")]
+    pub dash: LineDash,
+    /// Two parallel strokes instead of one.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub double: bool,
+}
+
+fn is_solid(dash: &LineDash) -> bool {
+    *dash == LineDash::Solid
 }
 
 impl Default for Style {
@@ -55,6 +66,8 @@ impl Default for Style {
             stroke: None,
             stroke_width: 1.0,
             opacity: 1.0,
+            dash: LineDash::Solid,
+            double: false,
         }
     }
 }
@@ -131,6 +144,9 @@ pub struct Shape {
     /// Set on text boxes only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_box: Option<TextBoxProps>,
+    /// Set on lines only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<LineProps>,
     /// Fields this version does not know, written back unchanged.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -150,6 +166,7 @@ impl Shape {
                 stroke: def.style.stroke.clone(),
                 stroke_width: def.style.stroke_width,
                 opacity: def.style.opacity,
+                ..Style::default()
             },
             params: def
                 .params
@@ -160,8 +177,15 @@ impl Shape {
             locked: false,
             label: None,
             text_box: None,
+            line: None,
             extra: serde_json::Map::new(),
         }
+        .normalized()
+    }
+
+    fn normalized(mut self) -> Shape {
+        self.normalize();
+        self
     }
 
     /// A new, empty text box with its top-left corner at `at`: one line
@@ -194,6 +218,7 @@ impl Shape {
                 valign: VAlign::Top,
             }),
             text_box: Some(TextBoxProps::default()),
+            line: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -202,10 +227,15 @@ impl Shape {
         self.library == TEXT_LIBRARY && self.shape == TEXT_SHAPE
     }
 
-    /// Whether the label is drawn along the shape as a line label (basic
-    /// lines and arrows) rather than inside its frame.
+    /// Whether this is a line (the Line tool's shape).
+    pub fn is_line(&self) -> bool {
+        self.library == LINE_LIBRARY && self.shape == LINE_SHAPE
+    }
+
+    /// Whether the label is drawn along the shape as a line label rather
+    /// than inside its frame.
     pub fn is_line_like_label(&self) -> bool {
-        self.library == "basic-shapes" && matches!(self.shape.as_str(), "line" | "arrow")
+        self.is_line()
     }
 
     /// Whether the text box grows with its text (`false` for other shapes).
@@ -278,6 +308,19 @@ impl Shape {
         if let Some(label) = &mut self.label {
             label.text.normalize();
         }
+        if self.library == LINE_LIBRARY && self.shape == OLD_ARROW_SHAPE {
+            self.shape = LINE_SHAPE.to_string();
+            self.params.remove("head_size");
+            self.line = Some(LineProps {
+                end_head: ArrowHead::Triangle,
+                ..LineProps::default()
+            });
+        }
+        if self.is_line() {
+            self.line.get_or_insert_with(LineProps::default);
+        } else {
+            self.line = None;
+        }
     }
 }
 
@@ -302,6 +345,22 @@ mod tests {
                 ..RunStyle::default()
             }
         );
+    }
+
+    #[test]
+    fn old_arrows_open_as_lines_with_an_end_head() {
+        let json = r#"{"id":"0b6a2c1d-6c55-4e0e-8a83-0b3e8f1f9a10","library":"basic-shapes",
+            "shape":"arrow","x":0,"y":0,"w":30,"h":40,"params":{"head_size":12}}"#;
+        let mut s: Shape = serde_json::from_str(json).unwrap();
+        s.normalize();
+        assert!(s.is_line());
+        assert!(s.params.is_empty());
+        assert_eq!(s.line.unwrap().end_head, crate::line::ArrowHead::Triangle);
+        // Other shapes never carry line properties.
+        let mut r = Shape::new_text_box((0.0, 0.0));
+        r.line = Some(LineProps::default());
+        r.normalize();
+        assert!(r.line.is_none());
     }
 
     #[test]
@@ -403,7 +462,7 @@ mod tests {
     #[test]
     fn label_is_a_field_not_extra_and_absent_when_none() {
         let mut s: Shape = serde_json::from_str(
-            r#"{"id":"0b6a2c1d-6c55-4e0e-8a83-0b3e8f1f9a10","library":"basic-shapes","shape":"arrow",
+            r#"{"id":"0b6a2c1d-6c55-4e0e-8a83-0b3e8f1f9a10","library":"basic-shapes","shape":"line",
             "x":0,"y":0,"w":1,"h":1,
             "label":{"text":{"paragraphs":[{"runs":[{"text":"hi","style":{"size":0}}]}]},"valign":"bottom"}}"#,
         )

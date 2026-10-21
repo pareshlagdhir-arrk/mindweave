@@ -239,6 +239,8 @@ pub fn text_frame(shape: &Shape, (w, h): (f32, f32)) -> TextFrame {
     let f = &shape.frame;
     if shape.is_line_like_label() {
         let (centre, angle) = line_label_placement(f);
+        let route = shape.line.as_ref().map(|l| l.route).unwrap_or_default();
+        let angle = mindweave_core::line::line_label_angle(route, angle);
         return TextFrame {
             centre,
             offset: (-w / 2., -h / 2.),

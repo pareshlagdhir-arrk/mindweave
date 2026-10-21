@@ -9,11 +9,12 @@ use std::collections::{HashMap, HashSet};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
-use mindweave_core::geometry::{hit_test, FillRole, Frame, Primitive, Pt, Rect};
+use mindweave_core::geometry::{hit_test, line_endpoints, FillRole, Frame, Primitive, Pt, Rect};
+use mindweave_core::line::target_of;
 use mindweave_core::{
-    drag_create, handle_positions, marquee_selects, resize_with_text_boxes, rotate,
-    rotate_handle_position, selection_bounds, translate, DocumentSession, Handle, LibraryRegistry,
-    Shape, ShapeDef, ShapeSource, CLICK_DRAG_THRESHOLD,
+    drag_create, handle_positions, line_frame, marquee_selects, resize_with_text_boxes, rotate,
+    rotate_handle_position, route_line, selection_bounds, translate, DocumentSession, Handle,
+    LibraryRegistry, LineEnd, Shape, ShapeDef, ShapeSource, CLICK_DRAG_THRESHOLD,
 };
 use uuid::Uuid;
 
@@ -27,6 +28,8 @@ use crate::libraries::Libraries;
 pub const PREVIEW_OPACITY: f32 = 0.6;
 /// How far from a shape's outline the pointer still hits it, in pixels.
 pub const HIT_TOLERANCE_PX: f32 = 4.;
+/// How near a shape's edge a line end attaches to it, in pixels.
+pub const ATTACH_EDGE_PX: f32 = 10.;
 /// How far from a handle's centre the pointer still grabs it, in pixels.
 pub const HANDLE_GRAB_PX: f32 = 6.;
 /// Distance of the rotate handle above the selection's top edge, in
@@ -84,6 +87,13 @@ pub enum Gesture {
         center: Pt,
         start: Pt,
         originals: Originals,
+    },
+    /// Dragging end `end` of the one selected line, pressed at `start`;
+    /// `original` is the line before the drag.
+    MovingEnd {
+        end: LineEnd,
+        start: Pt,
+        original: Box<Shape>,
     },
 }
 
@@ -460,11 +470,17 @@ impl EditorWindow {
             window.push_notification(Notification::warning("Show the layer to draw on it."), cx);
             return;
         }
+        let (library, shape) = (library.clone(), shape.clone());
+        self.line_ends = [None; 2];
+        if is_line_tool(&library, &shape) {
+            self.line_ends[0] = self.attach_target_at(at, None, cx);
+            self.attach_highlight = self.line_ends[0];
+        }
         self.gesture = Gesture::Placing {
             start: at,
             current: at,
-            library: library.clone(),
-            shape: shape.clone(),
+            library,
+            shape,
             constrain: modifiers.shift,
             from_center: modifiers.alt,
             dragged: false,
@@ -482,6 +498,15 @@ impl EditorWindow {
     ) {
         let zoom = self.session.page().viewport.zoom;
         if move_placement(&mut self.gesture, at, modifiers.shift, modifiers.alt, zoom) {
+            if let (Some(at), Gesture::Placing { library, shape, .. }) = (at, &self.gesture) {
+                if is_line_tool(library, shape) {
+                    let end = self
+                        .attach_target_at(at, None, cx)
+                        .filter(|&id| Some(id) != self.line_ends[0]);
+                    self.line_ends[1] = end;
+                    self.attach_highlight = end.or(self.line_ends[0]);
+                }
+            }
             cx.notify();
         }
     }
@@ -497,9 +522,12 @@ impl EditorWindow {
     ) {
         self.update_placing(at, modifiers, cx);
         let gesture = std::mem::take(&mut self.gesture);
-        let Some(shape) = placement_shape(&gesture, &cx.global::<Libraries>().0) else {
+        let ends = std::mem::take(&mut self.line_ends);
+        self.attach_highlight = None;
+        let Some(mut shape) = placement_shape(&gesture, &cx.global::<Libraries>().0) else {
             return;
         };
+        attach_ends(&mut shape, ends);
         let id = shape.id;
         self.update_session(|s| s.add_shapes(vec![shape]), cx);
         self.selection = vec![id];
@@ -512,8 +540,20 @@ impl EditorWindow {
     /// undo step; a placement or marquee is dropped.
     pub(super) fn cancel_gesture(&mut self, cx: &mut Context<Self>) -> bool {
         let gesture = std::mem::take(&mut self.gesture);
+        self.line_ends = [None; 2];
+        self.attach_highlight = None;
         if gesture == Gesture::Idle {
             return false;
+        }
+        if let Gesture::MovingEnd { original, .. } = &gesture {
+            let original = (**original).clone();
+            self.update_session(
+                |s| s.update_shapes(&[original.id], |l| *l = original.clone()),
+                cx,
+            );
+            self.session_gesture
+                .end(&mut self.session, GestureOwner::Pointer);
+            self.update_session(|_| {}, cx);
         }
         if let Some(originals) = gesture.originals() {
             let originals = originals.clone();
@@ -582,13 +622,27 @@ impl EditorWindow {
         // A gesture whose mouse-up was missed ends as it would have.
         self.finish_gesture(None, modifiers, cx);
         let zoom = self.session.page().viewport.zoom;
-        let chrome = chrome_frame(
-            &self
-                .selected_frames()
-                .into_iter()
-                .map(|(_, f)| f)
-                .collect::<Vec<_>>(),
-        );
+        // A selected line has end handles instead of the box's.
+        let chrome = self.selection_chrome();
+        if let Some(end) = self.line_end_at(at) {
+            let Some(line) = self.selected_line().cloned() else {
+                return;
+            };
+            self.press = Press {
+                dragged: false,
+                on_click: None,
+                last: at,
+            };
+            self.gesture = Gesture::MovingEnd {
+                end,
+                start: at,
+                original: Box::new(line),
+            };
+            self.session_gesture
+                .begin(&mut self.session, GestureOwner::Pointer);
+            cx.notify();
+            return;
+        }
         let shape = self.shape_at(at, cx);
         let kind = press_target(
             chrome.as_ref(),
@@ -669,13 +723,22 @@ impl EditorWindow {
                 Gesture::Marquee { start, .. }
                 | Gesture::Moving { start, .. }
                 | Gesture::Resizing { start, .. }
-                | Gesture::Rotating { start, .. } => *start,
+                | Gesture::Rotating { start, .. }
+                | Gesture::MovingEnd { start, .. } => *start,
                 _ => return,
             };
             if !is_drag(start, p, self.session.page().viewport.zoom) {
                 return;
             }
             self.press.dragged = true;
+            if matches!(self.gesture, Gesture::Moving { .. }) {
+                self.detach_moved_lines(cx);
+            }
+        }
+        if let Gesture::MovingEnd { end, original, .. } = &self.gesture {
+            let (end, id) = (*end, original.id);
+            self.move_line_end(id, end, p, cx);
+            return;
         }
         if let Gesture::Marquee { current, .. } = &mut self.gesture {
             if *current != p {
@@ -725,7 +788,11 @@ impl EditorWindow {
                     Vec::new()
                 };
             }
-            Gesture::Moving { .. } | Gesture::Resizing { .. } | Gesture::Rotating { .. } => {
+            Gesture::Moving { .. }
+            | Gesture::Resizing { .. }
+            | Gesture::Rotating { .. }
+            | Gesture::MovingEnd { .. } => {
+                self.attach_highlight = None;
                 self.session_gesture
                     .end(&mut self.session, GestureOwner::Pointer);
                 self.update_session(|_| {}, cx);
@@ -746,6 +813,7 @@ impl EditorWindow {
         if self.gesture != Gesture::Idle || self.selection.is_empty() {
             return;
         }
+        self.detach_moved_lines(cx);
         let moved = Gesture::Moving {
             start: (0., 0.),
             originals: self.selected_frames(),
@@ -816,8 +884,12 @@ impl EditorWindow {
             .collect()
     }
 
-    /// The selection chrome's frame, if anything is selected.
+    /// The selection chrome's frame, if anything other than one line is
+    /// selected (see [`Self::selected_line_ends`]).
     pub(super) fn selection_chrome(&self) -> Option<Frame> {
+        if self.selected_line().is_some() {
+            return None;
+        }
         let frames: Vec<Frame> = self.selected_frames().into_iter().map(|(_, f)| f).collect();
         chrome_frame(&frames)
     }
@@ -848,6 +920,12 @@ impl EditorWindow {
     /// tool: a resize or rotate cursor over a handle, or during a resize
     /// or rotate.
     pub(super) fn pointer_cursor(&self, at: Option<Pt>) -> Option<CursorStyle> {
+        if self.selected_line().is_some() {
+            let on_end = matches!(self.gesture, Gesture::MovingEnd { .. })
+                || (self.gesture == Gesture::Idle
+                    && at.and_then(|p| self.line_end_at(p)).is_some());
+            return on_end.then_some(CursorStyle::Crosshair);
+        }
         let chrome = self.selection_chrome()?;
         let hit = match &self.gesture {
             Gesture::Resizing { handle, .. } => Some(HandleHit::Resize(*handle)),
@@ -870,10 +948,173 @@ impl EditorWindow {
         })
     }
 
-    /// The shape being placed, for the preview.
+    /// The shape being placed, for the preview: a line already meets the
+    /// shapes it will attach to.
     pub(super) fn placement_preview(&self, libs: &LibraryRegistry) -> Option<Shape> {
-        preview_shape(&self.gesture, libs)
+        let mut shape = preview_shape(&self.gesture, libs)?;
+        attach_ends(&mut shape, self.line_ends);
+        if let Some(props) = shape.line.as_mut() {
+            let target = |id: Option<Uuid>| {
+                let s = self.session.find_shape(id?)?;
+                target_of(s, Some(libs))
+            };
+            let (start, end) = (target(props.start), target(props.end));
+            route_line(&mut shape.frame, props, start.as_ref(), end.as_ref());
+        }
+        Some(shape)
     }
+
+    /// The one selected line, if the selection is exactly one unlocked
+    /// line.
+    pub(super) fn selected_line(&self) -> Option<&Shape> {
+        match self.selection.as_slice() {
+            [id] => self
+                .session
+                .find_shape(*id)
+                .filter(|s| s.is_line() && !s.locked),
+            _ => None,
+        }
+    }
+
+    /// The ends of the one selected line, start first, in canvas
+    /// coordinates.
+    pub(super) fn selected_line_ends(&self) -> Option<[Pt; 2]> {
+        let (a, b) = line_endpoints(&self.selected_line()?.frame);
+        Some([a, b])
+    }
+
+    /// The end handle of the one selected line under canvas point `p`;
+    /// the end wins when both are equally near.
+    fn line_end_at(&self, p: Pt) -> Option<LineEnd> {
+        let grab = HANDLE_GRAB_PX / self.session.page().viewport.zoom;
+        let [a, b] = self.selected_line_ends()?;
+        let d = |q: Pt| (q.0 - p.0).hypot(q.1 - p.1);
+        [(LineEnd::End, d(b)), (LineEnd::Start, d(a))]
+            .into_iter()
+            .filter(|&(_, dist)| dist <= grab)
+            .min_by(|x, y| x.1.total_cmp(&y.1))
+            .map(|(end, _)| end)
+    }
+
+    /// The topmost shape at canvas point `at` a line end can attach to:
+    /// unlocked, not a line, not `except`.
+    fn attach_target_at(
+        &mut self,
+        at: Pt,
+        except: Option<Uuid>,
+        cx: &mut Context<Self>,
+    ) -> Option<Uuid> {
+        let libs = cx.global::<Libraries>().0.clone();
+        let band = ATTACH_EDGE_PX / self.session.page().viewport.zoom;
+        let cache = &mut self.geometry_cache;
+        hit_shape_with(&self.session, band, |shape, band| {
+            !shape.is_line()
+                && Some(shape.id) != except
+                && attaches_at(cache.outline(shape, &libs), at, band)
+        })
+    }
+
+    /// Puts end `end` of line `id` at canvas point `p`, attached to the
+    /// shape there (not the one its other end is attached to).
+    fn move_line_end(&mut self, id: Uuid, end: LineEnd, p: Pt, cx: &mut Context<Self>) {
+        let Some(line) = self.session.find_shape(id) else {
+            return;
+        };
+        let other = match end {
+            LineEnd::Start => LineEnd::End,
+            LineEnd::End => LineEnd::Start,
+        };
+        let other_target = line.line.as_ref().and_then(|l| l.attached(other));
+        let (a, b) = line_endpoints(&line.frame);
+        let frame = match end {
+            LineEnd::Start => line_frame(p, b),
+            LineEnd::End => line_frame(a, p),
+        };
+        let target = self
+            .attach_target_at(p, Some(id), cx)
+            .filter(|&t| Some(t) != other_target);
+        self.attach_highlight = target;
+        self.update_session(
+            |s| {
+                s.update_shapes(&[id], |l| {
+                    l.frame = frame;
+                    if let Some(props) = l.line.as_mut() {
+                        props.set_attached(end, target);
+                    }
+                })
+            },
+            cx,
+        );
+    }
+
+    /// Lets go the ends of selected lines attached to shapes that are not
+    /// selected, so moving a line on its own moves it off them.
+    fn detach_moved_lines(&mut self, cx: &mut Context<Self>) {
+        let selected: HashSet<Uuid> = self.selection.iter().copied().collect();
+        let ids: Vec<Uuid> = self
+            .session
+            .shapes_on_active_layer()
+            .iter()
+            .filter(|s| selected.contains(&s.id))
+            .filter(|s| {
+                s.line.as_ref().is_some_and(|l| {
+                    [l.start, l.end]
+                        .into_iter()
+                        .flatten()
+                        .any(|t| !selected.contains(&t))
+                })
+            })
+            .map(|s| s.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.update_session(
+            |s| {
+                s.update_shapes(&ids, |l| {
+                    if let Some(props) = l.line.as_mut() {
+                        for end in [LineEnd::Start, LineEnd::End] {
+                            if props.attached(end).is_some_and(|t| !selected.contains(&t)) {
+                                props.set_attached(end, None);
+                            }
+                        }
+                    }
+                })
+            },
+            cx,
+        );
+    }
+}
+
+/// Whether the tool placing `shape` of `library` draws lines.
+fn is_line_tool(library: &str, shape: &str) -> bool {
+    library == mindweave_core::LINE_LIBRARY && shape == mindweave_core::LINE_SHAPE
+}
+
+/// Attaches a new line's start and end to the shapes in `ends`.
+fn attach_ends(shape: &mut Shape, [start, end]: [Option<Uuid>; 2]) {
+    if let Some(props) = shape.line.as_mut() {
+        props.start = start;
+        props.end = end.filter(|&e| Some(e) != start);
+    }
+}
+
+/// Whether a line end at `p` attaches to the shape with `outline`: within
+/// `band` canvas units of its edge, or anywhere on it when it is no more
+/// than three bands across. So a line drawn inside a large shape (a
+/// container) stays free unless its end is dropped on the edge.
+pub fn attaches_at(outline: &CanvasGeometry, p: Pt, band: f32) -> bool {
+    let small = outline.aabb.w <= 3. * band && outline.aabb.h <= 3. * band;
+    let mut test = outline.clone();
+    test.placeholder = false;
+    for sub in &mut test.geometry.paths {
+        sub.fill = if small {
+            FillRole::Shape
+        } else {
+            FillRole::None
+        };
+    }
+    outline_hit(&test, p, band)
 }
 
 /// The preview of the shape `gesture` places: nothing until the pointer
@@ -956,10 +1197,10 @@ fn placement_shape(gesture: &Gesture, libs: &LibraryRegistry) -> Option<Shape> {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        chrome_frame, handle_at, hit_shape, is_drag, is_line_like, marquee_rect, marquee_selection,
-        move_placement, placement_frame, placement_shape, press_kind, press_selection,
-        press_target, preview_shape, resize_cursor, text_box_widths_off, transformed,
-        visible_handles, Gesture, HandleHit, PressKind,
+        attaches_at, chrome_frame, handle_at, hit_shape, is_drag, is_line_like, marquee_rect,
+        marquee_selection, move_placement, placement_frame, placement_shape, press_kind,
+        press_selection, press_target, preview_shape, resize_cursor, shape_geometry,
+        text_box_widths_off, transformed, visible_handles, Gesture, HandleHit, PressKind,
     };
     use gpui_kit::CursorStyle;
     use mindweave_core::geometry::Rect;
@@ -973,11 +1214,34 @@ mod tests {
     }
 
     #[test]
+    fn line_ends_attach_near_the_edge_or_on_small_shapes() {
+        let libs = registry();
+        let rect = |w: f32, h: f32| {
+            let def = libs.shape("basic-shapes", "rectangle").unwrap();
+            let frame = Frame {
+                w,
+                h,
+                ..Frame::default()
+            };
+            shape_geometry(&Shape::new(def, "basic-shapes", frame), &libs)
+        };
+        let container = rect(400., 300.);
+        // Inside a container, away from its edge: stays free.
+        assert!(!attaches_at(&container, (200., 150.), 10.));
+        assert!(!attaches_at(&container, (30., 40.), 10.));
+        // On or near the edge, inside or out: attaches.
+        assert!(attaches_at(&container, (5., 150.), 10.));
+        assert!(attaches_at(&container, (200., 308.), 10.));
+        assert!(!attaches_at(&container, (200., 320.), 10.));
+        // A small shape attaches anywhere on it.
+        assert!(attaches_at(&rect(24., 24.), (12., 12.), 10.));
+    }
+
+    #[test]
     fn lines_and_arrows_are_line_like() {
         let libs = registry();
         let def = |id| libs.shape("basic-shapes", id).unwrap();
         assert!(is_line_like(def("line")));
-        assert!(is_line_like(def("arrow")));
         assert!(!is_line_like(def("rectangle")));
         assert!(!is_line_like(def("ellipse")));
     }

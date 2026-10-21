@@ -19,8 +19,8 @@ use uuid::Uuid;
 use super::properties_panel::{
     field_row, FIELD_GAP, NUMBER_INPUT_WIDTH, RESET_WIDTH, ROW_HEIGHT, SWATCH_SIZE,
 };
-use super::text_properties;
 use super::{hex_to_hsla, hsla_to_hex, parse_number, section_label, EditorWindow, SMALL_TEXT_SIZE};
+use super::{line_properties, text_properties};
 use crate::libraries::Libraries;
 
 /// Stroke widths run from 0 to this, in steps of [`STROKE_WIDTH_STEP`].
@@ -778,6 +778,9 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
         })
         .collect();
 
+    let lines = line_properties::all_lines(&editor.shapes_among(&editor.selection));
+    let line_section = line_properties::render(editor, cx);
+    let outline_rows = line_properties::style_rows(editor, cx);
     panel
         .child(section_label("Shape", cx))
         .child(title)
@@ -790,14 +793,18 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
             number(NumberKind::Rotation, Some("°")),
         ))
         .children(text_properties::render(editor, cx))
+        .children(line_section)
         .child(section_label("Style", cx).mt(px(SECTION_GAP)))
-        .child(color_row(editor, summary, StyleColor::Fill, cx))
+        .when(!lines, |panel| {
+            panel.child(color_row(editor, summary, StyleColor::Fill, cx))
+        })
         .child(color_row(editor, summary, StyleColor::Stroke, cx))
         .child(field_row(
-            "Stroke width",
+            "Line size",
             None,
             number(NumberKind::StrokeWidth, Some("px")),
         ))
+        .children(outline_rows)
         .child(field_row(
             "Opacity",
             None,

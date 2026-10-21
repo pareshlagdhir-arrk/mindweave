@@ -156,12 +156,26 @@ pub fn prepare_paste(mut shapes: Vec<Shape>, view: &Rect) -> Vec<Shape> {
         _ => (0.0, 0.0),
     };
     for s in &mut shapes {
-        s.id = Uuid::new_v4();
         s.locked = false;
         s.frame.x += dx;
         s.frame.y += dy;
     }
+    renew_ids(&mut shapes);
     shapes
+}
+
+/// Gives `shapes` fresh ids. Line ends attached to one of `shapes` follow
+/// it to its new id; ends attached to anything else are let go.
+fn renew_ids(shapes: &mut [Shape]) {
+    let ids: std::collections::HashMap<Uuid, Uuid> =
+        shapes.iter().map(|s| (s.id, Uuid::new_v4())).collect();
+    for s in shapes.iter_mut() {
+        s.id = ids[&s.id];
+        if let Some(line) = &mut s.line {
+            line.start = line.start.and_then(|id| ids.get(&id).copied());
+            line.end = line.end.and_then(|id| ids.get(&id).copied());
+        }
+    }
 }
 
 /// Whether `a` and `b` overlap or touch.
@@ -172,22 +186,43 @@ fn intersects(a: &Rect, b: &Rect) -> bool {
 /// Copies of `shapes` with fresh ids, offset by
 /// [`DUPLICATE_OFFSET`] on both axes.
 pub fn duplicate(shapes: &[Shape]) -> Vec<Shape> {
-    shapes
+    let mut copies: Vec<Shape> = shapes
         .iter()
         .map(|s| {
             let mut d = s.clone();
-            d.id = Uuid::new_v4();
             d.frame.x += DUPLICATE_OFFSET;
             d.frame.y += DUPLICATE_OFFSET;
             d
         })
-        .collect()
+        .collect();
+    renew_ids(&mut copies);
+    copies
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::text::RunStyle;
+
+    #[test]
+    fn copied_lines_stay_attached_only_to_copied_shapes() {
+        let (a, b) = (shape(0., 0., 10., 10.), shape(50., 0., 10., 10.));
+        let mut line = shape(10., 5., 40., 0.);
+        line.line = Some(crate::line::LineProps {
+            start: Some(a.id),
+            end: Some(b.id),
+            ..Default::default()
+        });
+        for copies in [
+            duplicate(&[a.clone(), line.clone()]),
+            prepare_paste(vec![a.clone(), line.clone()], &view()),
+        ] {
+            let props = copies[1].line.clone().unwrap();
+            assert_eq!(props.start, Some(copies[0].id));
+            assert_ne!(copies[0].id, a.id);
+            assert_eq!(props.end, None);
+        }
+    }
 
     #[test]
     fn mindweave_payloads_are_recognised_even_when_unreadable() {

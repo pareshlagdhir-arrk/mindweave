@@ -13,6 +13,8 @@ use crate::document::{
 use crate::format::{self, FormatError};
 use crate::geometry::Frame;
 use crate::history::{History, HISTORY_CAP};
+use crate::library::LibraryRegistry;
+use crate::line::reroute_page;
 use crate::shape::{Label, Shape};
 pub use crate::viewport::{ZOOM_MAX, ZOOM_MIN};
 
@@ -55,6 +57,8 @@ pub struct DocumentSession {
     gesture: Option<(u64, Vec<Page>)>,
     /// Bumped whenever a text box's laid-out size changes.
     layout_generation: u64,
+    /// Shape outlines line ends attach to; boxes without it.
+    libs: Option<std::sync::Arc<LibraryRegistry>>,
 }
 
 /// Whether `a` and `b` have the same content, ignoring view state.
@@ -168,6 +172,7 @@ fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
         locked,
         label,
         text_box,
+        line,
         extra,
     } = a;
     let auto = a.auto_width();
@@ -189,6 +194,7 @@ fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
         && *locked == b.locked
         && *label == b.label
         && *text_box == b.text_box
+        && *line == b.line
         && *extra == b.extra
 }
 
@@ -279,6 +285,7 @@ impl DocumentSession {
             history: History::new(HISTORY_CAP),
             gesture: None,
             layout_generation: 0,
+            libs: None,
         }
     }
 
@@ -584,6 +591,18 @@ impl DocumentSession {
         &mut page.layers[idx]
     }
 
+    /// Sets the libraries whose outlines line ends attach to.
+    pub fn set_libraries(&mut self, libs: std::sync::Arc<LibraryRegistry>) {
+        self.libs = Some(libs);
+    }
+
+    /// Re-routes the active page's lines after its shapes changed, inside
+    /// the step that changed them.
+    fn reroute_lines(&mut self) {
+        let libs = self.libs.clone();
+        reroute_page(self.page_mut(), libs.as_deref());
+    }
+
     /// Shapes of the active layer, back to front.
     pub fn shapes_on_active_layer(&self) -> &[Shape] {
         &self.active_layer().objects
@@ -607,6 +626,7 @@ impl DocumentSession {
         shapes.iter_mut().for_each(Shape::normalize);
         self.checkpoint();
         self.active_layer_mut().objects.extend(shapes);
+        self.reroute_lines();
     }
 
     /// Removes the shapes with `ids` from every layer of the active page
@@ -631,6 +651,7 @@ impl DocumentSession {
             layer.objects = keep;
             removed.extend::<Vec<Shape>>(out);
         }
+        self.reroute_lines();
         removed
     }
 
@@ -658,6 +679,7 @@ impl DocumentSession {
         for (i, shape) in changed {
             objects[i] = shape;
         }
+        self.reroute_lines();
     }
 
     /// Sets or clears the label of shape `id` on the active layer as one
@@ -691,6 +713,7 @@ impl DocumentSession {
             keep_top_left(&before, &mut shape.frame);
             if shape.frame != before {
                 self.layout_generation += 1;
+                self.reroute_lines();
             }
         }
     }
@@ -1172,6 +1195,41 @@ mod tests {
             ..Default::default()
         };
         Shape::new(&def, "basic-shapes", frame)
+    }
+
+    /// A line from `a` to `b`, its ends attached to `start` and `end`.
+    fn line(a: (f32, f32), b: (f32, f32), start: Option<Uuid>, end: Option<Uuid>) -> Shape {
+        let libs = crate::library::builtin_libraries();
+        let def = libs[0].shape("line").unwrap();
+        let mut s = Shape::new(def, "basic-shapes", crate::line::line_frame(a, b));
+        let props = s.line.as_mut().unwrap();
+        props.start = start;
+        props.end = end;
+        s
+    }
+
+    #[test]
+    fn attached_lines_follow_their_shapes_in_the_same_step() {
+        let (_d, mut s) = new_session("l.mindweave");
+        let (a, b) = (rect(0.0), rect(100.0));
+        let (ida, idb) = (a.id, b.id);
+        let l = line((5.0, 5.0), (105.0, 5.0), Some(ida), Some(idb));
+        let idl = l.id;
+        s.add_shapes(vec![a, b, l]);
+        let ends = |s: &DocumentSession| {
+            crate::geometry::line_endpoints(&s.find_shape(idl).unwrap().frame)
+        };
+        // Centre to centre, cut at the boxes' edges.
+        assert_eq!(ends(&s), ((10.0, 5.0), (100.0, 5.0)));
+        s.update_shapes(&[idb], |sh| sh.frame.x = 200.0);
+        assert_eq!(ends(&s), ((10.0, 5.0), (200.0, 5.0)));
+        s.undo();
+        assert_eq!(ends(&s), ((10.0, 5.0), (100.0, 5.0)));
+        // Deleting a shape lets that end go where it is.
+        s.remove_shapes(&[idb]);
+        let props = s.find_shape(idl).unwrap().line.clone().unwrap();
+        assert_eq!((props.start, props.end), (Some(ida), None));
+        assert_eq!(ends(&s), ((10.0, 5.0), (100.0, 5.0)));
     }
 
     fn label(text: &str) -> crate::shape::Label {
