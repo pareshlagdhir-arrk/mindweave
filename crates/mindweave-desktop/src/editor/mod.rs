@@ -1,4 +1,4 @@
-//! The editor window for one document: toolbar, Layers panel, canvas, page
+//! The editor window for one document: ribbon, Layers panel, canvas, page
 //! tabs, Properties panel and status bar.
 
 mod canvas;
@@ -6,6 +6,7 @@ mod interaction;
 mod layers_panel;
 mod page_tabs;
 mod properties_panel;
+mod shape_gallery;
 mod shape_paint;
 mod shape_properties;
 mod status_bar;
@@ -136,6 +137,8 @@ pub struct EditorWindow {
     rename: Option<Rename>,
     /// The active tool and the toolbar tab being shown.
     pub tools: ToolState,
+    /// The ribbon's scroll position, measured width and gallery search.
+    ribbon: toolbar::Ribbon,
     /// The pointer gesture in progress on the canvas.
     pub gesture: Gesture,
     /// The left press behind a Pointer-tool gesture.
@@ -154,6 +157,7 @@ impl EditorWindow {
     pub fn new(session: DocumentSession, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+        let (ribbon, ribbon_subscription) = toolbar::Ribbon::new(window, cx);
         let (properties, mut _subscriptions) =
             properties_panel::PropertyFields::new(session.page().canvas.pattern, window, cx);
         _subscriptions.extend([
@@ -167,6 +171,7 @@ impl EditorWindow {
                 }
             }),
             cx.on_blur(&focus_handle, window, |this, _, cx| this.release_space(cx)),
+            ribbon_subscription,
         ]);
         let window_title = session.title();
         Self {
@@ -179,6 +184,7 @@ impl EditorWindow {
             pan_drag: None,
             rename: None,
             tools: ToolState::default(),
+            ribbon,
             gesture: Gesture::Idle,
             press: Press::default(),
             selection: Vec::new(),
