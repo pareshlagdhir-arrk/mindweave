@@ -169,10 +169,11 @@ impl TextLayout {
     ) -> TextLayout {
         let text_system = window.text_system().clone();
         let (installed, _) = installed_fonts(&text_system);
+        let default_family = canvas_default_family(&window.text_style().font().family, &installed);
         let mut builder = Builder {
             text_system: &text_system,
             installed,
-            default_family: window.text_style().font().family,
+            default_family,
             default_color,
             zoom,
             wrap: wrap.map(|w| w * zoom),
@@ -711,6 +712,25 @@ pub(super) fn refresh_installed_fonts(names: &[String]) {
     }
 }
 
+/// The system UI font's alias in gpui.
+const SYSTEM_UI_FONT: &str = ".SystemUIFont";
+
+/// Drawn instead of the system UI font when installed: macOS's system font
+/// is a variable font whose bold and italic gpui selects but draws with the
+/// regular glyphs, while this one has real bold and italic faces.
+const SYSTEM_FONT_STAND_IN: &str = "Helvetica Neue";
+
+/// The family canvas text with no font of its own is drawn in: the UI
+/// family, except that the system UI font gives way to
+/// [`SYSTEM_FONT_STAND_IN`] so bold and italic show.
+pub(super) fn canvas_default_family(ui_family: &str, installed: &HashSet<String>) -> SharedString {
+    if ui_family == SYSTEM_UI_FONT && installed.contains(SYSTEM_FONT_STAND_IN) {
+        SharedString::from(SYSTEM_FONT_STAND_IN)
+    } else {
+        SharedString::from(ui_family.to_string())
+    }
+}
+
 /// What layouts depend on beyond their text: the window's default font
 /// family and the installed font set.
 fn fonts_key(window: &Window) -> u64 {
@@ -1118,11 +1138,13 @@ pub(super) fn align_offset(align: HAlign, available: f32, width: f32) -> f32 {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        align_offset, break_lines, forced_breaks, hard_lines, max_font_size, resolve_family,
-        should_greek, size_segments, text_run, visible_end, ContentKey, InstalledFonts, PenIndex,
+        align_offset, break_lines, canvas_default_family, forced_breaks, hard_lines, max_font_size,
+        resolve_family, should_greek, size_segments, text_run, visible_end, ContentKey,
+        InstalledFonts, PenIndex,
     };
     use gpui_kit::{FontStyle, FontWeight, Hsla, SharedString};
     use mindweave_core::{HAlign, RichText, RunStyle};
+    use std::collections::HashSet;
 
     #[test]
     fn the_installed_font_set_moves_on_only_when_it_changes() {
@@ -1207,6 +1229,23 @@ mod tests {
         };
         let run = text_run(&small, 1, "X".into(), black(), 1.);
         assert_eq!(f32::from(run.underline.unwrap().thickness), 1.);
+    }
+
+    #[test]
+    fn system_font_text_draws_in_a_family_with_real_bold_and_italic() {
+        let with = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<HashSet<_>>();
+        let mac = with(&["Helvetica Neue", "Georgia"]);
+        assert_eq!(
+            canvas_default_family(".SystemUIFont", &mac),
+            "Helvetica Neue"
+        );
+        // A family the theme names itself is kept.
+        assert_eq!(canvas_default_family("Inter", &mac), "Inter");
+        // Without Helvetica Neue the system font stays.
+        assert_eq!(
+            canvas_default_family(".SystemUIFont", &with(&["Georgia"])),
+            ".SystemUIFont"
+        );
     }
 
     #[test]
