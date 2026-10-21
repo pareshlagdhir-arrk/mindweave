@@ -2,6 +2,7 @@ mod actions;
 mod app_state;
 mod dashboard;
 mod editor;
+mod icon_library;
 mod libraries;
 mod menu_bar;
 mod theme_picker;

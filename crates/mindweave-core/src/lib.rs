@@ -8,6 +8,7 @@ pub mod files;
 pub mod format;
 pub mod geometry;
 pub mod history;
+pub mod icons;
 pub mod image;
 pub mod library;
 pub mod line;
@@ -33,6 +34,10 @@ pub use color::{
 pub use document::{BackgroundPattern, CanvasSettings, Document, Layer, Page, Viewport};
 pub use files::{rename_document, validate_new_stem, RenameError, MAX_STEM_LEN};
 pub use format::{load, save, FormatError, FORMAT_VERSION};
+pub use icons::{
+    import_icon_folder, import_icon_zip, load_icon_sets, search_icons, user_icons_dir, IconEntry,
+    IconImportError, IconSet,
+};
 pub use image::{
     collect_images, image_id, placed_size, resolve_images, ImageData, ImageFormat, ImageStore,
     StoredImage, IMAGE_SHAPE, MAX_IMAGE_BYTES,

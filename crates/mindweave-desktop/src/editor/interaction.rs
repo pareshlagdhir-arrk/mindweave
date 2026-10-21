@@ -762,7 +762,13 @@ impl EditorWindow {
                 *current = p;
                 cx.notify();
             }
-        } else if let Some(frames) = transformed(&self.gesture, p, modifiers.shift, modifiers.alt) {
+        } else if let Some(frames) = transformed(
+            &self.gesture,
+            p,
+            // Pictures always keep their proportions.
+            modifiers.shift || self.selection_has_image(),
+            modifiers.alt,
+        ) {
             // Text boxes whose width the drag changes stop growing with
             // their text (once: part of the gesture's undo step).
             let widths: Vec<(Uuid, bool)> = text_box_widths_off(&self.gesture, &frames)
@@ -899,6 +905,15 @@ impl EditorWindow {
     }
 
     /// The selected shapes and their frames, back to front.
+    /// Whether the selection holds an image (or placed icon), which only
+    /// scales with its proportions kept.
+    pub(super) fn selection_has_image(&self) -> bool {
+        self.selection
+            .iter()
+            .filter_map(|id| self.session.find_shape(*id))
+            .any(Shape::is_image)
+    }
+
     pub(super) fn selected_frames(&self) -> Originals {
         if self.selection.is_empty() {
             return Vec::new();
@@ -1694,6 +1709,21 @@ mod tests {
             resize_cursor(Handle::W, -45.),
             resize_cursor(Handle::NE, 0.)
         );
+    }
+
+    #[test]
+    fn side_handles_scale_both_sides_when_proportions_are_kept() {
+        let [a, _] = ids();
+        let resizing = Gesture::Resizing {
+            handle: Handle::E,
+            start: (64., 16.),
+            originals: vec![(a, boxed(0., 0., 64., 32.))],
+            auto_widths: vec![None],
+        };
+        // How an image is resized: proportions kept, so dragging the right
+        // side doubles the height with the width.
+        let (_, f) = transformed(&resizing, (128., 16.), true, false).unwrap()[0];
+        assert_eq!((f.w, f.h), (128., 64.));
     }
 
     #[test]

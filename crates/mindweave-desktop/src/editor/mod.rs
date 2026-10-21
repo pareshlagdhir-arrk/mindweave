@@ -3,6 +3,7 @@
 
 mod canvas;
 mod color_palette;
+mod icons_panel;
 mod images;
 mod interaction;
 mod layers_panel;
@@ -28,6 +29,7 @@ use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _, WindowExt as _};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
 use mindweave_core::{
@@ -40,7 +42,7 @@ use mindweave_core::{
 use crate::actions::{
     self, BringForward, BringToFront, Cancel, CloseWindow, Cut, Delete, Duplicate, EditText, Group,
     NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp,
-    NudgeUpFar, Paste, Redo, Save, SelectAll, SendBackward, SendToBack, ToggleLayers,
+    NudgeUpFar, Paste, Redo, Save, SelectAll, SendBackward, SendToBack, ToggleIcons, ToggleLayers,
     ToggleProperties, ToolEllipse, ToolHand, ToolLine, ToolPointer, ToolRectangle, ToolText, Undo,
     Ungroup, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
 };
@@ -58,6 +60,8 @@ const TEXT_SIZE: f32 = 13.;
 const SMALL_TEXT_SIZE: f32 = 12.;
 const SECTION_LABEL_SIZE: f32 = 10.;
 const LAYERS_WIDTH: f32 = 220.;
+/// Height of the Layers panel when the Icons pane is shown below it.
+const LAYERS_WITH_ICONS_HEIGHT: f32 = 200.;
 const PROPERTIES_WIDTH: f32 = 240.;
 const PANEL_MIN_WIDTH: f32 = 160.;
 const PANEL_MAX_WIDTH: f32 = 480.;
@@ -216,6 +220,8 @@ pub struct EditorWindow {
     geometry_cache: GeometryCache,
     /// Pictures decoded for painting.
     image_cache: images::ImageCache,
+    /// The Icons pane's search and set filter.
+    icons: icons_panel::IconsPane,
     /// Text layouts of the active page's labels and text boxes.
     text_layouts: TextLayoutCache,
     /// Glyph outlines for drawing rotated text.
@@ -258,6 +264,8 @@ impl EditorWindow {
             }),
             ribbon_subscription,
         ]);
+        let (icons, icons_subscription) = icons_panel::IconsPane::new(window, cx);
+        _subscriptions.push(icons_subscription);
         let window_title = session.title();
         Self {
             session,
@@ -277,6 +285,7 @@ impl EditorWindow {
             attach_highlight: None,
             geometry_cache: GeometryCache::default(),
             image_cache: images::ImageCache::default(),
+            icons,
             text_layouts: TextLayoutCache::default(),
             glyph_outlines: GlyphOutlines::default(),
             session_gesture: SessionGesture::default(),
@@ -661,6 +670,17 @@ impl EditorWindow {
         cx.notify();
     }
 
+    /// Shows or hides the Icons pane; shown, its search box has focus.
+    fn on_toggle_icons(&mut self, _: &ToggleIcons, window: &mut Window, cx: &mut Context<Self>) {
+        AppState::update_settings(cx, |s| s.show_icons = !s.show_icons);
+        if cx.global::<AppState>().settings.show_icons {
+            let search = self.icons.search.clone();
+            search.update(cx, |input, cx| input.focus(window, cx));
+        } else {
+            self.focus_handle.focus(window, cx);
+        }
+    }
+
     fn on_toggle_layers(&mut self, _: &ToggleLayers, _: &mut Window, cx: &mut Context<Self>) {
         AppState::update_settings(cx, |s| s.show_layers = !s.show_layers);
     }
@@ -1027,6 +1047,17 @@ impl EditorWindow {
             .flex_1()
             .min_h_0()
             .child(canvas::canvas(cx.entity(), self.session.page()))
+            .on_drop(
+                cx.listener(|this, drag: &icons_panel::IconDrag, window, cx| {
+                    // Dropped where the pointer is.
+                    let Some(bounds) = this.canvas_bounds else {
+                        return;
+                    };
+                    let p = window.mouse_position() - bounds.origin;
+                    let at = this.to_canvas((f32::from(p.x), f32::from(p.y)));
+                    this.place_icon(&drag.path.clone(), Some(at), window, cx);
+                }),
+            )
             .context_menu(move |menu, _, _| canvas_menu(menu, focus.clone()))
     }
 }
@@ -1218,20 +1249,52 @@ impl Render for EditorWindow {
         self.sync_window_title(window);
         self.sync_properties(window, cx);
 
-        let (show_layers, show_properties) = {
+        let (show_layers, show_properties, show_icons) = {
             let settings = &cx.global::<AppState>().settings;
-            (settings.show_layers, settings.show_properties)
+            (
+                settings.show_layers,
+                settings.show_properties,
+                settings.show_icons,
+            )
         };
+        let show_left = show_layers || show_icons;
         let panel_range = px(PANEL_MIN_WIDTH)..px(PANEL_MAX_WIDTH);
 
-        let mut panels = h_resizable(panel_group_id(show_layers, show_properties));
-        if show_layers {
+        let mut panels = h_resizable(panel_group_id(show_left, show_properties));
+        if show_left {
+            // Layers on top, Icons below; either may be hidden.
+            let left = v_flex()
+                .size_full()
+                .when(show_layers, |left| {
+                    left.child(
+                        div()
+                            .when(show_icons, |d| {
+                                d.h(px(LAYERS_WITH_ICONS_HEIGHT)).flex_none()
+                            })
+                            .when(!show_icons, |d| d.flex_1())
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(layers_panel::render(self, cx)),
+                    )
+                })
+                .when(show_icons, |left| {
+                    left.child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .when(show_layers, |d| {
+                                d.border_t_1().border_color(cx.theme().border)
+                            })
+                            .bg(cx.theme().sidebar)
+                            .child(icons_panel::render(self, cx)),
+                    )
+                });
             panels = panels.child(
                 resizable_panel()
                     .size(px(LAYERS_WIDTH))
                     .size_range(panel_range.clone())
                     .fixed()
-                    .child(layers_panel::render(self, cx)),
+                    .child(left),
             );
         }
         panels = panels.child(
@@ -1266,6 +1329,7 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_bring_forward))
             .on_action(cx.listener(Self::on_send_backward))
             .on_action(cx.listener(Self::on_send_to_back))
+            .on_action(cx.listener(Self::on_toggle_icons))
             .on_action(cx.listener(Self::on_toggle_layers))
             .on_action(cx.listener(Self::on_toggle_properties))
             .on_action(cx.listener(Self::on_zoom_in))

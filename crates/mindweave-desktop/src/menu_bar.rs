@@ -11,8 +11,8 @@ use gpui_kit::*;
 use crate::actions::{
     self, BringForward, BringToFront, CloseWindow, Cut, Delete, Duplicate, Group, NewFile,
     NotImplemented, OpenFile, Paste, Quit, Redo, Save, SelectAll, SendBackward, SendToBack,
-    ShowDashboard, ToggleLayers, ToggleProperties, ToggleThemePicker, Undo, Ungroup, ZoomIn,
-    ZoomOut, ZoomReset,
+    ShowDashboard, ToggleIcons, ToggleLayers, ToggleProperties, ToggleThemePicker, Undo, Ungroup,
+    ZoomIn, ZoomOut, ZoomReset,
 };
 use crate::app_state::AppState;
 
@@ -53,6 +53,7 @@ pub(crate) struct MenuSpec {
 pub(crate) struct PanelState {
     pub show_layers: bool,
     pub show_properties: bool,
+    pub show_icons: bool,
 }
 
 impl PanelState {
@@ -61,10 +62,12 @@ impl PanelState {
             Some(state) => Self {
                 show_layers: state.settings.show_layers,
                 show_properties: state.settings.show_properties,
+                show_icons: state.settings.show_icons,
             },
             None => Self {
                 show_layers: true,
                 show_properties: true,
+                show_icons: false,
             },
         }
     }
@@ -145,6 +148,7 @@ pub(crate) fn menus(kind: WindowKind, panels: PanelState, include_quit: bool) ->
                 item("Actual Size", ZoomReset, editor),
                 Separator,
                 toggle("Layers", ToggleLayers, editor, panels.show_layers),
+                toggle("Icons", ToggleIcons, editor, panels.show_icons),
                 toggle(
                     "Properties",
                     ToggleProperties,
@@ -294,6 +298,7 @@ mod tests {
     const PANELS: PanelState = PanelState {
         show_layers: true,
         show_properties: false,
+        show_icons: false,
     };
 
     /// `(menu, label, enabled, checked)` for every item.

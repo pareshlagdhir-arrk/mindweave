@@ -37,6 +37,8 @@ pub struct AppSettings {
     pub editor_window: Option<WindowSize>,
     pub show_layers: bool,
     pub show_properties: bool,
+    /// The Icons pane, below Layers.
+    pub show_icons: bool,
     /// Colours picked in the colour palette, newest first, as uppercase
     /// `#RRGGBB`; at most [`MAX_RECENT_COLORS`].
     pub recent_colors: Vec<String>,
@@ -60,6 +62,7 @@ impl Default for AppSettings {
             editor_window: None,
             show_layers: true,
             show_properties: true,
+            show_icons: false,
             recent_colors: Vec::new(),
             recent_fonts: Vec::new(),
             shape_style: None,

@@ -13,6 +13,8 @@ actions!(
         ToggleThemePicker,
         ToggleLayers,
         ToggleProperties,
+        /// Shows or hides the Icons pane.
+        ToggleIcons,
         ZoomIn,
         ZoomOut,
         ZoomReset,
@@ -148,6 +150,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         // Cmd+B is bold while editing text.
         KeyBinding::new("cmd-b", ToggleLayers, Some(NOT_EDITING_TEXT)),
         KeyBinding::new("cmd-alt-b", ToggleProperties, None),
+        KeyBinding::new("cmd-shift-i", ToggleIcons, None),
+        KeyBinding::new("ctrl-shift-i", ToggleIcons, None),
         KeyBinding::new("cmd-=", ZoomIn, None),
         KeyBinding::new("cmd--", ZoomOut, None),
         KeyBinding::new("cmd-0", ZoomReset, None),
@@ -262,6 +266,8 @@ mod tests {
             ("cmd-b", "mindweave::ToggleLayers"),
             // `unparse` writes modifiers in gpui order.
             ("alt-cmd-b", "mindweave::ToggleProperties"),
+            ("cmd-shift-i", "mindweave::ToggleIcons"),
+            ("ctrl-shift-i", "mindweave::ToggleIcons"),
             ("cmd-=", "mindweave::ZoomIn"),
             ("cmd--", "mindweave::ZoomOut"),
             ("cmd-0", "mindweave::ZoomReset"),

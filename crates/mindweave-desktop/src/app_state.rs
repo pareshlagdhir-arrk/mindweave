@@ -101,6 +101,7 @@ impl AppState {
         cx.on_window_closed(|cx, id| Self::window_closed(id, cx))
             .detach();
         let notices = libraries::init(cx);
+        crate::icon_library::init(cx);
         Self::show_dashboard(cx);
         show_library_notices(notices, cx);
     }

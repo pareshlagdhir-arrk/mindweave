@@ -378,7 +378,12 @@ pub(super) fn apply_number(
                             props.auto_width = false;
                         }
                     }
-                    s.frame = *f;
+                    let f = if s.is_image() {
+                        keep_proportions(&s.frame, *f)
+                    } else {
+                        *f
+                    };
+                    s.frame = f;
                 }
             });
         }
@@ -398,6 +403,23 @@ pub(super) fn apply_number(
             }
         }),
     }
+}
+
+/// `new` with the proportions of `old`: when only the width changed the
+/// height follows it, and the other way round; the top-left corner
+/// stays. Pictures are never stretched.
+pub(super) fn keep_proportions(old: &Frame, new: Frame) -> Frame {
+    if !(old.w > 0. && old.h > 0.) {
+        return new;
+    }
+    let ratio = old.h / old.w;
+    let mut f = new;
+    if f.w != old.w && f.h == old.h {
+        f.h = f.w * ratio;
+    } else if f.h != old.h && f.w == old.w {
+        f.w = f.h / ratio;
+    }
+    f
 }
 
 /// A shape colour: a swatch that opens a colour picker, the hex value (or
@@ -1239,6 +1261,48 @@ mod tests {
         let s = summarize(&[&rect, &ellipse], &libs).unwrap();
         assert_eq!(s.title, "Mixed");
         assert!(s.params.is_empty());
+    }
+
+    #[test]
+    fn pictures_keep_their_proportions_when_one_side_is_typed() {
+        use super::keep_proportions;
+        let old = frame(10., 20., 100., 50.);
+        assert_eq!(
+            keep_proportions(&old, frame(10., 20., 200., 50.)),
+            frame(10., 20., 200., 100.)
+        );
+        assert_eq!(
+            keep_proportions(&old, frame(10., 20., 100., 25.)),
+            frame(10., 20., 50., 25.)
+        );
+        // Moving keeps the size; a group edit changing both is kept.
+        assert_eq!(
+            keep_proportions(&old, frame(0., 0., 100., 50.)),
+            frame(0., 0., 100., 50.)
+        );
+        assert_eq!(
+            keep_proportions(&old, frame(0., 0., 30., 30.)),
+            frame(0., 0., 30., 30.)
+        );
+    }
+
+    #[test]
+    fn typing_a_width_scales_an_image_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("i.mindweave")).unwrap();
+        let data = mindweave_core::ImageData::from_file_bytes(b"GIF89a..".to_vec()).unwrap();
+        let img = Shape::new_image(data, frame(0., 0., 64., 32.));
+        let id = img.id;
+        s.add_shapes(vec![img]);
+        apply_number(
+            &mut s,
+            &[id],
+            &NumberKind::Bounds(BoundsField::W),
+            128.,
+            &libs(),
+        );
+        let f = s.find_shape(id).unwrap().frame;
+        assert_eq!((f.w, f.h), (128., 64.));
     }
 
     #[test]

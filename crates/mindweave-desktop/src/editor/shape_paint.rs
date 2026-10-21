@@ -15,7 +15,7 @@ use mindweave_core::{
 use uuid::Uuid;
 
 use super::hex_to_hsla;
-use super::images::ImageCache;
+use super::images::{contrast_plate, hsla_luminance, ImageCache};
 use super::text_paint::{paint_shape_text, TextPaint};
 
 /// Outline colour of a placeholder.
@@ -348,12 +348,29 @@ pub fn paint_shapes(
                 let visible = painter.visible(&shape.style, &entry.outline);
                 if visible {
                     if let Some(data) = shape.image.as_ref().filter(|_| shape.is_image()) {
-                        if let Some(image) = images.get(data, cx) {
-                            let r = screen_rect(&frame_aabb(&shape.frame), vp, 0.);
+                        let r = screen_rect(&frame_aabb(&shape.frame), vp, 0.);
+                        let shown = r.w.max(r.h) * window.scale_factor();
+                        if let Some(image) = images.get(data, shown, cx) {
                             let at = Bounds::new(
                                 bounds.origin + point(px(r.x), px(r.y)),
                                 size_of(r.w, r.h),
                             );
+                            // A picture as dark (or light) as the canvas, with
+                            // no fill of its own, sits on a contrasting plate.
+                            let plate = shape
+                                .style
+                                .fill
+                                .is_none()
+                                .then(|| images.luminance(data, cx))
+                                .flatten()
+                                .and_then(|l| contrast_plate(l, hsla_luminance(auto.fill)));
+                            if let Some(color) = plate {
+                                let radius = (r.w.min(r.h) * 0.12).min(8. * vp.zoom);
+                                window.paint_quad(
+                                    fill(at, color.opacity(shape.style.opacity))
+                                        .corner_radii(px(radius)),
+                                );
+                            }
                             window
                                 .paint_image(bounds, at, Corners::default(), image, 0, false)
                                 .ok();
