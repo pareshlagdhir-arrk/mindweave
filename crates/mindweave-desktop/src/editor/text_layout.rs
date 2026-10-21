@@ -693,6 +693,11 @@ fn installed_fonts(text_system: &TextSystem) -> (Arc<HashSet<String>>, u64) {
     (fonts.families.clone(), fonts.generation)
 }
 
+/// The installed font families (as layouts see them).
+pub(super) fn installed_font_families(cx: &App) -> Arc<HashSet<String>> {
+    installed_fonts(cx.text_system()).0
+}
+
 /// Takes `names` as the installed font families (the font list read them
 /// as it opened), so fonts installed while the app runs are drawn, and no
 /// longer reported missing, from the next frame.
@@ -714,13 +719,6 @@ fn fonts_key(window: &Window) -> u64 {
     window.text_style().font().family.hash(&mut h);
     generation.hash(&mut h);
     h.finish()
-}
-
-/// Adds `name` to `missing` unless it is there.
-fn note_missing(missing: &mut Vec<String>, name: &str) {
-    if !missing.iter().any(|m| m == name) {
-        missing.push(name.to_string());
-    }
 }
 
 /// A hash of everything in `text` that affects its layout and look.
@@ -777,9 +775,6 @@ pub(super) struct CacheEntry {
     pub layout: TextLayout,
     /// Glyph outlines last painted rotated (see `text_paint`).
     pub rotated: Option<RotatedPaths>,
-    /// Font families the text names that are not installed (drawn in the
-    /// default font), each once.
-    missing: Vec<String>,
     used: u64,
 }
 
@@ -800,12 +795,6 @@ impl TextLayoutCache {
     pub fn begin_frame(&mut self, window: &Window) {
         self.frame = self.frame.wrapping_add(1);
         self.fonts = fonts_key(window);
-    }
-
-    /// The font families object `id`'s text names that are not installed,
-    /// as found when it was last laid out (none when it has no layout).
-    pub fn missing_fonts(&self, id: Uuid) -> &[String] {
-        self.entries.get(&id).map_or(&[], |e| &e.missing)
     }
 
     /// Drops the entries not used since [`Self::begin_frame`].
@@ -893,16 +882,12 @@ impl TextLayoutCache {
         zoom: f32,
         color: Hsla,
     ) -> &mut CacheEntry {
-        let mut missing = Vec::new();
-        let layout = TextLayout::layout(window, text, wrap, zoom, color, &mut |name| {
-            note_missing(&mut missing, name)
-        });
+        let layout = TextLayout::layout(window, text, wrap, zoom, color, &mut |_| {});
         let entry = CacheEntry {
             content,
             zoom,
             layout,
             rotated: None,
-            missing,
             used: self.frame,
         };
         self.entries.insert(id, entry);
@@ -1133,9 +1118,8 @@ pub(super) fn align_offset(align: HAlign, available: f32, width: f32) -> f32 {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        align_offset, break_lines, forced_breaks, hard_lines, max_font_size, note_missing,
-        resolve_family, should_greek, size_segments, text_run, visible_end, ContentKey,
-        InstalledFonts, PenIndex,
+        align_offset, break_lines, forced_breaks, hard_lines, max_font_size, resolve_family,
+        should_greek, size_segments, text_run, visible_end, ContentKey, InstalledFonts, PenIndex,
     };
     use gpui_kit::{FontStyle, FontWeight, Hsla, SharedString};
     use mindweave_core::{HAlign, RichText, RunStyle};
@@ -1162,15 +1146,6 @@ mod tests {
         let b = ContentKey::new(&text, None, gpui_kit::black(), 2);
         assert!(a.same_size(&a));
         assert!(!a.same_size(&b), "another default font or font set");
-    }
-
-    #[test]
-    fn missing_families_are_noted_once() {
-        let mut missing = Vec::new();
-        note_missing(&mut missing, "Nope Sans");
-        note_missing(&mut missing, "Gone Serif");
-        note_missing(&mut missing, "Nope Sans");
-        assert_eq!(missing, ["Nope Sans", "Gone Serif"]);
     }
 
     fn black() -> Hsla {

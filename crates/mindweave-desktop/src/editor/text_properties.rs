@@ -33,7 +33,7 @@ use super::color_palette::{palette_popover, ColorPalette, ColorPick, PaletteColo
 use super::properties_panel::{field_row, FIELD_GAP, SWATCH_SIZE};
 use super::shape_properties::{format_number, SECTION_GAP};
 use super::text_edit::{TextEditor, Toggle};
-use super::text_layout::refresh_installed_fonts;
+use super::text_layout::{installed_font_families, refresh_installed_fonts};
 use super::{hex_to_hsla, parse_number, section_label, EditorWindow, GestureOwner, SessionGesture};
 use crate::app_state::AppState;
 use crate::libraries::lucide_icon_path;
@@ -777,6 +777,12 @@ impl EditorWindow {
 
 /// The Text section, when there is text to show: the text being edited,
 /// or the selected text boxes and labelled shapes.
+/// Whether the selection's one font family `font` is not installed (it is
+/// drawn in the default font).
+fn font_missing(font: &Mixed<Option<String>>, installed: &HashSet<String>) -> bool {
+    matches!(font, Mixed::Same(Some(name)) if !installed.contains(name))
+}
+
 pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> Option<AnyElement> {
     let fields = &editor.properties.text;
     let summary = fields.summary.as_ref()?;
@@ -841,13 +847,9 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> O
             }),
         )
     });
-    let missing = match &style.font {
-        Mixed::Same(Some(name)) => summary
-            .targets
-            .iter()
-            .any(|id| editor.text_layouts.missing_fonts(*id).contains(name)),
-        _ => false,
-    };
+    // From the installed fonts, not the layouts: objects off screen have
+    // none.
+    let missing = font_missing(&style.font, &installed_font_families(cx));
 
     Some(
         v_flex()
@@ -1348,9 +1350,9 @@ impl Render for FontPicker {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        apply_to_objects, commit_size, edit_session, filter_fonts, font_rows, merge_summaries,
-        size_display, step_size, summarize_objects, typed_size, wheel_steps, SizeSteps, TextChange,
-        SIZE_PRESETS, WHEEL_STEP_PX,
+        apply_to_objects, commit_size, edit_session, filter_fonts, font_missing, font_rows,
+        merge_summaries, size_display, step_size, summarize_objects, typed_size, wheel_steps,
+        SizeSteps, TextChange, SIZE_PRESETS, WHEEL_STEP_PX,
     };
     use crate::editor::text_edit::Toggle;
     use crate::editor::{GestureOwner, SessionGesture};
@@ -1380,6 +1382,18 @@ mod tests {
             shape.label = Some(l);
         }
         shape
+    }
+
+    #[test]
+    fn a_family_that_is_not_installed_is_marked_missing() {
+        let installed: std::collections::HashSet<String> =
+            ["Georgia", "Menlo"].map(String::from).into();
+        let missing = |font: Mixed<Option<String>>| font_missing(&font, &installed);
+        assert!(!missing(Mixed::Same(Some("Georgia".into()))));
+        assert!(missing(Mixed::Same(Some("Nope Sans".into()))));
+        // The default font, or several families: nothing to mark.
+        assert!(!missing(Mixed::Same(None)));
+        assert!(!missing(Mixed::Mixed));
     }
 
     #[test]
