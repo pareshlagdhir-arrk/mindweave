@@ -16,8 +16,8 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
 use mindweave_core::{
-    from_clipboard, DocumentSession, EditKind, EditSnapshot, HAlign, Label, RichText, RunStyle,
-    Shape, StyleChange, StyleSummary, TextHistory, LINE_BREAK, MAX_CLIPBOARD_BYTES,
+    from_clipboard, DocumentSession, EditKind, EditSnapshot, FormatError, HAlign, Label, RichText,
+    RunStyle, Shape, StyleChange, StyleSummary, TextHistory, LINE_BREAK, MAX_CLIPBOARD_BYTES,
     MAX_PASTE_CHARS,
 };
 use serde_json::{json, Value};
@@ -837,6 +837,27 @@ pub fn finish_text_session(
     session.find_shape(target).is_some()
 }
 
+/// Saves `session` while the text-editing session on `target` goes on:
+/// the edits so far become one undo step, the file is written, and a new
+/// gesture collects the edits that follow (the editor keeps its caret,
+/// selection and typing history). `None`, doing nothing, when the target
+/// is gone or its text is empty: an empty text box or label is cleared
+/// only when its session ends, so the caller ends the session first.
+pub fn save_text_session(
+    session: &mut DocumentSession,
+    gesture: &mut SessionGesture,
+    target: Uuid,
+) -> Option<Result<(), FormatError>> {
+    let shape = session.find_shape(target)?;
+    if shape.label.as_ref().is_none_or(|l| l.text.is_empty()) {
+        return None;
+    }
+    gesture.end(session, GestureOwner::Text);
+    let saved = session.save();
+    gesture.begin(session, GestureOwner::Text);
+    Some(saved)
+}
+
 /// A rectangle `2 * half` big centred on `centre`, turned by `angle`
 /// degrees: where clicks edit the text.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1531,8 +1552,9 @@ mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
         byte_to_utf16, enter_target, finish_text_session, on_line_label, parse_text_payload,
-        pasted, press_hit, start_new_text_box, start_text_session, target_area, text_payload,
-        text_target_at, utf16_to_byte, Lines, Motion, Pasted, TextEditor, TextTarget, Toggle, Unit,
+        pasted, press_hit, save_text_session, start_new_text_box, start_text_session, target_area,
+        text_payload, text_target_at, utf16_to_byte, Lines, Motion, Pasted, TextEditor, TextTarget,
+        Toggle, Unit,
     };
     use crate::editor::interaction::hit_shape;
     use crate::editor::{GestureOwner, SessionGesture};
@@ -2033,6 +2055,72 @@ mod tests {
                 ..Frame::default()
             },
         )
+    }
+
+    #[test]
+    fn saving_while_editing_keeps_the_session_going() {
+        let (_dir, mut s) = session();
+        let mut text_box = Shape::new_text_box((0., 0.));
+        text_box.label.as_mut().unwrap().text = plain("ab");
+        let id = text_box.id;
+        s.add_shapes(vec![text_box]);
+        s.save().unwrap();
+        let mut gesture = SessionGesture::default();
+        assert!(start_text_session(&mut s, &mut gesture, id));
+        let set = |s: &mut DocumentSession, t: &str| {
+            s.update_shapes(&[id], |sh| sh.label.as_mut().unwrap().text = plain(t));
+        };
+        let text = |s: &DocumentSession| {
+            s.find_shape(id)
+                .unwrap()
+                .label
+                .as_ref()
+                .unwrap()
+                .text
+                .plain()
+        };
+        set(&mut s, "abc");
+        assert!(s.is_dirty());
+
+        // Saved: the edits so far are one step, and the session goes on.
+        assert!(matches!(
+            save_text_session(&mut s, &mut gesture, id),
+            Some(Ok(()))
+        ));
+        assert!(!s.is_dirty());
+        assert_eq!(gesture.owner(), Some(GestureOwner::Text));
+        assert!(s.can_undo());
+        // A further edit makes the document dirty again.
+        set(&mut s, "abcd");
+        assert!(s.is_dirty());
+        assert!(finish_text_session(&mut s, &mut gesture, id));
+        assert!(s.undo());
+        assert_eq!(text(&s), "abc");
+        assert!(s.undo());
+        assert_eq!(text(&s), "ab");
+
+        // Nothing typed after the save: ending adds no step, stays clean.
+        let (_dir, mut s) = session();
+        let mut text_box = Shape::new_text_box((0., 0.));
+        text_box.label.as_mut().unwrap().text = plain("ab");
+        let id = text_box.id;
+        s.add_shapes(vec![text_box]);
+        let mut gesture = SessionGesture::default();
+        start_text_session(&mut s, &mut gesture, id);
+        assert!(matches!(
+            save_text_session(&mut s, &mut gesture, id),
+            Some(Ok(()))
+        ));
+        finish_text_session(&mut s, &mut gesture, id);
+        assert!(!s.is_dirty());
+
+        // An empty new text box is not saved: the session must end first.
+        let (_dir, mut s) = session();
+        let mut gesture = SessionGesture::default();
+        let id = start_new_text_box(&mut s, &mut gesture, (0., 0.));
+        assert!(save_text_session(&mut s, &mut gesture, id).is_none());
+        assert_eq!(gesture.owner(), Some(GestureOwner::Text));
+        assert!(s.find_shape(id).is_some());
     }
 
     #[test]

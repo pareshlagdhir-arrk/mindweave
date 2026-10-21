@@ -349,11 +349,21 @@ impl EditorWindow {
             .unwrap_or_else(|| "Untitled".to_string())
     }
 
-    /// Saves the document. On failure shows a notification and returns
-    /// `false`.
+    /// Saves the document. Text being edited stays in editing: its edits
+    /// so far become one undo step (an empty text box or label ends its
+    /// editing first, which clears it). On failure shows a notification and
+    /// returns `false`.
     pub fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.commit_pending_edits(window, cx);
-        let saved = match self.session.save() {
+        self.commit_pending(true, window, cx);
+        let editing = self.text_edit.as_ref().map(|e| e.target);
+        let kept = editing.and_then(|target| {
+            text_edit::save_text_session(&mut self.session, &mut self.session_gesture, target)
+        });
+        let result = kept.unwrap_or_else(|| {
+            self.end_text_edit(window, cx);
+            self.session.save()
+        });
+        let saved = match result {
             Ok(()) => true,
             Err(err) => {
                 window.push_notification(Notification::error(err.to_string()), cx);
@@ -393,14 +403,22 @@ impl EditorWindow {
     /// text editing (its undo step), ends a colour picker's undo
     /// step, then applies edits that otherwise wait for Enter or blur: an
     /// open rename and a Properties number being typed (each its own undo
-    /// step). Undo, Redo, Save, Close, Quit, the edit actions and page and
-    /// layer switches call this first, so keyboard shortcuts and clicks do
+    /// step). Undo, Redo, Save (which keeps text editing open), Close,
+    /// Quit, the edit actions and page and layer switches call this first, so keyboard shortcuts and clicks do
     /// not skip or misplace them.
     pub fn commit_pending_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_pending(false, window, cx);
+    }
+
+    /// [`Self::commit_pending_edits`]; with `keep_text`, text editing is
+    /// left open (Save commits its step itself and goes on editing).
+    fn commit_pending(&mut self, keep_text: bool, window: &mut Window, cx: &mut Context<Self>) {
         // A text size typed while editing belongs to the edited text.
         self.commit_focused_text_size(window, cx);
         self.finish_size_steps(cx);
-        self.end_text_edit(window, cx);
+        if !keep_text {
+            self.end_text_edit(window, cx);
+        }
         self.finish_color_edit(cx);
         if self.rename.is_some() {
             self.finish_rename(true, cx);
