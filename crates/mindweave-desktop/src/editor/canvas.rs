@@ -250,6 +250,7 @@ fn register_input(
                 // The colour drag ends first, so the typed value is a step
                 // of its own.
                 editor.finish_color_edit(cx);
+                editor.finish_size_steps(cx);
                 editor.commit_focused_shape_number(window, cx);
                 editor.commit_focused_text_size(window, cx);
                 editor.focus_handle.focus(window, cx);

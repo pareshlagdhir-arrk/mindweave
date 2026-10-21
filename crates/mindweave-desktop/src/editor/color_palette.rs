@@ -110,12 +110,48 @@ impl Previews {
     }
 }
 
+/// The colour a palette shows as chosen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PaletteColor {
+    /// The objects' colours differ: nothing is marked.
+    Mixed,
+    /// No colour set: Auto is marked.
+    Auto,
+    /// An uppercase `#RRGGBB`.
+    Color(String),
+}
+
+impl PaletteColor {
+    /// From a shared value (`None`: mixed) that is a colour or Auto
+    /// (`None`); text that is not a colour counts as Auto.
+    pub(crate) fn from_mixed(value: Option<Option<String>>) -> Self {
+        match value {
+            None => PaletteColor::Mixed,
+            Some(color) => match color.and_then(|c| normalize_hex_color(&c)) {
+                Some(hex) => PaletteColor::Color(hex),
+                None => PaletteColor::Auto,
+            },
+        }
+    }
+
+    fn is_auto(&self) -> bool {
+        *self == PaletteColor::Auto
+    }
+
+    fn hex(&self) -> Option<&str> {
+        match self {
+            PaletteColor::Color(hex) => Some(hex),
+            _ => None,
+        }
+    }
+}
+
 /// The palette's state; render it with [`palette_popover`].
 pub(crate) struct ColorPalette {
     /// The custom picker: its sliders and hex field.
     picker: Entity<ColorPickerState>,
-    /// The colour shown as chosen: `None` is Auto.
-    current: Option<String>,
+    /// The colour shown as chosen.
+    current: PaletteColor,
     on_pick: OnPick,
     previews: Previews,
     /// The popover showing the palette, while one is.
@@ -158,7 +194,7 @@ impl ColorPalette {
         );
         Self {
             picker,
-            current: None,
+            current: PaletteColor::Auto,
             on_pick: Rc::new(on_pick),
             previews: Previews::default(),
             popover: None,
@@ -166,17 +202,15 @@ impl ColorPalette {
         }
     }
 
-    /// Shows `color` (`None` for Auto) as the chosen one. The custom picker
-    /// takes it up when the palette next opens.
-    pub(crate) fn set_current(&mut self, color: Option<String>, cx: &mut Context<Self>) {
-        let color = color.and_then(|c| normalize_hex_color(&c));
+    /// Shows `color` as the chosen one. The custom picker takes it up when
+    /// the palette next opens.
+    pub(crate) fn set_current(&mut self, color: PaletteColor, cx: &mut Context<Self>) {
         if self.current != color {
             self.current = color;
             cx.notify();
         }
     }
 
-    /// Readies the custom picker as the popover opens.
     /// Whether the palette is showing.
     pub(crate) fn is_open(&self, cx: &App) -> bool {
         self.popover
@@ -185,11 +219,12 @@ impl ColorPalette {
             .is_some_and(|p| p.read(cx).is_open())
     }
 
+    /// Readies the custom picker as the popover opens.
     fn opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.previews.open();
         let start = self
             .current
-            .as_deref()
+            .hex()
             .and_then(hex_to_hsla)
             .unwrap_or_else(|| hsla(0., 0., 0., 1.));
         self.picker.update(cx, |picker, cx| {
@@ -206,8 +241,8 @@ impl ColorPalette {
             .update(cx, |picker, cx| picker.set_open(false, cx));
         self.popover = None;
         let (previewing, previewed) = self.previews.close();
-        if previewed.is_some() {
-            self.current = previewed.clone();
+        if let Some(hex) = &previewed {
+            self.current = PaletteColor::Color(hex.clone());
         }
         (previewing, previewed)
     }
@@ -259,7 +294,7 @@ fn choose(
     cx: &mut App,
 ) {
     let Ok((on_pick, popover)) = palette.update(cx, |palette, cx| {
-        palette.current = color.clone();
+        palette.current = PaletteColor::from_mixed(Some(color.clone()));
         // A choice after a drag replaces the drag's colour.
         palette.previews.chose();
         cx.notify();
@@ -297,8 +332,10 @@ fn remember(hex: &str, cx: &mut App) {
 }
 
 /// Whether the swatch for `swatch` shows as the chosen colour `current`.
-fn is_current(current: Option<&str>, swatch: &str) -> bool {
-    current.is_some_and(|c| c.eq_ignore_ascii_case(swatch))
+fn is_current(current: &PaletteColor, swatch: &str) -> bool {
+    current
+        .hex()
+        .is_some_and(|c| c.eq_ignore_ascii_case(swatch))
 }
 
 /// The recent colours the palette can show: valid ones, uppercase, in
@@ -327,7 +364,7 @@ impl Render for ColorPalette {
             Vec::new()
         };
         let swatch = |id: ElementId, hex: &str, cx: &App| {
-            swatch(id, hex, is_current(current.as_deref(), hex), &palette, cx)
+            swatch(id, hex, is_current(&current, hex), &palette, cx)
         };
         let presets = PRESET_COLORS
             .iter()
@@ -350,7 +387,7 @@ impl Render for ColorPalette {
             .w(px(WIDTH))
             .gap(px(8.))
             .text_size(px(SMALL_TEXT_SIZE))
-            .child(auto_button(current.is_none(), &palette, cx))
+            .child(auto_button(current.is_auto(), &palette, cx))
             .child(grid().children(presets))
             .when(!recents.is_empty(), |this| {
                 this.child(
@@ -500,7 +537,7 @@ fn custom_picker(
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
-    use super::{is_current, recent_swatches, Previews, PRESET_COLORS};
+    use super::{is_current, recent_swatches, PaletteColor, Previews, PRESET_COLORS};
     use mindweave_core::color::normalize_hex_color;
 
     #[test]
@@ -520,9 +557,26 @@ mod tests {
 
     #[test]
     fn current_swatch_matches_ignoring_case() {
-        assert!(is_current(Some("#dc2626"), "#DC2626"));
-        assert!(!is_current(Some("#DC2626"), "#000000"));
-        assert!(!is_current(None, "#000000"));
+        let red = PaletteColor::Color("#dc2626".into());
+        assert!(is_current(&red, "#DC2626"));
+        assert!(!is_current(&red, "#000000"));
+        assert!(!is_current(&PaletteColor::Auto, "#000000"));
+        assert!(!red.is_auto());
+    }
+
+    #[test]
+    fn mixed_colours_highlight_nothing() {
+        assert!(PaletteColor::Auto.is_auto());
+        assert!(!PaletteColor::Mixed.is_auto());
+        for hex in PRESET_COLORS {
+            assert!(!is_current(&PaletteColor::Mixed, hex));
+        }
+        assert_eq!(PaletteColor::from_mixed(None), PaletteColor::Mixed);
+        assert_eq!(PaletteColor::from_mixed(Some(None)), PaletteColor::Auto);
+        assert_eq!(
+            PaletteColor::from_mixed(Some(Some("#abcdef".into()))),
+            PaletteColor::Color("#ABCDEF".into())
+        );
     }
 
     #[test]

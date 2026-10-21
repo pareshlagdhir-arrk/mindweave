@@ -356,6 +356,7 @@ impl EditorWindow {
     /// [`Self::finish_color_edit`]). A change from a closed picker is a
     /// step of its own.
     pub(super) fn begin_color_edit(&mut self, open: bool) {
+        self.end_size_steps();
         begin_color_step(
             &mut self.session_gesture,
             &mut self.session,

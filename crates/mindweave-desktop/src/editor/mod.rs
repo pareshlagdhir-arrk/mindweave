@@ -129,6 +129,9 @@ pub(crate) enum GestureOwner {
     Color,
     /// A text-editing session.
     Text,
+    /// Text size steps from the Properties panel's wheel and arrows, while
+    /// not editing: consecutive steps are one undo step.
+    Size,
 }
 
 /// Who holds the session's gesture: only the part of the editor that
@@ -387,6 +390,7 @@ impl EditorWindow {
     pub fn commit_pending_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A text size typed while editing belongs to the edited text.
         self.commit_focused_text_size(window, cx);
+        self.finish_size_steps(cx);
         self.end_text_edit(window, cx);
         self.finish_color_edit(cx);
         if self.rename.is_some() {

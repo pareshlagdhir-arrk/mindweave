@@ -11,6 +11,7 @@
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
@@ -28,12 +29,12 @@ use mindweave_core::{
 };
 use uuid::Uuid;
 
-use super::color_palette::{palette_popover, ColorPalette, ColorPick};
+use super::color_palette::{palette_popover, ColorPalette, ColorPick, PaletteColor};
 use super::properties_panel::{field_row, FIELD_GAP, SWATCH_SIZE};
 use super::shape_properties::{format_number, SECTION_GAP};
 use super::text_edit::{TextEditor, Toggle};
 use super::text_layout::refresh_installed_fonts;
-use super::{hex_to_hsla, parse_number, section_label, EditorWindow};
+use super::{hex_to_hsla, parse_number, section_label, EditorWindow, GestureOwner};
 use crate::app_state::AppState;
 use crate::libraries::lucide_icon_path;
 
@@ -52,6 +53,9 @@ const FONT_ROW_HEIGHT: f32 = 26.;
 const FONT_ROW_TEXT_SIZE: f32 = 13.;
 /// The font list shows this many rows before it scrolls.
 const FONT_LIST_ROWS: usize = 12;
+/// Size steps this close together are one undo step (see
+/// [`GestureOwner::Size`]).
+const SIZE_STEPS_IDLE: Duration = Duration::from_millis(500);
 /// What the font control calls the app's default font (`None`).
 const DEFAULT_FONT: &str = "Default";
 
@@ -185,6 +189,16 @@ pub(super) fn step_size(base: f32, steps: i32) -> f32 {
     (base + steps as f32).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
 }
 
+/// What the size field shows for a text's `size` (`None`: no text): the
+/// size, or empty with the placeholder "Mixed" (or none).
+pub(super) fn size_display(size: Option<&Mixed<f32>>) -> (Option<f32>, &'static str) {
+    match size {
+        Some(Mixed::Same(size)) => (Some(*size), ""),
+        Some(Mixed::Mixed) => (None, "Mixed"),
+        None => (None, ""),
+    }
+}
+
 /// The size to apply from size field text `text` when it showed `shown`
 /// (`None`: "Mixed"): a number, clamped to the allowed sizes, unless it is
 /// what was shown.
@@ -196,10 +210,12 @@ pub(super) fn typed_size(text: &str, shown: Option<f32>) -> Option<f32> {
 
 /// The font list: the `recent` families still `installed` first, newest
 /// first, then the other installed families sorted ignoring case, each
-/// once. Also returns how many recent ones lead.
+/// once. Hidden system families (names starting with ".") are left out.
+/// Also returns how many recent ones lead.
 pub(super) fn font_rows(installed: Vec<String>, recent: &[String]) -> (Vec<SharedString>, usize) {
     let mut all = installed;
-    all.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then(a.cmp(b)));
+    all.retain(|name| !name.starts_with('.'));
+    all.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
     all.dedup();
     let available: HashSet<&str> = all.iter().map(String::as_str).collect();
     let mut leading: Vec<&str> = Vec::new();
@@ -323,6 +339,12 @@ pub(super) struct TextFields {
     palette: Entity<ColorPalette>,
     /// The palette has previewed a colour drag since it opened.
     previewing: bool,
+    /// The section holds the session's gesture for size steps.
+    size_steps: bool,
+    /// Counts size steps, so only the last one's idle timer ends them.
+    size_step_count: u64,
+    /// The size field had focus at the last sync, so it was not updated.
+    size_left_alone: bool,
     fonts: Entity<FontPicker>,
     pub(super) summary: Option<TextSummary>,
     synced: Option<SyncKey>,
@@ -378,6 +400,9 @@ impl TextFields {
             wheel_carry: 0.,
             palette,
             previewing: false,
+            size_steps: false,
+            size_step_count: 0,
+            size_left_alone: false,
             fonts,
             summary: None,
             synced: None,
@@ -422,25 +447,32 @@ impl EditorWindow {
             &self.selection,
             self.text_edit.as_ref(),
         );
-        if self.properties.text.synced == Some(key) {
+        let fields = &mut self.properties.text;
+        let typing = fields.size.read(cx).focus_handle(cx).is_focused(window);
+        if fields.synced == Some(key) {
+            // Only the size field may be behind: it was left alone while
+            // being typed in.
+            if fields.size_left_alone && !typing {
+                let (size, placeholder) =
+                    size_display(fields.summary.as_ref().map(|s| &s.style.size));
+                fields.show_size(size, placeholder, window, cx);
+                fields.size_left_alone = false;
+            }
             return;
         }
         let summary = self.text_summary();
         let fields = &mut self.properties.text;
-        let typing = fields.size.read(cx).focus_handle(cx).is_focused(window);
         if !typing {
-            let (size, placeholder) = match summary.as_ref().map(|s| &s.style.size) {
-                Some(Mixed::Same(size)) => (Some(*size), ""),
-                Some(Mixed::Mixed) => (None, "Mixed"),
-                None => (None, ""),
-            };
+            let (size, placeholder) = size_display(summary.as_ref().map(|s| &s.style.size));
             fields.show_size(size, placeholder, window, cx);
         }
+        fields.size_left_alone = typing;
         let style = summary.as_ref().map(|s| &s.style);
-        let color = match style.map(|s| &s.color) {
-            Some(Mixed::Same(color)) => color.clone(),
-            _ => None,
-        };
+        let color = PaletteColor::from_mixed(match style.map(|s| &s.color) {
+            Some(Mixed::Same(color)) => Some(color.clone()),
+            Some(Mixed::Mixed) => None,
+            None => Some(None),
+        });
         fields
             .palette
             .update(cx, |palette, cx| palette.set_current(color, cx));
@@ -452,7 +484,7 @@ impl EditorWindow {
             .fonts
             .update(cx, |fonts, cx| fonts.set_current(font, cx));
         fields.summary = summary;
-        fields.synced = (!typing).then_some(key);
+        fields.synced = Some(key);
     }
 
     /// Applies a change from the Text section: while editing, to the
@@ -504,7 +536,8 @@ impl EditorWindow {
     }
 
     /// Applies the size typed in the size field, if any; the field then
-    /// shows the text's size again.
+    /// shows the text's size (the clamped size applied, or for text that is
+    /// not a number the size it had), even while it keeps focus.
     fn commit_text_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let fields = &self.properties.text;
         let typed = fields.size_typed;
@@ -521,6 +554,11 @@ impl EditorWindow {
                 );
             }
         }
+        let summary = self.text_summary();
+        let (size, placeholder) = size_display(summary.as_ref().map(|s| &s.style.size));
+        self.properties
+            .text
+            .show_size(size, placeholder, window, cx);
         self.properties.text.synced = None;
         cx.notify();
     }
@@ -548,6 +586,7 @@ impl EditorWindow {
             return;
         };
         let size = step_size(base, steps);
+        self.begin_size_steps(window, cx);
         self.apply_text_change(
             TextChange::Style(StyleChange::Size(size)),
             false,
@@ -559,6 +598,52 @@ impl EditorWindow {
         // Steps arriving before the next sync go on from this size.
         if let Some(summary) = fields.summary.as_mut() {
             summary.base_size = size;
+        }
+    }
+
+    /// Opens (or keeps open) the undo step that groups size steps made
+    /// while not editing; it ends [`SIZE_STEPS_IDLE`] after the last step,
+    /// when the pointer leaves the size control, or before any other edit.
+    fn begin_size_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.text_edit.is_some() {
+            return;
+        }
+        let fields = &mut self.properties.text;
+        if !fields.size_steps {
+            fields.size_steps = self
+                .session_gesture
+                .begin(&mut self.session, GestureOwner::Size);
+        }
+        if !self.properties.text.size_steps {
+            return;
+        }
+        self.properties.text.size_step_count += 1;
+        let count = self.properties.text.size_step_count;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(SIZE_STEPS_IDLE).await;
+            this.update(cx, |this, cx| {
+                if this.properties.text.size_step_count == count {
+                    this.finish_size_steps(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Ends the undo step of size steps, if one is open, without
+    /// notifying (see [`Self::finish_size_steps`]).
+    pub(super) fn end_size_steps(&mut self) -> bool {
+        std::mem::take(&mut self.properties.text.size_steps)
+            && self
+                .session_gesture
+                .end(&mut self.session, GestureOwner::Size)
+    }
+
+    /// Ends the undo step of size steps, if one is open.
+    pub(super) fn finish_size_steps(&mut self, cx: &mut Context<Self>) {
+        if self.end_size_steps() {
+            self.update_session(|_| {}, cx);
         }
     }
 
@@ -799,6 +884,12 @@ fn size_control(fields: &TextFields, cx: &mut Context<EditorWindow>) -> impl Int
             div()
                 .id("text-size")
                 .w(px(SIZE_INPUT_WIDTH))
+                // Leaving the field ends a run of wheel steps.
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if !*hovered {
+                        this.finish_size_steps(cx);
+                    }
+                }))
                 .on_scroll_wheel(cx.listener(EditorWindow::on_size_wheel))
                 // Arrow keys in the field step too.
                 .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
@@ -1190,10 +1281,11 @@ impl Render for FontPicker {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        apply_to_objects, filter_fonts, font_rows, merge_summaries, step_size, summarize_objects,
-        typed_size, wheel_steps, TextChange, SIZE_PRESETS, WHEEL_STEP_PX,
+        apply_to_objects, filter_fonts, font_rows, merge_summaries, size_display, step_size,
+        summarize_objects, typed_size, wheel_steps, TextChange, SIZE_PRESETS, WHEEL_STEP_PX,
     };
     use crate::editor::text_edit::Toggle;
+    use crate::editor::{GestureOwner, SessionGesture};
     use gpui_kit::SharedString;
     use mindweave_core::geometry::Frame;
     use mindweave_core::{
@@ -1379,15 +1471,58 @@ mod tests {
     }
 
     #[test]
+    fn the_size_field_shows_what_was_applied_after_a_commit() {
+        // "5000" applies 1000, and the field then shows 1000 (it keeps focus
+        // after Enter, so the per-frame sync would not correct it).
+        let applied = typed_size("5000", Some(16.)).unwrap();
+        assert_eq!(size_display(Some(&Mixed::Same(applied))), (Some(1000.), ""));
+        // "abc" applies nothing: the field goes back to the text's size.
+        assert_eq!(typed_size("abc", Some(16.)), None);
+        assert_eq!(size_display(Some(&Mixed::Same(16.))), (Some(16.), ""));
+        assert_eq!(size_display(Some(&Mixed::Mixed)), (None, "Mixed"));
+        assert_eq!(size_display(None), (None, ""));
+    }
+
+    #[test]
+    fn consecutive_size_steps_are_one_undo_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("w.mindweave")).unwrap();
+        let boxed = text_box("ab", RunStyle::default());
+        let ids = [boxed.id];
+        s.add_shapes(vec![boxed.clone()]);
+        let size = |s: &DocumentSession| {
+            s.find_shape(boxed.id)
+                .unwrap()
+                .label
+                .as_ref()
+                .unwrap()
+                .text
+                .style_at(1)
+                .size
+        };
+        let mut g = SessionGesture::default();
+        assert!(g.begin(&mut s, GestureOwner::Size));
+        for v in [17., 18., 19.] {
+            apply_to_objects(&mut s, &ids, &TextChange::Style(StyleChange::Size(v)));
+        }
+        assert!(g.end(&mut s, GestureOwner::Size));
+        assert_eq!(size(&s), 19.);
+        assert!(s.undo());
+        assert_eq!(size(&s), 16.);
+    }
+
+    #[test]
     fn size_presets() {
         assert_eq!(SIZE_PRESETS, [8., 10., 12., 14., 18., 24., 32., 48., 72.]);
     }
 
     #[test]
     fn font_rows_put_recent_installed_fonts_first() {
-        let installed = ["Menlo", "Arial", "georgia", "Arial", "Zapfino", "Avenir"]
-            .map(String::from)
-            .to_vec();
+        let installed = [
+            "Menlo", "Arial", "georgia", "Arial", "Zapfino", "Avenir", ".SF NS",
+        ]
+        .map(String::from)
+        .to_vec();
         let recent = ["Zapfino", "Gone Font", "Arial"].map(String::from);
         let (rows, recent_count) = font_rows(installed.clone(), &recent);
         // Recent (still installed) first, then the rest sorted ignoring

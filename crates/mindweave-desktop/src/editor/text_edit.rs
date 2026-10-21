@@ -906,6 +906,7 @@ impl EditorWindow {
         self.end_text_edit(window, cx);
         self.cancel_gesture(cx);
         self.finish_color_edit(cx);
+        self.finish_size_steps(cx);
     }
 
     /// Starts editing the label (or text) of shape `target` on the active

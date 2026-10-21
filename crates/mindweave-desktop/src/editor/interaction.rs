@@ -734,6 +734,7 @@ impl EditorWindow {
 
     /// Moves the selection by `(dx, dy)` canvas units as one undo step.
     pub(super) fn nudge(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) {
+        self.finish_size_steps(cx);
         if self.gesture != Gesture::Idle || self.selection.is_empty() {
             return;
         }
