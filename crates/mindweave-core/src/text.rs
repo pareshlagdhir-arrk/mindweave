@@ -264,7 +264,8 @@ impl RichText {
         self.len() == 0
     }
 
-    /// Inserts `text` in `style` at `at`; returns the caret after it.
+    /// Inserts `text` in `style` at `at`; returns the caret after it (on a
+    /// grapheme boundary, even if the text joins a following combining mark).
     /// `'\n'` (and `"\r\n"`, `'\r'`) starts a new paragraph with the same
     /// alignment.
     pub fn insert(&mut self, at: usize, text: &str, style: &RunStyle) -> usize {
@@ -273,6 +274,7 @@ impl RichText {
             return at;
         }
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let before = self.len();
         let (pi, off) = self.locate(at);
         let para = &mut self.paragraphs[pi];
         let align = para.align;
@@ -293,7 +295,7 @@ impl RichText {
         }
         self.paragraphs[last].runs.extend(tail);
         self.normalize();
-        at + text.len()
+        self.ceil_boundary(at + self.len() - before)
     }
 
     /// Removes `range`, joining the paragraphs at its ends.
@@ -335,10 +337,12 @@ impl RichText {
         out
     }
 
-    /// Inserts `other` at `at`; returns the caret after it. The paragraph
-    /// at `at` keeps its alignment; `other`'s later paragraphs keep theirs.
+    /// Inserts `other` (normalised) at `at`; returns the caret after it, on a
+    /// grapheme boundary. The paragraph at `at` keeps its alignment;
+    /// `other`'s later paragraphs keep theirs.
     pub fn insert_rich(&mut self, at: usize, other: &RichText) -> usize {
         let at = self.floor_boundary(at);
+        let before = self.len();
         let (pi, off) = self.locate(at);
         let (head, tail) = split_runs(std::mem::take(&mut self.paragraphs[pi].runs), off);
         let mut incoming = other.paragraphs.iter();
@@ -352,7 +356,7 @@ impl RichText {
         }
         self.paragraphs[last].runs.extend(tail);
         self.normalize();
-        at + other.len()
+        self.ceil_boundary(at + self.len() - before)
     }
 
     /// Sets one property on `range`. A caret in an empty paragraph, or a
@@ -580,16 +584,20 @@ impl RichText {
     }
 
     /// Indices of the paragraphs `range` touches: a caret touches its own;
-    /// a selection touches those it overlaps, including empty ones inside it,
-    /// or (when it holds only a paragraph break) the paragraph it starts in.
+    /// a selection touches those it overlaps, including empty ones inside it
+    /// or at either end, or (when it holds only a paragraph break between
+    /// non-empty paragraphs) the paragraph it starts in.
     fn touched_paragraphs(&self, range: &Range<usize>) -> Vec<usize> {
         let touched: Vec<usize> = self
             .spans()
             .enumerate()
             .filter(|(_, (start, p))| {
                 let end = start + p.len();
-                *start < range.end
-                    && (end > range.start || (*start == end && *start >= range.start))
+                if *start == end {
+                    (range.start..=range.end).contains(start)
+                } else {
+                    *start < range.end && end > range.start
+                }
             })
             .map(|(pi, _)| pi)
             .collect();
@@ -1007,6 +1015,49 @@ mod tests {
             t.summary(0..t.len()).font,
             Mixed::Same(Some("Georgia".into()))
         );
+    }
+
+    #[test]
+    fn select_all_reaches_trailing_empty_paragraph() {
+        let mut t = text("a\n");
+        assert_eq!(t.paragraphs.len(), 2);
+        let all = 0..t.len();
+        t.set_align(all.clone(), HAlign::Center);
+        assert_eq!(t.paragraphs[1].align, HAlign::Center);
+        t.apply(all.clone(), &StyleChange::Bold(true));
+        assert!(t.style_at(t.len()).bold);
+        assert_eq!(t.summary(all.clone()).align, Mixed::Same(HAlign::Center));
+        t.paragraphs[1].style.italic = true;
+        assert_eq!(t.summary(all).italic, Mixed::Mixed);
+    }
+
+    #[test]
+    fn insert_rich_caret_counts_normalised_text() {
+        let other = RichText {
+            paragraphs: vec![Paragraph {
+                runs: vec![Run {
+                    text: "x\ny".into(),
+                    style: plain_style(),
+                }],
+                align: HAlign::Left,
+                style: plain_style(),
+            }],
+        };
+        let mut t = text("ab");
+        let caret = t.insert_rich(1, &other);
+        assert_eq!(t.plain(), "ax\u{2028}yb");
+        assert_eq!(caret, t.len() - 1);
+    }
+
+    #[test]
+    fn insert_caret_never_lands_inside_a_cluster() {
+        let mut t = text("\u{301}");
+        let caret = t.insert(0, "e", &plain_style());
+        assert_eq!(t.plain(), "e\u{301}");
+        assert_eq!(caret, t.len());
+        let mut t = text("\u{301}");
+        let caret = t.insert_rich(0, &text("e"));
+        assert_eq!(caret, t.len());
     }
 
     #[test]
