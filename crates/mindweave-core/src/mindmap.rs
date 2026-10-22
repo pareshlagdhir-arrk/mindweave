@@ -202,6 +202,10 @@ pub struct TopicParts {
     pub text: Rect,
     pub picture: Option<Rect>,
     pub badge: Option<Rect>,
+    /// The note badge, left of the link badge.
+    pub note: Option<Rect>,
+    /// The equation, below the text.
+    pub equation: Option<Rect>,
 }
 
 impl TopicProps {
@@ -222,9 +226,43 @@ impl TopicProps {
         })
     }
 
+    /// The measured size of the equation, if there is one to show (an
+    /// unmeasured `(0, 0)` equation shows nothing yet).
+    fn equation_shown(&self) -> Option<(f32, f32)> {
+        self.equation
+            .as_ref()
+            .map(|e| e.size)
+            .filter(|&(w, h)| w > 0.0 && h > 0.0)
+    }
+
+    /// How many badges (link, note) sit right of the text.
+    fn badge_count(&self) -> usize {
+        usize::from(self.link.is_some()) + usize::from(self.note.is_some())
+    }
+
+    /// Width reserved right of the text for `n` badges, beyond the text's
+    /// own horizontal padding.
+    fn badges_reserve(&self, n: usize) -> f32 {
+        if n == 0 {
+            return 0.0;
+        }
+        let n = n as f32;
+        (n * TOPIC_BADGE + (n - 1.0) * TOPIC_GAP + TOPIC_GAP + TOPIC_PADDING
+            - self.text_padding().0)
+            .max(0.0)
+    }
+
+    /// Height the equation adds below the text row.
+    fn equation_extra(&self) -> f32 {
+        self.equation_shown().map_or(0.0, |(_, eh)| {
+            eh + TOPIC_GAP + TOPIC_PADDING - self.text_padding().1
+        })
+    }
+
     /// Where a topic `w × h` with these properties shows its picture (at
-    /// the top, centred), its text below (or alone) and its link badge
-    /// (right of the text).
+    /// the top, centred), its text below (or alone), its link and note
+    /// badges (right of the text, link rightmost) and its equation (below
+    /// the text, centred).
     pub fn parts(&self, w: f32, h: f32) -> TopicParts {
         let p = TOPIC_PADDING;
         let picture = self.picture_shown().map(|(pw, ph)| Rect {
@@ -234,42 +272,55 @@ impl TopicProps {
             h: ph,
         });
         let top = picture.map_or(0.0, |r| r.y + r.h + TOPIC_GAP - self.text_padding().1);
+        let top = top.max(0.0);
         let row = Rect {
             x: 0.0,
-            y: top.max(0.0),
+            y: top,
             w,
-            h: (h - top.max(0.0)).max(0.0),
+            h: (h - top - self.equation_extra()).max(0.0),
         };
-        let badge = self.link.as_ref().map(|_| Rect {
-            x: w - p - TOPIC_BADGE,
+        let equation = self.equation_shown().map(|(ew, eh)| Rect {
+            x: (w - ew) / 2.0,
+            y: row.y + row.h - self.text_padding().1 + TOPIC_GAP,
+            w: ew,
+            h: eh,
+        });
+        let badge_at = |x: f32| Rect {
+            x,
             y: row.y + (row.h - TOPIC_BADGE) / 2.0,
             w: TOPIC_BADGE,
             h: TOPIC_BADGE,
+        };
+        let last = w - p - TOPIC_BADGE;
+        let badge = self.link.as_ref().map(|_| badge_at(last));
+        let note = self.note.as_ref().map(|_| {
+            badge_at(if badge.is_some() {
+                last - TOPIC_BADGE - TOPIC_GAP
+            } else {
+                last
+            })
         });
-        let right = badge.map_or(0.0, |_| TOPIC_BADGE + TOPIC_GAP + p - self.text_padding().0);
+        let right = self.badges_reserve(self.badge_count());
         TopicParts {
             text: Rect {
                 x: 0.0,
                 y: row.y,
-                w: (w - right.max(0.0)).max(1.0),
+                w: (w - right).max(1.0),
                 h: row.h,
             },
             picture,
             badge,
+            note,
+            equation,
         }
     }
 
     /// The size of a topic whose text lays out `tw × th` (empty text:
     /// one line), with [`TOPIC_TEXT_PADDING`] round the text and room for
-    /// its picture and badge.
+    /// its picture, badges and equation.
     pub fn size_for_text(&self, (tw, th): (f32, f32)) -> (f32, f32) {
         let (px, py) = self.text_padding();
-        let badge = if self.link.is_some() {
-            TOPIC_BADGE + TOPIC_GAP + TOPIC_PADDING - px
-        } else {
-            0.0
-        };
-        let row_w = tw + 2.0 * px + badge.max(0.0);
+        let row_w = tw + 2.0 * px + self.badges_reserve(self.badge_count());
         let row_h = th + 2.0 * py;
         let (pw, ph) = self.picture_shown().unwrap_or((0.0, 0.0));
         let picture_h = if self.picture.is_some() {
@@ -277,9 +328,14 @@ impl TopicProps {
         } else {
             0.0
         };
+        let (ew, _) = self.equation_shown().unwrap_or((0.0, 0.0));
         (
-            row_w.max(pw + 2.0 * TOPIC_PADDING).max(60.0).ceil(),
-            (row_h + picture_h).max(30.0).ceil(),
+            row_w
+                .max(ew + 2.0 * TOPIC_PADDING)
+                .max(pw + 2.0 * TOPIC_PADDING)
+                .max(60.0)
+                .ceil(),
+            (row_h + picture_h + self.equation_extra()).max(30.0).ceil(),
         )
     }
 }
@@ -1330,6 +1386,64 @@ mod tests {
         assert!(parts.text.y > p.y + p.h - CENTRAL_TEXT_PADDING.1);
         assert_eq!(clamp_topic_picture((2000.0, 1000.0)), (800.0, 400.0));
         assert_eq!(clamp_topic_picture((4.0, 2.0)), (12.0, 6.0));
+    }
+
+    #[test]
+    fn note_badge_sits_left_of_the_link_badge() {
+        let c = Uuid::new_v4();
+        let mut t = TopicProps::child(c, c, 0.0);
+        t.link = Some("https://example.com".into());
+        t.note = Some(RichText::new(
+            crate::text::RunStyle::default(),
+            crate::text::HAlign::Left,
+        ));
+        let (w, h) = t.size_for_text((100.0, 20.0));
+        assert_eq!(w, 158.0);
+        let parts = t.parts(w, h);
+        let link = parts.badge.unwrap();
+        assert_eq!(parts.note.unwrap().x, link.x - TOPIC_BADGE - TOPIC_GAP);
+        t.link = None;
+        let (w, h) = t.size_for_text((100.0, 20.0));
+        let parts = t.parts(w, h);
+        assert!(parts.badge.is_none());
+        assert_eq!(parts.note.unwrap().x, w - TOPIC_PADDING - TOPIC_BADGE);
+    }
+
+    #[test]
+    fn equation_sits_below_the_text_and_widens_the_topic() {
+        let c = Uuid::new_v4();
+        let mut t = TopicProps::child(c, c, 0.0);
+        t.equation = Some(Equation {
+            latex: "x".into(),
+            size: (200.0, 40.0),
+        });
+        let (w, h) = t.size_for_text((100.0, 20.0));
+        assert_eq!((w, h), (212.0, 38.0 + 40.0 + 4.0 + 6.0 - 9.0));
+        assert_eq!(
+            t.parts(w, h).equation,
+            Some(Rect {
+                x: 6.0,
+                y: 38.0 - 9.0 + 4.0,
+                w: 200.0,
+                h: 40.0
+            })
+        );
+    }
+
+    #[test]
+    fn unmeasured_equation_adds_nothing() {
+        let c = Uuid::new_v4();
+        let plain = TopicProps::child(c, c, 0.0);
+        let mut t = plain.clone();
+        t.equation = Some(Equation {
+            latex: "x".into(),
+            size: (0.0, 0.0),
+        });
+        assert_eq!(
+            t.size_for_text((100.0, 20.0)),
+            plain.size_for_text((100.0, 20.0))
+        );
+        assert!(t.parts(132.0, 38.0).equation.is_none());
     }
 
     #[test]
