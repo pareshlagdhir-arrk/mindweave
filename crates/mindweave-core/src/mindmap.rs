@@ -252,11 +252,10 @@ impl TopicProps {
             .max(0.0)
     }
 
-    /// Height the equation adds below the text row.
+    /// Height the equation adds below the text row: the gap above it and
+    /// its own height, with the text's padding below it (as the row has).
     fn equation_extra(&self) -> f32 {
-        self.equation_shown().map_or(0.0, |(_, eh)| {
-            eh + TOPIC_GAP + TOPIC_PADDING - self.text_padding().1
-        })
+        self.equation_shown().map_or(0.0, |(_, eh)| eh + TOPIC_GAP)
     }
 
     /// Where a topic `w × h` with these properties shows its picture (at
@@ -331,7 +330,7 @@ impl TopicProps {
         let (ew, _) = self.equation_shown().unwrap_or((0.0, 0.0));
         (
             row_w
-                .max(ew + 2.0 * TOPIC_PADDING)
+                .max(ew + 2.0 * px)
                 .max(pw + 2.0 * TOPIC_PADDING)
                 .max(60.0)
                 .ceil(),
@@ -1418,11 +1417,12 @@ mod tests {
             size: (200.0, 40.0),
         });
         let (w, h) = t.size_for_text((100.0, 20.0));
-        assert_eq!((w, h), (212.0, 38.0 + 40.0 + 4.0 + 6.0 - 9.0));
+        // The text's own padding (16 across, 9 down) round the equation.
+        assert_eq!((w, h), (232.0, 38.0 + 40.0 + 4.0 + 9.0 - 9.0));
         assert_eq!(
             t.parts(w, h).equation,
             Some(Rect {
-                x: 6.0,
+                x: 16.0,
                 y: 38.0 - 9.0 + 4.0,
                 w: 200.0,
                 h: 40.0
