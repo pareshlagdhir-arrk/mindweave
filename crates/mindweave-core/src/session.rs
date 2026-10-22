@@ -137,12 +137,9 @@ fn corner_offset(f: &Frame) -> (f32, f32) {
     )
 }
 
-/// Whether two text-box frames place the box at the same spot: the same
-/// `x`/`y` unrotated; rotated, the same top-left corner (which layout
-/// keeps fixed) up to float rounding.
 /// Topic (or boundary) equality ignoring what the layout derives: every
-/// topic's size and equation size, a placed topic's position, a boundary's frame. A central
-/// topic's centre is content.
+/// topic's size and equation size, a placed topic's position, a
+/// boundary's frame. A central topic's centre is content.
 fn topic_content_eq(a: &Shape, b: &Shape) -> bool {
     let central = a
         .topic
@@ -169,6 +166,9 @@ fn topic_content_eq(a: &Shape, b: &Shape) -> bool {
     a == b
 }
 
+/// Whether two text-box frames place the box at the same spot: the same
+/// `x`/`y` unrotated; rotated, the same top-left corner (which layout
+/// keeps fixed) up to float rounding.
 fn same_text_box_position(a: &Frame, b: &Frame) -> bool {
     if a.rotation != b.rotation {
         return false;

@@ -364,15 +364,21 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
                     |this, window, cx| this.toggle_boundary(window, cx),
                 ),
             ];
-            let mut actions = |commands: &[(&'static str, &str, &'static str, Run)]| {
+            let mut actions = |commands: &[(&'static str, &str, &'static str, Run)], enabled| {
                 commands
                     .iter()
                     .map(|&(id, icon, tip, run)| {
-                        action_button(id, icon, tip, run, cx).into_any_element()
+                        action_button(id, icon, tip, enabled, run, cx).into_any_element()
                     })
                     .collect::<Vec<_>>()
             };
-            let (topics, content, marks) = (actions(&topics), actions(&content), actions(&marks));
+            // Note and Equation work on exactly one topic.
+            let one_topic = editor.selected_topic().is_some();
+            let (topics, content, marks) = (
+                actions(&topics, true),
+                actions(&content, one_topic),
+                actions(&marks, true),
+            );
             let relationship = ToolButton {
                 id: "tool-relationship".into(),
                 tool: Tool::Relationship,
@@ -510,8 +516,24 @@ fn ribbon_button(
     selected: bool,
     cx: &App,
 ) -> Stateful<Div> {
+    ribbon_button_with(id, icon, selected, true, cx)
+}
+
+/// [`ribbon_button`]; not `enabled`, it is drawn muted, without a hover.
+fn ribbon_button_with(
+    id: impl Into<ElementId>,
+    icon: ButtonIcon,
+    selected: bool,
+    enabled: bool,
+    cx: &App,
+) -> Stateful<Div> {
     let theme = cx.theme();
     let hover_bg = theme.list_hover;
+    let color = if enabled {
+        theme.foreground
+    } else {
+        theme.muted_foreground
+    };
     div()
         .id(id)
         .relative()
@@ -526,27 +548,36 @@ fn ribbon_button(
             b.bg(theme.list_active)
                 .border_color(theme.list_active_border)
         })
-        .when(!selected, |b| {
-            b.border_color(transparent_black())
-                .hover(move |style| style.bg(hover_bg))
+        .when(!selected, |b| b.border_color(transparent_black()))
+        .when(!selected && enabled, |b| {
+            b.hover(move |style| style.bg(hover_bg))
         })
-        .child(button_icon(icon, theme.foreground))
+        .child(button_icon(icon, color))
 }
 
-/// A ribbon button that runs `run` (an action, not a tool).
+/// A ribbon button that runs `run` (an action, not a tool). Not
+/// `enabled`, it looks disabled; a click still runs `run`, which says
+/// what to select.
 fn action_button(
     id: &'static str,
     icon: &str,
     tooltip: &'static str,
+    enabled: bool,
     run: impl Fn(&mut EditorWindow, &mut Window, &mut Context<EditorWindow>) + 'static,
     cx: &mut Context<EditorWindow>,
 ) -> impl IntoElement {
-    ribbon_button(id, ButtonIcon::lucide_or_fallback(icon, cx), false, cx)
-        .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.focus_handle.focus(window, cx);
-            run(this, window, cx);
-        }))
+    ribbon_button_with(
+        id,
+        ButtonIcon::lucide_or_fallback(icon, cx),
+        false,
+        enabled,
+        cx,
+    )
+    .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+    .on_click(cx.listener(move |this, _, window, cx| {
+        this.focus_handle.focus(window, cx);
+        run(this, window, cx);
+    }))
 }
 
 /// Home's Image button: imports picture files. An action, not a tool.

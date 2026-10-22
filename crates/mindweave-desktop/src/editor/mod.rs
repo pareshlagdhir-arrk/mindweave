@@ -1723,10 +1723,10 @@ mod tests {
         };
         let payload = mindweave_core::to_clipboard(&[Shape::new_text_box((10., 10.))]);
         assert!(matches!(paste_plan(&payload, &view), PastePlan::Shapes(s) if s.len() == 1));
-        let newer = payload.replace("\"version\":3", "\"version\":99");
+        let newer = payload.replace("\"version\":4", "\"version\":99");
         assert_eq!(paste_plan(&newer, &view), PastePlan::Newer);
         let big = format!(
-            "{{\"mindweave\":\"shapes\",\"version\":3,\"pad\":\"{}\"}}",
+            "{{\"mindweave\":\"shapes\",\"version\":4,\"pad\":\"{}\"}}",
             "x".repeat(MAX_CLIPBOARD_BYTES)
         );
         assert_eq!(paste_plan(&big, &view), PastePlan::Nothing);

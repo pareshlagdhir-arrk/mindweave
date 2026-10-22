@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use super::hex_to_hsla;
 use super::images::{contrast_plate, hsla_luminance, svg_scale, ImageCache};
-use super::text_paint::{paint_shape_text, text_color, TextPaint};
+use super::text_paint::{equation_color, paint_shape_text, TextPaint};
 use crate::equation::{equation_font_size, EquationCache};
 
 /// Outline colour of a placeholder.
@@ -521,11 +521,11 @@ struct TopicExtras<'a> {
 }
 
 /// What topic `shape`'s equation is rendered from: its LaTeX, its
-/// topic's Auto text colour and text size (as the fit pass renders it).
+/// topic's text colour and text size (as the fit pass renders it).
 fn equation_key(shape: &Shape, canvas: (u8, u8, u8)) -> Option<(&str, Hsla, f32)> {
     let eq = shape.topic.as_ref()?.equation.as_ref()?;
     let font_size = equation_font_size(shape.label.as_ref().map(|l| &l.text));
-    Some((&eq.latex, text_color(shape, canvas), font_size))
+    Some((&eq.latex, equation_color(shape, canvas), font_size))
 }
 
 /// Paints topic `shape`'s picture, equation and link and note badges in

@@ -92,7 +92,7 @@ impl EditorWindow {
             return;
         }
         self.begin_edit_action(window, cx);
-        self.close_equation_card(window);
+        self.hand_over_equation_card(window, cx);
         let Some(shape) = self.session.find_shape(topic) else {
             return;
         };
@@ -132,13 +132,31 @@ impl EditorWindow {
     /// the field is blank) as one undo step, and closes the card. Does
     /// nothing while the LaTeX does not render.
     pub(super) fn apply_equation_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.commit_equation_draft(window, cx) {
+            self.cancel_equation_card(window, cx);
+        }
+    }
+
+    /// Closes the card for another card or topic: the draft is applied as
+    /// Done would when it can be, else the topic keeps its equation. Only
+    /// Cancel and Escape discard a draft that can be applied.
+    pub(super) fn hand_over_equation_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_equation_draft(window, cx);
+        self.close_equation_card(window);
+    }
+
+    /// Writes the card's draft to its topic as one undo step of its own
+    /// (text being edited is ended first, so its typing is another).
+    /// Returns whether the draft could be applied (it renders or is
+    /// blank); `false` when no card is open.
+    fn commit_equation_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(card) = self.equation_card.as_ref() else {
-            return;
+            return false;
         };
         let typed = card.input.read(cx).value();
-        let Some(latex) = equation_to_apply(&typed, &card.preview.render) else {
-            return;
-        };
+        if equation_to_apply(&typed, &card.preview.render).is_none() {
+            return false;
+        }
         let topic = card.topic;
         let current = self
             .session
@@ -146,10 +164,12 @@ impl EditorWindow {
             .and_then(|s| s.topic.as_ref())
             .and_then(|t| t.equation.as_ref())
             .map(|eq| eq.latex.clone());
-        if latex != current {
+        let change = equation_change(&typed, &card.preview.render, current.as_deref());
+        self.begin_edit_action(window, cx);
+        if let Some(latex) = change {
             self.update_session(|s| s.set_topic_equation(topic, latex), cx);
         }
-        self.cancel_equation_card(window, cx);
+        true
     }
 
     /// Cancel: closes the card, leaving the topic as it was.
@@ -425,6 +445,18 @@ pub(super) fn equation_to_apply(
     preview.is_ok().then(|| Some(latex.to_string()))
 }
 
+/// The change the card's draft `input` makes to a topic whose equation is
+/// `current`, given the draft's preview: `Some(latex)` to set (`None`
+/// removes the equation), or `None` when there is nothing to write (the
+/// draft is unchanged or does not render).
+fn equation_change(
+    input: &str,
+    preview: &Result<RenderedEquation, String>,
+    current: Option<&str>,
+) -> Option<Option<String>> {
+    equation_to_apply(input, preview).filter(|latex| latex.as_deref() != current)
+}
+
 /// Where the caret goes in `snippet` once it is inserted, in bytes from its
 /// start: inside its first empty braces, between the spaces of a matrix,
 /// at the start of a reaction (before its arrow), else after it.
@@ -438,9 +470,16 @@ fn snippet_caret(snippet: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{card_is_open_on, equation_to_apply, fitted, snippet_caret, SNIPPETS};
+    use super::{
+        card_is_open_on, equation_change, equation_to_apply, fitted, snippet_caret, SNIPPETS,
+    };
+    use crate::editor::text_edit::{
+        finish_text_session, start_text_session, store_target_text, EditTarget,
+    };
+    use crate::editor::SessionGesture;
     use crate::equation::render_equation;
     use gpui_kit::hsla;
+    use mindweave_core::{DocumentSession, HAlign, RichText, RunStyle};
 
     #[test]
     fn a_blank_input_removes_the_equation() {
@@ -500,5 +539,76 @@ mod tests {
         assert!(card_is_open_on(Some(a), a));
         assert!(!card_is_open_on(Some(a), b));
         assert!(!card_is_open_on(None, a));
+    }
+
+    #[test]
+    fn a_draft_handed_over_is_applied_only_when_it_renders() {
+        let black = hsla(0., 0., 0., 1.);
+        let valid = render_equation("x^2", black, 20.);
+        let invalid = render_equation(r"\frac{a", black, 20.);
+        // A valid new draft is applied.
+        assert_eq!(
+            equation_change("x^2", &valid, Some("y")),
+            Some(Some("x^2".to_string()))
+        );
+        assert_eq!(
+            equation_change("x^2", &valid, None),
+            Some(Some("x^2".to_string()))
+        );
+        // Unchanged: nothing to write.
+        assert_eq!(equation_change(" x^2 ", &valid, Some("x^2")), None);
+        assert_eq!(equation_change("", &invalid, None), None);
+        // One that does not render leaves the topic's equation alone.
+        assert_eq!(equation_change(r"\frac{a", &invalid, Some("y")), None);
+        // Cleared, as Done would: the equation is removed.
+        assert_eq!(equation_change("  ", &invalid, Some("y")), Some(None));
+    }
+
+    #[test]
+    fn applying_while_a_label_is_typed_is_its_own_undo_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("e.mindweave")).unwrap();
+        let id = s.add_central_topic((0., 0.));
+        let label = |s: &DocumentSession| {
+            s.find_shape(id)
+                .unwrap()
+                .label
+                .as_ref()
+                .unwrap()
+                .text
+                .plain()
+        };
+        let equation = |s: &DocumentSession| {
+            s.find_shape(id)
+                .unwrap()
+                .topic
+                .as_ref()
+                .unwrap()
+                .equation
+                .as_ref()
+                .map(|eq| eq.latex.clone())
+        };
+        let mut g = SessionGesture::default();
+        let target = EditTarget::Label(id);
+        assert!(start_text_session(&mut s, &mut g, target));
+        let mut typed = RichText::new(RunStyle::default(), HAlign::Center);
+        typed.insert(0, "Area", &RunStyle::default());
+        store_target_text(&mut s, target, &typed);
+
+        // Done readies the editor first (`begin_edit_action`), which ends
+        // the label's session, then sets the equation.
+        assert!(finish_text_session(&mut s, &mut g, target));
+        s.set_topic_equation(id, Some("x^2".into()));
+
+        // One undo takes back the equation alone, the next the typing.
+        assert!(s.undo());
+        assert_eq!(equation(&s), None);
+        assert_eq!(label(&s), "Area");
+        assert!(s.redo());
+        assert_eq!(equation(&s).as_deref(), Some("x^2"));
+        assert_eq!(label(&s), "Area");
+        assert!(s.undo());
+        assert!(s.undo());
+        assert_eq!(label(&s), "Central Topic");
     }
 }

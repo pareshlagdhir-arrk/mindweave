@@ -38,8 +38,10 @@ use crate::actions::*;
 
 /// Value of the `"mindweave"` key that marks a rich-text clipboard payload.
 pub const TEXT_PAYLOAD_MARKER: &str = "text";
-/// Rich-text payload version this build writes and reads.
-pub const TEXT_PAYLOAD_VERSION: u64 = 1;
+/// Rich-text payload version this build writes; it reads this and every
+/// older one. Version 2 added lists and links, which older builds would
+/// silently drop.
+pub const TEXT_PAYLOAD_VERSION: u64 = 2;
 /// How long the caret stays on, then off.
 const CARET_BLINK: Duration = Duration::from_millis(500);
 /// Width of the painted caret, in pixels.
@@ -165,7 +167,7 @@ pub fn byte_to_utf16(text: &str, n: usize) -> usize {
 }
 
 /// `text` as a rich-text clipboard payload:
-/// `{"mindweave":"text","version":1,"text":{...}}`.
+/// `{"mindweave":"text","version":2,"text":{...}}`.
 pub fn text_payload(text: &RichText) -> String {
     json!({
         "mindweave": TEXT_PAYLOAD_MARKER,
@@ -185,7 +187,7 @@ pub fn parse_text_payload(payload: &str) -> Option<RichText> {
     let mut value: Value = serde_json::from_str(payload).ok()?;
     let obj = value.as_object_mut()?;
     if obj.get("mindweave")?.as_str()? != TEXT_PAYLOAD_MARKER
-        || obj.get("version")?.as_u64()? != TEXT_PAYLOAD_VERSION
+        || !(1..=TEXT_PAYLOAD_VERSION).contains(&obj.get("version")?.as_u64()?)
     {
         return None;
     }
@@ -1093,10 +1095,10 @@ pub fn finish_text_session(
 /// Saves `session` while the text-editing session on `target` goes on:
 /// the edits so far become one undo step, the file is written, and a new
 /// gesture collects the edits that follow (the editor keeps its caret,
-/// selection and typing history). `None`, doing nothing, when the target
-/// is gone or its text is empty: an empty text box or label, or a blank
-/// note, is cleared only when its session ends, so the caller ends the
-/// session first.
+/// selection and typing history). A blank note is saved as no note, its
+/// card staying open. `None`, doing nothing, when the target is gone or
+/// its label is empty: an empty text box or label is cleared only when
+/// its session ends, so the caller ends the session first.
 pub fn save_text_session(
     session: &mut DocumentSession,
     gesture: &mut SessionGesture,
@@ -1104,7 +1106,18 @@ pub fn save_text_session(
 ) -> Option<Result<(), FormatError>> {
     let (text, _) = target_text(session, target)?;
     if blank(target, &text) {
-        return None;
+        match target {
+            EditTarget::Label(_) => return None,
+            EditTarget::Note(id) => {
+                let stored = session
+                    .find_shape(id)
+                    .and_then(|s| s.topic.as_ref())
+                    .is_some_and(|t| t.note.is_some());
+                if stored {
+                    session.set_topic_note(id, None);
+                }
+            }
+        }
     }
     gesture.end(session, GestureOwner::Text);
     let saved = session.save();
@@ -2238,7 +2251,7 @@ mod tests {
         assert_eq!(plain_text, "n bold\nn");
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["mindweave"], "text");
-        assert_eq!(value["version"], 1);
+        assert_eq!(value["version"], 2);
         let rich = parse_text_payload(&payload).unwrap();
         assert_eq!(rich, text.slice(4..14));
 
@@ -2262,8 +2275,11 @@ mod tests {
             parse_text_payload(r#"{"mindweave":"shapes","version":2,"shapes":[]}"#),
             None
         );
-        let future = payload.replace("\"version\":1", "\"version\":2");
+        let future = payload.replace("\"version\":2", "\"version\":3");
         assert_eq!(parse_text_payload(&future), None);
+        // A payload from before lists and links still pastes.
+        let older = payload.replace("\"version\":2", "\"version\":1");
+        assert_eq!(parse_text_payload(&older).as_ref(), Some(&rich));
         // A selection replaced by a paste, styles kept.
         let mut t = plain("abc");
         t.apply(0..3, &StyleChange::Italic(true));
@@ -2323,7 +2339,7 @@ mod tests {
         assert_eq!(pasted(None, None), None);
         // Shapes this build cannot read are never pasted as their JSON:
         // from a newer Mindweave (refused with a notice), or too large.
-        let newer = shapes.replace("\"version\":3", "\"version\":99");
+        let newer = shapes.replace("\"version\":4", "\"version\":99");
         assert_ne!(newer, shapes);
         assert_eq!(pasted(None, Some(&newer)), Some(Pasted::Newer));
         let big = format!(
@@ -2991,6 +3007,48 @@ mod tests {
             EditTarget::Note(box_id)
         ));
         assert!(g.begin(&mut s, GestureOwner::Pointer));
+    }
+
+    #[test]
+    fn saving_a_blank_note_keeps_its_session_going() {
+        let (_dir, mut s) = session();
+        let id = s.add_central_topic((0., 0.));
+        let target = EditTarget::Note(id);
+        let note = |s: &DocumentSession| {
+            s.find_shape(id)
+                .unwrap()
+                .topic
+                .as_ref()
+                .unwrap()
+                .note
+                .clone()
+        };
+        let mut g = SessionGesture::default();
+
+        // A new note, nothing typed yet: saved, the session goes on.
+        assert!(start_text_session(&mut s, &mut g, target));
+        assert!(matches!(
+            save_text_session(&mut s, &mut g, target),
+            Some(Ok(()))
+        ));
+        assert!(!s.is_dirty());
+        assert_eq!(g.owner(), Some(GestureOwner::Text));
+        assert_eq!(note(&s), None);
+
+        // Only whitespace typed: saved without a note, still editing.
+        store_target_text(&mut s, target, &plain("  "));
+        assert!(matches!(
+            save_text_session(&mut s, &mut g, target),
+            Some(Ok(()))
+        ));
+        assert!(!s.is_dirty());
+        assert_eq!(g.owner(), Some(GestureOwner::Text));
+        assert_eq!(note(&s), None);
+
+        // Typing goes on in the same session.
+        store_target_text(&mut s, target, &plain("Hi"));
+        assert!(finish_text_session(&mut s, &mut g, target));
+        assert_eq!(note(&s).map(|n| n.plain()).as_deref(), Some("Hi"));
     }
 
     #[test]

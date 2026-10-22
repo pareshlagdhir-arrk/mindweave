@@ -1,11 +1,12 @@
 //! Clipboard payloads for shapes, plain-text paste, and duplicating shapes.
 //!
 //! Shapes (with their labels, and text boxes) are copied as JSON text:
-//! `{"mindweave":"shapes","version":3,"shapes":[...],"images":{...}}`,
+//! `{"mindweave":"shapes","version":4,"shapes":[...],"images":{...}}`,
 //! each picture stored once in `images` (see [`crate::image`]). Version 1
-//! payloads (shapes without text) and 2 (without images) are still read. Clipboard text comes from any
-//! application, so reading it never panics and rejects anything that is
-//! not such a payload.
+//! payloads (shapes without text), 2 (without images) and 3 (without
+//! notes, equations, lists and links) are still read. Clipboard text comes
+//! from any application, so reading it never panics and rejects anything
+//! that is not such a payload.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -21,7 +22,9 @@ use crate::transform::{selection_bounds, DUPLICATE_OFFSET};
 /// Value of the `"mindweave"` key that marks a shapes payload.
 pub const CLIPBOARD_MARKER: &str = "shapes";
 /// Payload version this build writes; it reads this and every older one.
-pub const CLIPBOARD_VERSION: u64 = 3;
+/// Version 4 added topic notes and equations, and lists and links in
+/// text, which older builds would silently drop.
+pub const CLIPBOARD_VERSION: u64 = 4;
 /// Oldest payload version this build reads.
 const OLDEST_CLIPBOARD_VERSION: u64 = 1;
 /// Most characters (graphemes) of plain text pasted into a new text box.
@@ -285,13 +288,13 @@ mod tests {
         let current = to_clipboard(&[Shape::new_text_box((0., 0.))]);
         assert!(is_mindweave_payload(&current));
         assert!(!is_newer_payload(&current));
-        let newer = current.replace("\"version\":3", "\"version\":99");
+        let newer = current.replace("\"version\":4", "\"version\":99");
         assert!(from_clipboard(&newer).is_none());
         assert!(is_mindweave_payload(&newer));
         assert!(is_newer_payload(&newer));
         // Too large to read: still a payload, not known to be newer.
         let big = format!(
-            "{{\"mindweave\":\"shapes\",\"version\":3,\"pad\":\"{}\"}}",
+            "{{\"mindweave\":\"shapes\",\"version\":4,\"pad\":\"{}\"}}",
             "x".repeat(MAX_CLIPBOARD_BYTES)
         );
         assert!(from_clipboard(&big).is_none());
@@ -334,7 +337,7 @@ mod tests {
         let text = to_clipboard(&shapes);
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["mindweave"], "shapes");
-        assert_eq!(v["version"], 3);
+        assert_eq!(v["version"], 4);
         assert_eq!(v["shapes"].as_array().unwrap().len(), 2);
         assert_eq!(from_clipboard(&text), Some(shapes));
         assert_eq!(from_clipboard(&to_clipboard(&[])), Some(vec![]));
@@ -344,9 +347,9 @@ mod tests {
     fn from_clipboard_rejects_foreign_text() {
         let good = to_clipboard(&[shape(0.0, 0.0, 10.0, 10.0)]);
         let truncated = &good[..good.len() / 2];
-        let version_3 = good.replace("\"version\":3", "\"version\":4");
-        assert_ne!(version_3, good);
-        let version_0 = good.replace("\"version\":3", "\"version\":0");
+        let version_5 = good.replace("\"version\":4", "\"version\":5");
+        assert_ne!(version_5, good);
+        let version_0 = good.replace("\"version\":4", "\"version\":0");
         let other_marker = good.replace("\"mindweave\":\"shapes\"", "\"mindweave\":\"pages\"");
         assert_ne!(other_marker, good);
         for text in [
@@ -360,7 +363,7 @@ mod tests {
             r#"{"mindweave":"shapes","version":"1","shapes":[]}"#,
             r#"{"mindweave":"shapes","version":1,"shapes":[{"id":"nope"}]}"#,
             truncated,
-            &version_3,
+            &version_5,
             &version_0,
             &other_marker,
         ] {
@@ -389,7 +392,7 @@ mod tests {
         tb.text_box.as_mut().unwrap().auto_width = false;
         let shapes = vec![a, tb];
         let payload = to_clipboard(&shapes);
-        assert!(payload.starts_with(r#"{"mindweave":"shapes","version":3,"#));
+        assert!(payload.starts_with(r#"{"mindweave":"shapes","version":4,"#));
         let back = from_clipboard(&payload).unwrap();
         assert_eq!(back, shapes);
         assert!(back.iter().all(|s| s.extra.is_empty()));
@@ -455,7 +458,7 @@ mod tests {
         let good = to_clipboard(&[shape(0.0, 0.0, 10.0, 10.0)]);
         assert!(from_clipboard(&format!("\n  {good}  \n")).is_some());
         let reordered = good.replacen(
-            r#"{"mindweave":"shapes","version":3,"#,
+            r#"{"mindweave":"shapes","version":4,"#,
             r#"{"version":2,"mindweave":"shapes","#,
             1,
         );

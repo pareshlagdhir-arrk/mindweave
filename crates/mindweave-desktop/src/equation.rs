@@ -14,7 +14,7 @@ use ratex_types::color::Color;
 use ratex_types::math_style::MathStyle;
 
 /// The most characters of LaTeX accepted.
-pub const MAX_EQUATION_CHARS: usize = 4_000;
+pub const MAX_EQUATION_CHARS: usize = 1_500;
 /// The longest side a rendered equation may have, in canvas units.
 const MAX_SIDE: f32 = 800.;
 
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn huge_input_is_refused_or_clamped() {
-        let long = "x".repeat(MAX_EQUATION_CHARS + 1);
+        let long = "x".repeat(1_501);
         assert_eq!(
             render_equation(&long, black(), 28.).err().as_deref(),
             Some("Equation is too long")

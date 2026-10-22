@@ -152,7 +152,7 @@ impl EditorWindow {
             self.focus_handle.focus(window, cx);
             return;
         }
-        self.cancel_equation_card(window, cx);
+        self.hand_over_equation_card(window, cx);
         self.begin_text_edit(EditTarget::Note(topic), window, cx);
         let editing = self.text_edit.as_ref().map(|e| e.target);
         if editing == Some(EditTarget::Note(topic)) {

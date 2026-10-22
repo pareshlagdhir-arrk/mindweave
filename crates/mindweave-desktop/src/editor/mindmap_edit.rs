@@ -26,14 +26,7 @@ pub enum NewTopic {
 impl EditorWindow {
     /// The one selected topic.
     pub(super) fn selected_topic(&self) -> Option<Uuid> {
-        match self.selection.as_slice() {
-            [id] => self
-                .session
-                .find_shape(*id)
-                .filter(|s| s.topic.is_some())
-                .map(|s| s.id),
-            _ => None,
-        }
+        one_topic(&self.session, &self.selection)
     }
 
     /// The selected topics, in selection order.
@@ -299,6 +292,18 @@ impl EditorWindow {
     }
 }
 
+/// The topic `selection` is, when it is exactly one topic: what the Note
+/// and Equation commands work on.
+pub(super) fn one_topic(session: &DocumentSession, selection: &[Uuid]) -> Option<Uuid> {
+    match selection {
+        [id] => session
+            .find_shape(*id)
+            .filter(|s| s.topic.is_some())
+            .map(|s| s.id),
+        _ => None,
+    }
+}
+
 /// A little slack round the small badges, in canvas units.
 const BADGE_SLACK: f32 = 3.;
 
@@ -353,10 +358,26 @@ pub fn normalized_link(link: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{equation_at, link_badge_at, normalized_link, note_badge_at};
+    use super::{equation_at, link_badge_at, normalized_link, note_badge_at, one_topic};
     use mindweave_core::geometry::Rect;
     use mindweave_core::mindmap::Equation;
-    use mindweave_core::{DocumentSession, HAlign, RichText, Run, RunStyle};
+    use mindweave_core::{DocumentSession, HAlign, RichText, Run, RunStyle, Shape};
+
+    #[test]
+    fn note_and_equation_need_exactly_one_topic() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("o.mindweave")).unwrap();
+        let a = s.add_central_topic((0., 0.));
+        let b = s.add_central_topic((400., 0.));
+        let text_box = Shape::new_text_box((0., 300.));
+        let other = text_box.id;
+        s.add_shapes(vec![text_box]);
+        assert_eq!(one_topic(&s, &[a]), Some(a));
+        assert_eq!(one_topic(&s, &[]), None);
+        assert_eq!(one_topic(&s, &[a, b]), None);
+        assert_eq!(one_topic(&s, &[other]), None);
+        assert_eq!(one_topic(&s, &[uuid::Uuid::new_v4()]), None);
+    }
 
     #[test]
     fn links_without_a_scheme_are_web_addresses() {

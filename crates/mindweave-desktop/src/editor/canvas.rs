@@ -23,7 +23,7 @@ use super::shape_paint::{
     AutoColors,
 };
 use super::text_paint::{
-    auto_color, canvas_background, link_color, text_background, text_box_wrap, text_color,
+    auto_color, canvas_background, equation_color, link_color, text_background, text_box_wrap,
     TextPaint, TEXT_BOX_PADDING,
 };
 use super::tool::Tool;
@@ -622,7 +622,7 @@ impl EditorWindow {
     }
 
     /// Renders the active page's equations at their topic's text size, in
-    /// its Auto text colour (as painting does, so the render is reused),
+    /// its text colour (as painting does, so the render is reused),
     /// and stores the sizes that changed; one that does not render is
     /// `(0, 0)`, shown as nothing.
     fn measure_equations(&mut self, canvas: (u8, u8, u8)) {
@@ -633,7 +633,7 @@ impl EditorWindow {
                 continue;
             };
             let font_size = equation_font_size(shape.label.as_ref().map(|l| &l.text));
-            let color = text_color(shape, canvas);
+            let color = equation_color(shape, canvas);
             let size = self
                 .equation_cache
                 .get(&eq.latex, color, font_size)

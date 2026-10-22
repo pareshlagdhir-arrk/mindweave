@@ -93,7 +93,8 @@ pub struct Equation {
     /// The LaTeX source.
     pub latex: String,
     /// The rendered size in canvas units, kept current by the desktop's
-    /// fit pass; `(0, 0)` until measured.
+    /// fit pass; `(0, 0)` until measured (and when a file leaves it out).
+    #[serde(default)]
     pub size: (f32, f32),
 }
 
@@ -1444,6 +1445,18 @@ mod tests {
             plain.size_for_text((100.0, 20.0))
         );
         assert!(t.parts(132.0, 38.0).equation.is_none());
+    }
+
+    #[test]
+    fn an_equation_without_a_size_loads_unmeasured() {
+        let eq: Equation = serde_json::from_str(r#"{"latex":"x^2"}"#).unwrap();
+        assert_eq!(
+            eq,
+            Equation {
+                latex: "x^2".into(),
+                size: (0.0, 0.0),
+            }
+        );
     }
 
     #[test]

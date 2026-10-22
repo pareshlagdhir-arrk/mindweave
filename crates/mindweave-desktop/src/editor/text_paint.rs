@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use super::hex_to_hsla;
 use super::text_layout::{
     canvas_default_family, installed_font_families, max_font_size, should_greek, text_run,
     CacheEntry, TextLayoutCache,
@@ -17,7 +18,7 @@ use super::text_layout::{
 use gpui_kit::*;
 use mindweave_core::geometry::{line_label_placement, Pt, Rect};
 use mindweave_core::{
-    auto_text_color, parse_hex_color, RichText, RunStyle, Shape, VAlign, Viewport,
+    auto_text_color, parse_hex_color, Mixed, RichText, RunStyle, Shape, VAlign, Viewport,
 };
 use uuid::Uuid;
 
@@ -317,6 +318,22 @@ pub fn text_color(shape: &Shape, canvas: (u8, u8, u8)) -> Hsla {
         text_background(shape.style.fill.as_deref(), canvas)
     };
     auto_color(background, shape.style.opacity)
+}
+
+/// The colour topic `shape`'s equation is drawn in, with its opacity: its
+/// label's colour when all its text shares one explicit colour, else its
+/// Auto text colour. The fit pass and painting both use it, so they share
+/// one render.
+pub fn equation_color(shape: &Shape, canvas: (u8, u8, u8)) -> Hsla {
+    let auto = text_color(shape, canvas);
+    let explicit = shape
+        .label
+        .as_ref()
+        .and_then(|l| match l.text.summary(0..l.text.len()).color {
+            Mixed::Same(Some(hex)) => hex_to_hsla(&hex),
+            _ => None,
+        });
+    explicit.map_or(auto, |c| c.opacity(auto.a))
 }
 
 /// One object's text to paint.
@@ -886,11 +903,40 @@ pub fn label_origin(w: f32, h: f32, padding: f32, text_height: f32, valign: VAli
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
-    use super::{canvas_background, label_origin, text_background, text_frame, text_wrap};
+    use super::{
+        canvas_background, equation_color, label_origin, text_background, text_color, text_frame,
+        text_wrap,
+    };
+    use crate::editor::hex_to_hsla;
     use mindweave_core::geometry::Frame;
     use mindweave_core::{
-        auto_text_color, builtin_libraries, Label, LibraryRegistry, RichText, Shape, VAlign,
+        auto_text_color, builtin_libraries, Label, LibraryRegistry, RichText, Shape, StyleChange,
+        VAlign,
     };
+
+    #[test]
+    fn equations_take_their_topics_one_text_colour() {
+        let canvas = (255, 255, 255);
+        let mut topic = Shape::new_topic(Frame {
+            w: 120.,
+            h: 40.,
+            ..Frame::default()
+        });
+        topic.style.opacity = 0.5;
+        let auto = text_color(&topic, canvas);
+        // Auto text: the Auto colour.
+        assert_eq!(equation_color(&topic, canvas), auto);
+        // All the text one colour: that colour, with the topic's opacity.
+        let text = &mut topic.label.as_mut().unwrap().text;
+        let len = text.len();
+        text.apply(0..len, &StyleChange::Color(Some("#FF0000".into())));
+        let red = hex_to_hsla("#FF0000").unwrap().opacity(0.5);
+        assert_eq!(equation_color(&topic, canvas), red);
+        // Two colours: Auto again.
+        let text = &mut topic.label.as_mut().unwrap().text;
+        text.apply(0..3, &StyleChange::Color(Some("#0000FF".into())));
+        assert_eq!(equation_color(&topic, canvas), auto);
+    }
 
     #[test]
     fn auto_colour_backgrounds() {
