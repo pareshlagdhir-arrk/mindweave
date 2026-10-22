@@ -96,6 +96,14 @@ pub fn render_equation(
     })
 }
 
+/// Rendered SVG `svg` rasterised at `scale` pixels per canvas unit;
+/// `None` when it does not rasterise.
+pub fn rasterise(svg: &[u8], scale: f32, cx: &App) -> Option<Arc<RenderImage>> {
+    cx.svg_renderer()
+        .render_single_frame(svg, scale / PX_PER_PT)
+        .ok()
+}
+
 /// The em of an equation under `label`: the topic text's largest font
 /// size, [`DEFAULT_FONT_SIZE`] when it has none.
 pub fn equation_font_size(label: Option<&RichText>) -> f32 {
@@ -177,11 +185,7 @@ impl EquationCache {
         entry
             .rasters
             .entry(scale)
-            .or_insert_with(|| {
-                cx.svg_renderer()
-                    .render_single_frame(&svg, scale as f32 * PX_PER_PT.recip())
-                    .ok()
-            })
+            .or_insert_with(|| rasterise(&svg, scale as f32, cx))
             .clone()
     }
 

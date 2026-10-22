@@ -339,6 +339,10 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
                     |this, window, cx| this.add_topic(NewTopic::After, window, cx),
                 ),
             ];
+            let content: [(&'static str, &str, &'static str, Run); 1] =
+                [("mm-equation", "sigma", "Equation", |this, window, cx| {
+                    this.edit_selected_equation(window, cx)
+                })];
             let marks: [(&'static str, &str, &'static str, Run); 2] = [
                 (
                     "mm-summary",
@@ -361,7 +365,7 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
                     })
                     .collect::<Vec<_>>()
             };
-            let (topics, marks) = (actions(&topics), actions(&marks));
+            let (topics, content, marks) = (actions(&topics), actions(&content), actions(&marks));
             let relationship = ToolButton {
                 id: "tool-relationship".into(),
                 tool: Tool::Relationship,
@@ -370,7 +374,7 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
                 tooltip: "Relationship: drag from one topic to another".into(),
             };
             let links = vec![tool_button(editor, relationship, cx).into_any_element()];
-            with_dividers(vec![topics, marks, links], cx)
+            with_dividers(vec![topics, content, marks, links], cx)
         }
         None => {
             let tools = home_buttons()

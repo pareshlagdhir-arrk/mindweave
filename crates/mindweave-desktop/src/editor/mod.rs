@@ -2,8 +2,10 @@
 //! tabs, Properties panel and status bar.
 
 mod canvas;
+mod cards;
 mod color_palette;
 mod dot_tile;
+mod equation_card;
 mod icons_panel;
 mod images;
 mod interaction;
@@ -46,11 +48,12 @@ use mindweave_core::{
 // `Copy` is used by path: importing it would hide the derivable trait.
 use crate::actions::{
     self, AddCentralTopic, AddSiblingBefore, AddSubtopic, AddSummary, BringForward, BringToFront,
-    Cancel, CloseWindow, Cut, Delete, Duplicate, EditLabel, EditText, Group, NudgeDown,
-    NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp, NudgeUpFar, Paste,
-    Redo, Save, SelectAll, SendBackward, SendToBack, ToggleBoundary, ToggleIcons, ToggleLayers,
-    ToggleLeftSidebar, ToggleProperties, ToolEllipse, ToolHand, ToolLine, ToolPointer,
-    ToolRectangle, ToolRelationship, ToolText, Undo, Ungroup, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
+    Cancel, CloseWindow, Cut, Delete, Duplicate, EditEquation, EditLabel, EditText, Group,
+    NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp,
+    NudgeUpFar, Paste, Redo, Save, SelectAll, SendBackward, SendToBack, ToggleBoundary,
+    ToggleIcons, ToggleLayers, ToggleLeftSidebar, ToggleProperties, ToolEllipse, ToolHand,
+    ToolLine, ToolPointer, ToolRectangle, ToolRelationship, ToolText, Undo, Ungroup,
+    EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
 };
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
@@ -244,6 +247,8 @@ pub struct EditorWindow {
     glyph_outlines: GlyphOutlines,
     /// What holds the session's gesture, if anything.
     session_gesture: SessionGesture,
+    /// The equation card, when open.
+    equation_card: Option<equation_card::EquationCard>,
     /// The text being edited on the canvas, if any.
     pub text_edit: Option<TextEditor>,
     /// Caret blink, drag selection and placement of the text being edited.
@@ -312,6 +317,7 @@ impl EditorWindow {
             text_layouts: TextLayoutCache::default(),
             glyph_outlines: GlyphOutlines::default(),
             session_gesture: SessionGesture::default(),
+            equation_card: None,
             text_edit: None,
             text_ui: TextEditUi::default(),
             properties,
@@ -826,6 +832,10 @@ impl EditorWindow {
         self.toggle_boundary(window, cx);
     }
 
+    fn on_edit_equation(&mut self, _: &EditEquation, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit_selected_equation(window, cx);
+    }
+
     fn on_tool_relationship(
         &mut self,
         _: &ToolRelationship,
@@ -835,12 +845,17 @@ impl EditorWindow {
         self.select_tool(Tool::Relationship, window, cx);
     }
 
-    /// Escape: aborts the gesture in progress; otherwise clears the
-    /// selection and goes back to the Pointer tool, unlocked.
-    fn on_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+    /// Escape: aborts the gesture in progress; otherwise closes the
+    /// equation card if open, else clears the selection and goes back to
+    /// the Pointer tool, unlocked.
+    fn on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         if !self.cancel_gesture(cx) {
-            self.selection.clear();
-            self.tools.cancel();
+            if self.equation_card.is_some() {
+                self.cancel_equation_card(window, cx);
+            } else {
+                self.selection.clear();
+                self.tools.cancel();
+            }
         }
         cx.notify();
     }
@@ -1132,9 +1147,11 @@ impl EditorWindow {
         let focus = self.focus_handle.clone();
         div()
             .id("canvas-area")
+            .relative()
             .flex_1()
             .min_h_0()
             .child(canvas::canvas(cx.entity(), self.session.page()))
+            .children(self.render_equation_card(cx))
             .on_drop(
                 cx.listener(|this, drag: &icons_panel::IconDrag, window, cx| {
                     // Dropped where the pointer is.
@@ -1352,6 +1369,7 @@ impl Render for EditorWindow {
         self.sync_window_title(window);
         self.sync_properties(window, cx);
         self.sync_topic_fields(window, cx);
+        self.sync_equation_card(window);
 
         let (show_layers, show_properties, show_icons) = {
             let settings = &cx.global::<AppState>().settings;
@@ -1450,6 +1468,7 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_add_central_topic))
             .on_action(cx.listener(Self::on_add_summary))
             .on_action(cx.listener(Self::on_toggle_boundary))
+            .on_action(cx.listener(Self::on_edit_equation))
             .on_action(cx.listener(Self::on_tool_relationship))
             .on_action(cx.listener(Self::on_tool_rectangle))
             .on_action(cx.listener(Self::on_tool_ellipse))

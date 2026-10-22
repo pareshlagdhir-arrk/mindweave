@@ -69,6 +69,10 @@ actions!(
         AddSummary,
         ToggleBoundary,
         ToolRelationship,
+        /// Opens the equation card on the one selected topic.
+        EditEquation,
+        /// Cmd+Return in the equation card: Done.
+        ApplyEquation,
         /// F2: edits the selected object's text (Enter adds a sibling to a
         /// selected topic).
         EditLabel,
@@ -139,6 +143,11 @@ pub const EDITOR_CONTEXT: &str = "Editor";
 /// Added to the editor root's key context while text on the canvas is
 /// being edited.
 pub const TEXT_EDITING_CONTEXT: &str = "TextEditing";
+/// The equation card's key context.
+pub const EQUATION_CARD_CONTEXT: &str = "EquationCard";
+/// The equation card's LaTeX field, where Cmd+Return is Done rather than
+/// the field's own Cmd+Return (which would add a line first).
+const EQUATION_FIELD: &str = "EquationCard > Input";
 /// Where tool keys apply: in the editor, but not while a text field (gpui's
 /// `Input` context) has focus or text on the canvas is being edited, so
 /// typing is not taken as a tool or shape key.
@@ -203,6 +212,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-]", BringForward, editor),
         KeyBinding::new("cmd-[", SendBackward, editor),
         KeyBinding::new("cmd-shift-[", SendToBack, editor),
+        KeyBinding::new("cmd-enter", ApplyEquation, Some(EQUATION_FIELD)),
     ];
     bindings.extend(text_key_bindings());
     bindings
@@ -322,6 +332,7 @@ mod tests {
             ("cmd-]", "mindweave::BringForward"),
             ("cmd-[", "mindweave::SendBackward"),
             ("cmd-shift-[", "mindweave::SendToBack"),
+            ("cmd-enter", "mindweave::ApplyEquation"),
         ];
         let expected: Vec<(String, &str)> =
             expected.iter().map(|(k, a)| (k.to_string(), *a)).collect();

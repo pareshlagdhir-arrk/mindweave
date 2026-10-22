@@ -302,9 +302,13 @@ fn register_input(
                         return;
                     }
                     // A double click (with any tool but Hand, which pans)
+                    // opens a topic's equation card on its equation, else
                     // edits text: the first click did what it does.
                     if event.click_count == 2 {
-                        editor.edit_text_at(at, window, cx);
+                        match editor.equation_at(at) {
+                            Some(topic) => editor.open_equation_card(topic, window, cx),
+                            None => editor.edit_text_at(at, window, cx),
+                        }
                         return;
                     }
                     match editor.tools.tool {
