@@ -1,7 +1,9 @@
 //! Placement of the cards that open beside a topic (the equation and
 //! note cards).
 
-use mindweave_core::geometry::Rect;
+use mindweave_core::geometry::{Frame, Rect};
+use mindweave_core::{DocumentSession, Viewport};
+use uuid::Uuid;
 
 /// The least space kept between a card and the canvas's edges.
 pub(super) const MARGIN: f32 = 8.;
@@ -31,10 +33,29 @@ pub(super) fn card_origin(
     (x, y)
 }
 
+/// The screen rectangle (pixels from the canvas's top left) of a topic
+/// with `frame`, seen through `viewport`.
+pub(super) fn topic_on_screen(frame: &Frame, viewport: &Viewport) -> Rect {
+    let (x, y) = viewport.canvas_to_screen((frame.x, frame.y));
+    Rect {
+        x,
+        y,
+        w: frame.w * viewport.zoom,
+        h: frame.h * viewport.zoom,
+    }
+}
+
+/// Whether topic `topic`, which a card is open on, is still on the active
+/// page's active layer; the card closes once it is not.
+pub(super) fn card_topic_present(session: &DocumentSession, topic: Uuid) -> bool {
+    session.find_shape(topic).is_some_and(|s| s.topic.is_some())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::card_origin;
+    use super::{card_origin, card_topic_present};
     use mindweave_core::geometry::Rect;
+    use mindweave_core::DocumentSession;
 
     fn topic(x: f32, y: f32) -> Rect {
         Rect {
@@ -79,5 +100,20 @@ mod tests {
             card_origin(topic(50., -80.), (200., 150.), (800., 600.), 12.),
             (162., 8.)
         );
+    }
+
+    #[test]
+    fn card_closes_when_its_topic_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("e.mindweave")).unwrap();
+        let id = s.add_central_topic((0., 0.));
+        assert!(card_topic_present(&s, id));
+        s.delete_with_branches(&[id]);
+        assert!(!card_topic_present(&s, id));
+        assert!(s.undo());
+        assert!(card_topic_present(&s, id));
+        // Another page does not show it either.
+        s.add_page();
+        assert!(!card_topic_present(&s, id));
     }
 }

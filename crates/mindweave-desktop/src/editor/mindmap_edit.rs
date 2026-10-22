@@ -289,7 +289,6 @@ impl EditorWindow {
     }
 
     /// The topic whose note badge is at canvas point `at`.
-    #[allow(dead_code)] // Until the note card opens from the canvas.
     pub(super) fn note_badge_at(&self, at: Pt) -> Option<Uuid> {
         note_badge_at(&self.session, at)
     }

@@ -276,7 +276,14 @@ fn register_input(
                 };
                 // While editing text, a left press on it places the caret
                 // or selects; anywhere else it stops editing and then does
-                // what it would have done.
+                // what it would have done. A note is edited in its card,
+                // which takes the presses on it: a press here closes it.
+                if !pans && event.button == MouseButton::Left && editor.note_card.is_some() {
+                    let at = editor.to_canvas(local(event.position, bounds));
+                    if editor.press_outside_note_card(at, event.click_count, window, cx) {
+                        return;
+                    }
+                }
                 if !pans && event.button == MouseButton::Left && editor.text_edit.is_some() {
                     let at = editor.to_canvas(local(event.position, bounds));
                     let pressed = editor.text_press(
@@ -321,7 +328,9 @@ fn register_input(
                         return;
                     }
                     match editor.tools.tool {
-                        Tool::Pointer => editor.begin_pointer_press(at, event.modifiers, cx),
+                        Tool::Pointer => {
+                            editor.begin_pointer_press(at, event.modifiers, window, cx)
+                        }
                         Tool::Shape { .. } | Tool::Relationship => {
                             editor.begin_placing(at, event.modifiers, window, cx)
                         }
@@ -348,7 +357,8 @@ fn register_input(
             editor.update(cx, |editor, cx| {
                 editor.pointer_local = pointer;
                 if event.pressed_button == Some(MouseButton::Left) {
-                    let at = editor.to_canvas(local(event.position, bounds));
+                    // A drag selection may have begun in the note card.
+                    let at = editor.edit_point(local(event.position, bounds));
                     editor.text_drag_to(at, window, cx);
                 } else {
                     // The button was released where we could not see it.

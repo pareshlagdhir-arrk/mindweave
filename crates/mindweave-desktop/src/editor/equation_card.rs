@@ -12,11 +12,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use mindweave_core::geometry::Rect;
-use mindweave_core::DocumentSession;
 use uuid::Uuid;
 
-use super::cards::{card_origin, MARGIN};
+use super::cards::{card_origin, card_topic_present, topic_on_screen, MARGIN};
 use super::{section_label, EditorWindow};
 use crate::actions::{ApplyEquation, EQUATION_CARD_CONTEXT};
 use crate::equation::{rasterise, render_equation, RenderedEquation};
@@ -250,14 +248,7 @@ impl EditorWindow {
         let card = self.equation_card.as_ref()?;
         let frame = self.session.find_shape(card.topic)?.frame;
         let canvas_size = self.canvas_bounds?.size;
-        let viewport = self.session.page().viewport;
-        let (x, y) = viewport.canvas_to_screen((frame.x, frame.y));
-        let topic = Rect {
-            x,
-            y,
-            w: frame.w * viewport.zoom,
-            h: frame.h * viewport.zoom,
-        };
+        let topic = topic_on_screen(&frame, &self.session.page().viewport);
         let window_size = (f32::from(canvas_size.width), f32::from(canvas_size.height));
         let max_height = (window_size.1 - 2. * MARGIN).max(0.);
         let height = card.height.unwrap_or(CARD_HEIGHT_GUESS).min(max_height);
@@ -445,20 +436,11 @@ fn snippet_caret(snippet: &str) -> usize {
         .unwrap_or(snippet.len())
 }
 
-/// Whether topic `topic`, which a card is open on, is still on the active
-/// page's active layer; the card closes once it is not.
-fn card_topic_present(session: &DocumentSession, topic: Uuid) -> bool {
-    session.find_shape(topic).is_some_and(|s| s.topic.is_some())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        card_is_open_on, card_topic_present, equation_to_apply, fitted, snippet_caret, SNIPPETS,
-    };
+    use super::{card_is_open_on, equation_to_apply, fitted, snippet_caret, SNIPPETS};
     use crate::equation::render_equation;
     use gpui_kit::hsla;
-    use mindweave_core::DocumentSession;
 
     #[test]
     fn a_blank_input_removes_the_equation() {
@@ -518,20 +500,5 @@ mod tests {
         assert!(card_is_open_on(Some(a), a));
         assert!(!card_is_open_on(Some(a), b));
         assert!(!card_is_open_on(None, a));
-    }
-
-    #[test]
-    fn card_closes_when_its_topic_goes() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut s = DocumentSession::create(dir.path().join("e.mindweave")).unwrap();
-        let id = s.add_central_topic((0., 0.));
-        assert!(card_topic_present(&s, id));
-        s.delete_with_branches(&[id]);
-        assert!(!card_topic_present(&s, id));
-        assert!(s.undo());
-        assert!(card_topic_present(&s, id));
-        // Another page does not show it either.
-        s.add_page();
-        assert!(!card_topic_present(&s, id));
     }
 }

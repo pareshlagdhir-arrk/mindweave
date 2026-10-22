@@ -357,6 +357,42 @@ fn draw(window: &mut Window, cx: &mut App, text: &mut TextPaint, job: &TextJob, 
     paint_markers(window, cx, job, &markers, at);
 }
 
+/// Paints `text`, laid out for object `id` wrapped at `wrap`, upright at
+/// zoom 1 with its top-left corner at `origin` (window coordinates), Auto
+/// text in `color`: a note in its card.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_upright_text(
+    window: &mut Window,
+    cx: &mut App,
+    layouts: &mut TextLayoutCache,
+    glyphs: &mut GlyphOutlines,
+    id: Uuid,
+    text: &RichText,
+    wrap: Option<f32>,
+    color: Hsla,
+    origin: Point<Pixels>,
+) {
+    let job = TextJob {
+        id,
+        text,
+        wrap,
+        zoom: 1.,
+        color,
+        greek: false,
+    };
+    let at = Placement {
+        centre: origin,
+        offset: (0., 0.),
+        angle: 0.,
+        clip: None,
+        mask: None,
+    };
+    let entry = layouts.entry(window, id, text, wrap, 1., color);
+    let markers = entry.layout.list_markers();
+    paint_layout(window, cx, entry, glyphs, &at);
+    paint_markers(window, cx, &job, &markers, &at);
+}
+
 /// Paints `job`'s list `markers` (see `TextLayout::list_markers`) placed
 /// by `at`, each ending [`MARKER_GAP`] before its item's text, in the
 /// item's size, weight and colour. A turned text's markers sit at their

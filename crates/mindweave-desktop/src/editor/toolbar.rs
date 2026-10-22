@@ -339,10 +339,17 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
                     |this, window, cx| this.add_topic(NewTopic::After, window, cx),
                 ),
             ];
-            let content: [(&'static str, &str, &'static str, Run); 1] =
-                [("mm-equation", "sigma", "Equation", |this, window, cx| {
+            let content: [(&'static str, &str, &'static str, Run); 2] = [
+                ("mm-equation", "sigma", "Equation", |this, window, cx| {
                     this.edit_selected_equation(window, cx)
-                })];
+                }),
+                (
+                    "mm-note",
+                    "sticky-note",
+                    "Note (⌘⇧N)",
+                    |this, window, cx| this.edit_selected_note(window, cx),
+                ),
+            ];
             let marks: [(&'static str, &str, &'static str, Run); 2] = [
                 (
                     "mm-summary",

@@ -13,6 +13,7 @@ mod layers_panel;
 mod line_properties;
 mod link_popover;
 mod mindmap_edit;
+mod note_card;
 mod page_tabs;
 mod properties_panel;
 mod shape_gallery;
@@ -49,8 +50,8 @@ use mindweave_core::{
 // `Copy` is used by path: importing it would hide the derivable trait.
 use crate::actions::{
     self, AddCentralTopic, AddSiblingBefore, AddSubtopic, AddSummary, BringForward, BringToFront,
-    Cancel, CloseWindow, Cut, Delete, Duplicate, EditEquation, EditLabel, EditText, Group,
-    NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp,
+    Cancel, CloseWindow, Cut, Delete, Duplicate, EditEquation, EditLabel, EditNote, EditText,
+    Group, NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp,
     NudgeUpFar, Paste, Redo, Save, SelectAll, SendBackward, SendToBack, ToggleBoundary,
     ToggleIcons, ToggleLayers, ToggleLeftSidebar, ToggleProperties, ToolEllipse, ToolHand,
     ToolLine, ToolPointer, ToolRectangle, ToolRelationship, ToolText, Undo, Ungroup,
@@ -250,6 +251,9 @@ pub struct EditorWindow {
     session_gesture: SessionGesture,
     /// The equation card, when open.
     equation_card: Option<equation_card::EquationCard>,
+    /// The note card, when open: it shows the text-editing session on its
+    /// topic's note.
+    note_card: Option<note_card::NoteCard>,
     /// The link popover (Cmd+K) open on the text being edited.
     link_popover: Option<link_popover::LinkPopover>,
     /// The text being edited on the canvas, if any.
@@ -324,6 +328,7 @@ impl EditorWindow {
             glyph_outlines: GlyphOutlines::default(),
             session_gesture: SessionGesture::default(),
             equation_card: None,
+            note_card: None,
             link_popover: None,
             text_edit: None,
             text_ui: TextEditUi::default(),
@@ -844,6 +849,10 @@ impl EditorWindow {
         self.edit_selected_equation(window, cx);
     }
 
+    fn on_edit_note(&mut self, _: &EditNote, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit_selected_note(window, cx);
+    }
+
     fn on_tool_relationship(
         &mut self,
         _: &ToolRelationship,
@@ -1160,6 +1169,8 @@ impl EditorWindow {
             .min_h_0()
             .child(canvas::canvas(cx.entity(), self.session.page()))
             .children(self.render_equation_card(cx))
+            .children(self.render_note_card(cx))
+            .children(self.render_note_tooltip(cx))
             .children(self.render_link_popover(cx))
             .on_drop(
                 cx.listener(|this, drag: &icons_panel::IconDrag, window, cx| {
@@ -1379,6 +1390,7 @@ impl Render for EditorWindow {
         self.sync_properties(window, cx);
         self.sync_topic_fields(window, cx);
         self.sync_equation_card(window, cx);
+        self.sync_note_card(window, cx);
 
         let (show_layers, show_properties, show_icons) = {
             let settings = &cx.global::<AppState>().settings;
@@ -1478,6 +1490,7 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_add_summary))
             .on_action(cx.listener(Self::on_toggle_boundary))
             .on_action(cx.listener(Self::on_edit_equation))
+            .on_action(cx.listener(Self::on_edit_note))
             .on_action(cx.listener(Self::on_tool_relationship))
             .on_action(cx.listener(Self::on_tool_rectangle))
             .on_action(cx.listener(Self::on_tool_ellipse))

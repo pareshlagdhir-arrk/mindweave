@@ -644,17 +644,23 @@ impl EditorWindow {
         }
     }
 
-    /// Left mouse-down at canvas point `at` with the Pointer tool: grabs a
-    /// selection handle, or selects and starts moving a shape, or starts a
+    /// Left mouse-down at canvas point `at` with the Pointer tool: opens a
+    /// topic's note card or link from its badge, or grabs a selection handle, or selects and starts moving a shape, or starts a
     /// marquee.
     pub(super) fn begin_pointer_press(
         &mut self,
         at: Pt,
         modifiers: Modifiers,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // A gesture whose mouse-up was missed ends as it would have.
         self.finish_gesture(None, modifiers, cx);
+        // A topic's note badge opens its note card.
+        if let Some(topic) = self.note_badge_at(at) {
+            self.open_note_card(topic, window, cx);
+            return;
+        }
         // A topic's link badge opens its link.
         if let Some(link) = self.link_badge_at(at) {
             cx.open_url(&link);

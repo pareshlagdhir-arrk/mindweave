@@ -416,7 +416,8 @@ pub(super) struct TextFields {
     size_typed: bool,
     /// Wheel travel over the size field not yet turned into a step.
     wheel_carry: f32,
-    palette: Entity<ColorPalette>,
+    /// The colour palette, shared with the note card's colour button.
+    pub(super) palette: Entity<ColorPalette>,
     /// The palette has previewed a colour drag since it opened.
     previewing: bool,
     /// The undo step grouping size steps.
@@ -748,6 +749,10 @@ impl EditorWindow {
                 let previewing = self.properties.text.previewing;
                 let change = TextChange::Style(StyleChange::Color(color));
                 self.apply_text_change(change, previewing, window, cx);
+                // Typing goes back to the note in its card.
+                if self.note_card.is_some() {
+                    self.focus_handle.focus(window, cx);
+                }
             }
             ColorPick::Preview(hex) => {
                 self.properties.text.previewing = true;

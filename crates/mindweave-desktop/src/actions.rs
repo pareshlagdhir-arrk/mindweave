@@ -73,6 +73,8 @@ actions!(
         EditEquation,
         /// Cmd+Return in the equation card: Done.
         ApplyEquation,
+        /// Opens the note card on the one selected topic.
+        EditNote,
         /// F2: edits the selected object's text (Enter adds a sibling to a
         /// selected topic).
         EditLabel,
@@ -224,6 +226,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-[", SendBackward, editor),
         KeyBinding::new("cmd-shift-[", SendToBack, editor),
         KeyBinding::new("cmd-enter", ApplyEquation, Some(EQUATION_FIELD)),
+        KeyBinding::new("cmd-shift-n", EditNote, editor),
+        KeyBinding::new("ctrl-shift-n", EditNote, editor),
     ];
     bindings.extend(text_key_bindings());
     bindings
@@ -347,6 +351,8 @@ mod tests {
             ("cmd-[", "mindweave::SendBackward"),
             ("cmd-shift-[", "mindweave::SendToBack"),
             ("cmd-enter", "mindweave::ApplyEquation"),
+            ("cmd-shift-n", "mindweave::EditNote"),
+            ("ctrl-shift-n", "mindweave::EditNote"),
         ];
         let expected: Vec<(String, &str)> =
             expected.iter().map(|(k, a)| (k.to_string(), *a)).collect();
@@ -478,6 +484,10 @@ mod tests {
         assert_eq!(first("tab", &editing), Some("mindweave::TextIndent"));
         assert_eq!(first("shift-tab", &editing), Some("mindweave::TextOutdent"));
         assert_eq!(first("tab", &shapes), Some("mindweave::AddSubtopic"));
+        // Cmd+Shift+N opens the note card from the shapes, not while
+        // editing text.
+        assert_eq!(first("cmd-shift-n", &shapes), Some("mindweave::EditNote"));
+        assert_eq!(first("cmd-shift-n", &editing), None);
         // No binding without a context shares a key with a text key.
         let text_keys: Vec<String> = text
             .iter()

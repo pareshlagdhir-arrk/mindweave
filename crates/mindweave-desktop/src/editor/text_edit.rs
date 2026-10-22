@@ -57,8 +57,6 @@ pub enum EditTarget {
     /// The label of a shape, or a text box's text.
     Label(Uuid),
     /// The note of a topic.
-    // Opened by the note card (Task 9).
-    #[allow(dead_code)]
     Note(Uuid),
 }
 
@@ -1306,6 +1304,11 @@ impl EditorWindow {
         let Some(edit) = self.text_edit.take() else {
             return;
         };
+        // The note card shows a note's session, so it closes with it.
+        if let EditTarget::Note(_) = edit.target {
+            self.note_card = None;
+            self.note_geometry = None;
+        }
         self.link_popover = None;
         self.text_ui = TextEditUi::default();
         let scope = self.selection_scope();
@@ -1448,6 +1451,73 @@ impl EditorWindow {
         }));
     }
 
+    /// Screen point `local` (pixels from the canvas's top left) where the
+    /// text being edited places its points: a canvas point, but for a note
+    /// those pixels (its card shows it at zoom 1; see
+    /// [`EditorWindow::note_geometry`]).
+    pub(super) fn edit_point(&self, local: (f32, f32)) -> Pt {
+        match self.text_edit.as_ref().map(|e| e.target) {
+            Some(EditTarget::Note(_)) => local,
+            _ => self.to_canvas(local),
+        }
+    }
+
+    /// Paints the selection, the text being composed and the caret of the
+    /// note being edited, laid out at zoom 1 with its top-left corner at
+    /// `origin` (window coordinates): in the note card, over its text.
+    pub(super) fn paint_note_marks(
+        &mut self,
+        origin: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(edit) = self.text_edit.as_ref() else {
+            return;
+        };
+        let target = edit.target;
+        if !matches!(target, EditTarget::Note(_)) {
+            return;
+        }
+        let theme = cx.theme();
+        let (selection_color, caret_color, color) =
+            (theme.selection, theme.caret, theme.popover_foreground);
+        let Some((text, wrap)) = target_text(&self.session, target) else {
+            return;
+        };
+        let Some(layout) = self.text_layouts.cached(target.layout_id(), &text, wrap) else {
+            return;
+        };
+        let paint = |window: &mut Window, r: Rect, color: Hsla| {
+            let at = point(origin.x + px(r.x), origin.y + px(r.y));
+            window.paint_quad(fill(Bounds::new(at, size(px(r.w), px(r.h))), color));
+        };
+        let sel = edit.selection();
+        if !sel.is_empty() {
+            for r in layout.selection_rects(sel.clone()) {
+                paint(window, r, selection_color);
+            }
+        }
+        if let Some(marked) = edit.marked.clone() {
+            for r in layout.selection_rects(marked) {
+                let bar = Rect {
+                    y: r.y + r.h - MARKED_UNDERLINE_PX,
+                    h: MARKED_UNDERLINE_PX,
+                    ..r
+                };
+                paint(window, bar, color);
+            }
+        }
+        if sel.is_empty() && self.text_ui.caret_visible && self.focus_handle.is_focused(window) {
+            let r = layout.caret_rect(edit.caret);
+            let caret = Rect {
+                x: r.x - CARET_PX / 2.,
+                w: CARET_PX,
+                ..r
+            };
+            paint(window, caret, caret_color);
+        }
+    }
+
     /// The target's caret position under canvas point `at`.
     fn text_offset_at(&mut self, at: Pt) -> Option<usize> {
         let (geometry, layout) = self.edit_layout()?;
@@ -1577,8 +1647,10 @@ impl EditorWindow {
         let Some(edit) = self.text_edit.as_ref() else {
             return;
         };
-        // A note is painted in its card.
+        // A note is painted in its card, after the canvas: its layout is
+        // kept for it.
         let EditTarget::Label(id) = edit.target else {
+            self.text_layouts.keep(edit.target.layout_id());
             return;
         };
         let theme = cx.theme();
@@ -1656,9 +1728,11 @@ impl EditorWindow {
 
     /// The corners (top left, bottom right) in screen pixels relative to the
     /// canvas of the first line of the byte `range` of the text being
-    /// edited (or of the caret at its start), around the turned box.
+    /// edited (or of the caret at its start), around the turned box. A
+    /// note's geometry is in those pixels already (its card shows it).
     pub(super) fn range_bounds(&mut self, range: Range<usize>) -> Option<((f32, f32), (f32, f32))> {
         let vp = self.session.page().viewport;
+        let note = matches!(self.text_edit.as_ref()?.target, EditTarget::Note(_));
         let (geometry, layout) = self.edit_layout()?;
         let r = layout
             .selection_rects(range.clone())
@@ -1671,7 +1745,14 @@ impl EditorWindow {
             (r.x + r.w, r.y + r.h),
             (r.x, r.y + r.h),
         ]
-        .map(|p| vp.canvas_to_screen(geometry.frame.to_canvas(p)));
+        .map(|p| {
+            let p = geometry.frame.to_canvas(p);
+            if note {
+                p
+            } else {
+                vp.canvas_to_screen(p)
+            }
+        });
         let (mut lo, mut hi) = (corners[0], corners[0]);
         for (x, y) in corners {
             lo = (lo.0.min(x), lo.1.min(y));
@@ -1859,11 +1940,7 @@ impl EntityInputHandler for EditorWindow {
     ) -> Option<usize> {
         let bounds = self.canvas_bounds?;
         let local = point - bounds.origin;
-        let at = self
-            .session
-            .page()
-            .viewport
-            .screen_to_canvas((f32::from(local.x), f32::from(local.y)));
+        let at = self.edit_point((f32::from(local.x), f32::from(local.y)));
         let offset = self.text_offset_at(at)?;
         let plain = self.edited_plain()?;
         Some(byte_to_utf16(&plain, offset))
