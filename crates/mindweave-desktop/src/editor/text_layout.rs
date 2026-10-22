@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
 
 use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
-use mindweave_core::text::{HAlign, RichText, RunStyle, LINE_BREAK};
+use mindweave_core::text::{HAlign, ListItem, ListKind, RichText, RunStyle, LINE_BREAK};
 use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 
@@ -33,6 +33,30 @@ const CARET_WIDTH_PX: f32 = 1.;
 /// Width added to a selection that continues past the end of a line, as a
 /// fraction of the line height.
 const LINE_END_SELECTION: f32 = 0.25;
+/// How far a list item's text is indented per level (level 0 is one
+/// step in), in canvas units.
+pub const LIST_INDENT: f32 = 18.;
+/// Bullet glyphs by list level.
+const BULLETS: [&str; 3] = ["•", "◦", "▪"];
+
+/// How far a paragraph in list item `item` (none: a plain paragraph) is
+/// indented, in canvas units: [`LIST_INDENT`] × (level + 1).
+pub(super) fn list_indent(item: Option<ListItem>) -> f32 {
+    item.map_or(0., |l| LIST_INDENT * (f32::from(l.level) + 1.))
+}
+
+/// The marker of paragraph `paragraph` of `text`: a bullet by its level,
+/// or its number (`"3."`); `None` for a plain paragraph.
+pub(super) fn list_marker(text: &RichText, paragraph: usize) -> Option<String> {
+    let item = text.paragraphs.get(paragraph)?.list?;
+    match item.kind {
+        ListKind::Bullet => {
+            let level = usize::from(item.level).min(BULLETS.len() - 1);
+            Some(BULLETS[level].to_string())
+        }
+        ListKind::Numbered => text.list_number(paragraph).map(|n| format!("{n}.")),
+    }
+}
 
 /// Text of one font size on one line, shaped by gpui.
 pub(super) struct Piece {
@@ -80,9 +104,19 @@ pub(super) struct Line {
     /// Width of the visible text (trailing whitespace hangs).
     visible_width: f32,
     align: HAlign,
+    /// A list item's indent, in pixels (see [`list_indent`]).
+    pub indent: f32,
+    /// The list marker drawn before the line: on a list item's first line.
+    pub marker: Option<String>,
 }
 
 impl Line {
+    /// Where the line starts in a layout `width` pixels wide: after its
+    /// indent, placed by its alignment in the width left.
+    fn start_x(&self, width: f32) -> f32 {
+        self.indent + align_offset(self.align, width - self.indent, self.visible_width)
+    }
+
     /// Pen position of byte `offset` from the layout's left edge.
     fn x_of(&self, offset: usize) -> f32 {
         let piece = self.pieces.iter().rev().find(|p| p.start <= offset);
@@ -105,8 +139,9 @@ impl TextLayout {
     /// Lays out `text` for painting at `zoom`, wrapped at `wrap_width`
     /// canvas units (`None`: only at line and paragraph breaks). Runs
     /// without a colour use `default_color`, and its alpha applies to every
-    /// run. Families that are not installed are drawn in the default font
-    /// and passed to `missing_font`.
+    /// run; links are drawn underlined in `link_color`. List items are
+    /// indented (see [`list_indent`]). Families that are not installed are
+    /// drawn in the default font and passed to `missing_font`.
     ///
     /// Line breaks and the size come from a layout at zoom 1, so they do
     /// not change with the zoom; at another zoom the same lines are shaped
@@ -117,28 +152,22 @@ impl TextLayout {
         wrap_width: Option<f32>,
         zoom: f32,
         default_color: Hsla,
+        link_color: Hsla,
         missing_font: &mut dyn FnMut(&str),
     ) -> TextLayout {
+        let colors = (default_color, link_color);
         let zoom = if zoom.is_finite() && zoom > 0. {
             zoom
         } else {
             1.
         };
         let wrap = wrap_width.map(|w| w.max(0.));
-        let reference = Self::build(window, text, wrap, 1., default_color, missing_font, None);
+        let reference = Self::build(window, text, wrap, 1., colors, missing_font, None);
         if zoom == 1. {
             return reference;
         }
         let breaks: Vec<Range<usize>> = reference.lines.iter().map(|l| l.range.clone()).collect();
-        let mut zoomed = Self::build(
-            window,
-            text,
-            wrap,
-            zoom,
-            default_color,
-            &mut |_| {},
-            Some(&breaks),
-        );
+        let mut zoomed = Self::build(window, text, wrap, zoom, colors, &mut |_| {}, Some(&breaks));
         // Vertical metrics and the box come from the reference, scaled.
         zoomed.width = reference.width * zoom;
         zoomed.height = reference.height * zoom;
@@ -151,19 +180,20 @@ impl TextLayout {
         }
         let width = zoomed.width;
         for line in &mut zoomed.lines {
-            line.x = align_offset(line.align, width, line.visible_width);
+            line.x = line.start_x(width);
         }
         zoomed
     }
 
     /// Lays out `text` at `zoom` with `wrap` in canvas units, breaking
     /// lines itself or at `forced` (line ranges of a reference layout).
+    /// `colors`: the default and link colours.
     fn build(
         window: &mut Window,
         text: &RichText,
         wrap: Option<f32>,
         zoom: f32,
-        default_color: Hsla,
+        (default_color, link_color): (Hsla, Hsla),
         missing_font: &mut dyn FnMut(&str),
         forced: Option<&[Range<usize>]>,
     ) -> TextLayout {
@@ -175,15 +205,20 @@ impl TextLayout {
             installed,
             default_family,
             default_color,
+            link_color,
             zoom,
             wrap: wrap.map(|w| w * zoom),
             forced,
             missing_font,
             lines: Vec::new(),
             y: 0.,
+            indent: 0.,
+            marker: None,
         };
         let mut offset = 0;
-        for paragraph in &text.paragraphs {
+        for (index, paragraph) in text.paragraphs.iter().enumerate() {
+            builder.indent = list_indent(paragraph.list) * zoom;
+            builder.marker = list_marker(text, index);
             let mut plain = String::new();
             let mut styles = Vec::with_capacity(paragraph.runs.len());
             for run in &paragraph.runs {
@@ -206,11 +241,14 @@ impl TextLayout {
             offset += plain.len() + 1;
         }
         let mut lines = builder.lines;
-        let width = builder
-            .wrap
-            .unwrap_or_else(|| lines.iter().map(|l| l.visible_width).fold(0., f32::max));
+        let width = builder.wrap.unwrap_or_else(|| {
+            lines
+                .iter()
+                .map(|l| l.indent + l.visible_width)
+                .fold(0., f32::max)
+        });
         for line in &mut lines {
-            line.x = align_offset(line.align, width, line.visible_width);
+            line.x = line.start_x(width);
         }
         TextLayout {
             height: builder.y,
@@ -228,6 +266,19 @@ impl TextLayout {
 
     pub(super) fn lines(&self) -> &[Line] {
         &self.lines
+    }
+
+    /// The list markers to draw, in canvas units from the text's top-left
+    /// corner: where each list item's text starts (the marker goes before
+    /// it), its first line's baseline, and the marker.
+    pub fn list_markers(&self) -> Vec<(f32, f32, String)> {
+        self.lines
+            .iter()
+            .filter_map(|l| {
+                let marker = l.marker.clone()?;
+                Some((l.x / self.zoom, (l.y + l.baseline) / self.zoom, marker))
+            })
+            .collect()
     }
 
     /// Stand-ins for the lines of too-small text, in canvas units from the
@@ -353,6 +404,7 @@ struct Builder<'a> {
     installed: Arc<HashSet<String>>,
     default_family: SharedString,
     default_color: Hsla,
+    link_color: Hsla,
     zoom: f32,
     /// Wrap width in pixels.
     wrap: Option<f32>,
@@ -362,6 +414,10 @@ struct Builder<'a> {
     lines: Vec<Line>,
     /// Top of the next line, in pixels.
     y: f32,
+    /// The current paragraph's list indent, in pixels.
+    indent: f32,
+    /// The current paragraph's list marker, until its first line takes it.
+    marker: Option<String>,
 }
 
 /// Text of one size on a hard line, shaped whole to measure it.
@@ -432,7 +488,12 @@ impl Builder<'_> {
 
     fn run(&mut self, style: &RunStyle, len: usize) -> TextRun {
         let family = self.family(style);
-        text_run(style, len, family, self.default_color, self.zoom)
+        let run = text_run(style, len, family, self.default_color, self.zoom);
+        if style.link.is_some() {
+            link_run(run, self.link_color, style.size * self.zoom)
+        } else {
+            run
+        }
     }
 
     fn shape(&self, text: &str, size: f32, runs: &[TextRun]) -> ShapedLine {
@@ -518,7 +579,7 @@ impl Builder<'_> {
         };
         let breaks = match self.forced {
             Some(lines) => forced_breaks(lines, base, text.len()),
-            None => break_lines(text, &pen, self.wrap),
+            None => break_lines(text, &pen, self.wrap.map(|w| (w - self.indent).max(0.))),
         };
         // Lines cut each segment's shaping into pieces, in order.
         let mut cursors: Vec<SegmentCursor> = segments.iter().map(SegmentCursor::new).collect();
@@ -598,6 +659,8 @@ impl Builder<'_> {
             pieces,
             visible_width,
             align,
+            indent: self.indent,
+            marker: self.marker.take(),
         });
         self.y += height;
     }
@@ -748,10 +811,14 @@ pub(super) fn text_hash(text: &RichText) -> u64 {
         s.size.to_bits().hash(h);
         (s.bold, s.italic, s.underline, s.strike).hash(h);
         s.color.hash(h);
+        s.link.hash(h);
     }
     let mut h = DefaultHasher::new();
     for p in &text.paragraphs {
         (p.align as u8).hash(&mut h);
+        p.list
+            .map(|l| (l.kind == ListKind::Numbered, l.level))
+            .hash(&mut h);
         style(&p.style, &mut h);
         p.runs.len().hash(&mut h);
         for run in &p.runs {
@@ -792,6 +859,8 @@ impl ContentKey {
 pub(super) struct CacheEntry {
     content: ContentKey,
     zoom: f32,
+    /// The colour its links are drawn in.
+    link_color: Hsla,
     pub layout: TextLayout,
     /// Glyph outlines last painted rotated (see `text_paint`).
     pub rotated: Option<RotatedPaths>,
@@ -806,15 +875,18 @@ pub struct TextLayoutCache {
     frame: u64,
     /// The fonts this frame's layouts use (see [`fonts_key`]).
     fonts: u64,
+    /// The colour this frame's links are drawn in.
+    link_color: Hsla,
 }
 
 impl TextLayoutCache {
-    /// Starts a frame; entries not used by [`Self::end_frame`] are dropped.
-    /// A change of the default font or of the installed fonts lays every
-    /// text out again.
-    pub fn begin_frame(&mut self, window: &Window) {
+    /// Starts a frame whose links are drawn in `link_color`; entries not
+    /// used by [`Self::end_frame`] are dropped. A change of the default
+    /// font or of the installed fonts lays every text out again.
+    pub fn begin_frame(&mut self, window: &Window, link_color: Hsla) {
         self.frame = self.frame.wrapping_add(1);
         self.fonts = fonts_key(window);
+        self.link_color = link_color;
     }
 
     /// Drops the entries not used since [`Self::begin_frame`].
@@ -882,7 +954,7 @@ impl TextLayoutCache {
         let hit = self
             .entries
             .get(&id)
-            .is_some_and(|e| e.content == key && e.zoom == zoom);
+            .is_some_and(|e| e.content == key && e.zoom == zoom && e.link_color == self.link_color);
         if !hit {
             return self.insert(window, id, key, text, wrap, zoom, color);
         }
@@ -902,10 +974,12 @@ impl TextLayoutCache {
         zoom: f32,
         color: Hsla,
     ) -> &mut CacheEntry {
-        let layout = TextLayout::layout(window, text, wrap, zoom, color, &mut |_| {});
+        let link_color = self.link_color;
+        let layout = TextLayout::layout(window, text, wrap, zoom, color, link_color, &mut |_| {});
         let entry = CacheEntry {
             content,
             zoom,
+            link_color,
             layout,
             rotated: None,
             used: self.frame,
@@ -976,6 +1050,25 @@ pub(super) fn text_run(
             thickness,
             color: Some(color),
         }),
+    }
+}
+
+/// `run`, a link's text `size_px` pixels big, in `link_color` (with the
+/// run's alpha) and underlined.
+pub(super) fn link_run(run: TextRun, link_color: Hsla, size_px: f32) -> TextRun {
+    let color = link_color.opacity(run.color.a);
+    TextRun {
+        color,
+        underline: Some(UnderlineStyle {
+            thickness: px((size_px * DECORATION_THICKNESS).max(1.)),
+            color: Some(color),
+            wavy: false,
+        }),
+        strikethrough: run.strikethrough.map(|s| StrikethroughStyle {
+            color: Some(color),
+            ..s
+        }),
+        ..run
     }
 }
 
@@ -1138,11 +1231,13 @@ pub(super) fn align_offset(align: HAlign, available: f32, width: f32) -> f32 {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        align_offset, break_lines, canvas_default_family, forced_breaks, hard_lines, max_font_size,
-        resolve_family, should_greek, size_segments, text_run, visible_end, ContentKey,
-        InstalledFonts, PenIndex,
+        align_offset, break_lines, canvas_default_family, forced_breaks, hard_lines, link_run,
+        list_indent, list_marker, max_font_size, resolve_family, should_greek, size_segments,
+        text_hash, text_run, visible_end, ContentKey, InstalledFonts, Line, PenIndex, TextLayout,
+        LIST_INDENT,
     };
     use gpui_kit::{FontStyle, FontWeight, Hsla, SharedString};
+    use mindweave_core::text::{ListItem, ListKind};
     use mindweave_core::{HAlign, RichText, RunStyle};
     use std::collections::HashSet;
 
@@ -1412,5 +1507,104 @@ mod tests {
         assert_eq!(align_offset(HAlign::Right, 100., 40.), 60.);
         // Wider than the space: no negative offset.
         assert_eq!(align_offset(HAlign::Right, 10., 40.), 0.);
+    }
+
+    #[test]
+    fn list_markers_number_and_indent() {
+        let mut text = RichText::new(RunStyle::default(), HAlign::Left);
+        text.insert(0, "a\nb\nc\nd", &RunStyle::default());
+        let items = [
+            Some((ListKind::Numbered, 0)),
+            Some((ListKind::Numbered, 0)),
+            Some((ListKind::Bullet, 1)),
+            None,
+        ];
+        for (p, item) in text.paragraphs.iter_mut().zip(items) {
+            p.list = item.map(|(kind, level)| ListItem { kind, level });
+        }
+        let markers: Vec<_> = (0..4).map(|i| list_marker(&text, i)).collect();
+        assert_eq!(
+            markers,
+            [Some("1.".into()), Some("2.".into()), Some("◦".into()), None]
+        );
+        let indents: Vec<f32> = text
+            .paragraphs
+            .iter()
+            .map(|p| list_indent(p.list))
+            .collect();
+        assert_eq!(indents, [18., 18., 36., 0.]);
+        assert_eq!(LIST_INDENT, 18.);
+        // Bullets by level; deeper than the last level keeps its glyph.
+        let bullet = |level| {
+            let mut t = RichText::new(RunStyle::default(), HAlign::Left);
+            t.paragraphs[0].list = Some(ListItem {
+                kind: ListKind::Bullet,
+                level,
+            });
+            list_marker(&t, 0)
+        };
+        assert_eq!(
+            [bullet(0), bullet(1), bullet(2)],
+            [Some("•".into()), Some("◦".into()), Some("▪".into())]
+        );
+
+        // A layout reports the marker of each list paragraph's first line
+        // where its text starts, on its baseline, in canvas units.
+        let line = |x: f32, y: f32, marker: Option<&str>| Line {
+            range: 0..0,
+            click_end: 0,
+            x,
+            y,
+            height: 40.,
+            baseline: 30.,
+            pieces: Vec::new(),
+            visible_width: 0.,
+            align: HAlign::Left,
+            indent: x,
+            marker: marker.map(String::from),
+        };
+        let layout = TextLayout {
+            lines: vec![
+                line(36., 0., None),
+                line(72., 40., Some("◦")),
+                line(72., 80., None),
+            ],
+            width: 200.,
+            height: 120.,
+            zoom: 2.,
+        };
+        assert_eq!(layout.list_markers(), [(36., 35., "◦".to_string())]);
+    }
+
+    #[test]
+    fn links_are_underlined_in_the_link_colour() {
+        let blue = gpui_kit::blue();
+        let run = text_run(
+            &RunStyle::default(),
+            4,
+            "X".into(),
+            black().opacity(0.5),
+            2.,
+        );
+        let run = link_run(run, blue, 32.);
+        assert_eq!(run.color, blue.opacity(0.5));
+        let underline = run.underline.unwrap();
+        assert_eq!(underline.color, Some(run.color));
+        assert_eq!(f32::from(underline.thickness), 2.);
+        assert!(run.strikethrough.is_none());
+    }
+
+    #[test]
+    fn lists_and_links_lay_text_out_again() {
+        let text = RichText::new(RunStyle::default(), HAlign::Left);
+        let mut listed = text.clone();
+        listed.paragraphs[0].list = Some(ListItem {
+            kind: ListKind::Bullet,
+            level: 0,
+        });
+        assert_ne!(text_hash(&text), text_hash(&listed));
+        let mut linked = text.clone();
+        linked.paragraphs[0].style.link = Some("https://a.b".into());
+        assert_ne!(text_hash(&text), text_hash(&linked));
     }
 }

@@ -32,7 +32,7 @@ use uuid::Uuid;
 use super::color_palette::{palette_popover, ColorPalette, ColorPick, PaletteColor};
 use super::properties_panel::{field_row, FIELD_GAP, SWATCH_SIZE};
 use super::shape_properties::{format_number, SECTION_GAP};
-use super::text_edit::{TextEditor, Toggle};
+use super::text_edit::{EditTarget, TextEditor, Toggle};
 use super::text_layout::{installed_font_families, refresh_installed_fonts};
 use super::{hex_to_hsla, parse_number, section_label, EditorWindow, GestureOwner, SessionGesture};
 use crate::app_state::AppState;
@@ -513,7 +513,11 @@ impl EditorWindow {
     /// What the Text section shows now.
     fn text_summary(&self) -> Option<TextSummary> {
         match &self.text_edit {
-            Some(edit) => summarize_editing(self.session.find_shape(edit.target)?, edit),
+            Some(edit) => match edit.target {
+                EditTarget::Label(id) => summarize_editing(self.session.find_shape(id)?, edit),
+                // A note's formatting is the note card's, not this section's.
+                EditTarget::Note(_) => None,
+            },
             None => summarize_objects(&self.shapes_among(&self.selection)),
         }
     }
@@ -606,10 +610,10 @@ impl EditorWindow {
                 self.with_text(window, cx, |ed, text, _| ed.set_align(text, align));
             }
             TextChange::VAlign(v) => {
-                self.update_session(
-                    |s| apply_to_objects(s, &[target], &TextChange::VAlign(v)),
-                    cx,
-                );
+                // Only a label has a vertical alignment.
+                if let EditTarget::Label(id) = target {
+                    self.update_session(|s| apply_to_objects(s, &[id], &TextChange::VAlign(v)), cx);
+                }
             }
         }
         self.properties.text.synced = None;

@@ -127,6 +127,14 @@ actions!(
         TextItalic,
         TextUnderline,
         TextStrike,
+        /// Bulleted and numbered lists on or off for the paragraphs the
+        /// selection touches (no keys: the note card's buttons).
+        TextToggleBullets,
+        TextToggleNumbered,
+        /// Tab and Shift+Tab: a list item's level deeper or shallower
+        /// (outside lists the keys go on as before).
+        TextIndent,
+        TextOutdent,
         TextCopy,
         TextCut,
         TextPaste,
@@ -254,6 +262,8 @@ fn text_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-i", TextItalic, text),
         KeyBinding::new("cmd-u", TextUnderline, text),
         KeyBinding::new("cmd-shift-x", TextStrike, text),
+        KeyBinding::new("tab", TextIndent, text),
+        KeyBinding::new("shift-tab", TextOutdent, text),
         KeyBinding::new("cmd-c", TextCopy, text),
         KeyBinding::new("cmd-x", TextCut, text),
         KeyBinding::new("cmd-v", TextPaste, text),
@@ -403,7 +413,7 @@ mod tests {
         let keymap = Keymap::new(key_bindings());
         let editing = stack(&["Root", "Editor TextEditing"]);
         let text = text_key_bindings();
-        assert_eq!(text.len(), 38);
+        assert_eq!(text.len(), 40);
         for binding in &text {
             let (found, pending) = keymap.bindings_for_input(binding.keystrokes(), &editing);
             assert!(!pending);
@@ -455,6 +465,12 @@ mod tests {
             first("cmd-b", &stack(&["Root"])),
             Some("mindweave::ToggleLeftSidebar")
         );
+        // Tab and Shift+Tab change a list item's level while editing (the
+        // editor passes them on outside lists); elsewhere Tab adds a
+        // subtopic.
+        assert_eq!(first("tab", &editing), Some("mindweave::TextIndent"));
+        assert_eq!(first("shift-tab", &editing), Some("mindweave::TextOutdent"));
+        assert_eq!(first("tab", &shapes), Some("mindweave::AddSubtopic"));
         // No binding without a context shares a key with a text key.
         let text_keys: Vec<String> = text
             .iter()
@@ -469,5 +485,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cmd_b_while_editing_a_note_is_bold() {
+        use gpui_kit::{KeyContext, Keymap, Keystroke};
+        // A note being edited gives the editor root the canvas editor's
+        // context, whatever element inside it has focus.
+        let stack: Vec<KeyContext> = ["Root", "Editor TextEditing", "NoteCard"]
+            .iter()
+            .map(|n| KeyContext::parse(n).unwrap())
+            .collect();
+        let keymap = Keymap::new(key_bindings());
+        let cmd_b = [Keystroke::parse("cmd-b").unwrap()];
+        let (found, _) = keymap.bindings_for_input(&cmd_b, &stack);
+        assert_eq!(names(&found), ["mindweave::TextBold"]);
     }
 }

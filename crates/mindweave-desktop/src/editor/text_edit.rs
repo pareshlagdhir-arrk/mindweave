@@ -3,10 +3,12 @@
 //! text input (IME, dead keys) that feeds it.
 //!
 //! [`TextEditor`] holds the session state and edits a copy of the target's
-//! text; [`EditorWindow`] writes each change back to the target through the
+//! text (a shape's label or text, or a topic's note: [`EditTarget`]);
+//! [`EditorWindow`] writes each change back to the target through the
 //! session, inside the gesture the session was begun with, so the whole
 //! session is one document undo step.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -15,6 +17,7 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
+use mindweave_core::text::ListKind;
 use mindweave_core::{
     is_mindweave_payload, is_newer_payload, DocumentSession, EditKind, EditSnapshot, FormatError,
     HAlign, Label, RichText, RunStyle, Shape, StyleChange, StyleSummary, TextHistory, LINE_BREAK,
@@ -42,6 +45,102 @@ const CARET_BLINK: Duration = Duration::from_millis(500);
 const CARET_PX: f32 = 2.;
 /// Thickness of the line under text being composed, in pixels.
 const MARKED_UNDERLINE_PX: f32 = 1.5;
+/// The width a note's text wraps at, in canvas units.
+pub const NOTE_TEXT_WIDTH: f32 = 296.;
+/// Mixed into a topic's id to key its note's layout apart from its label's.
+const NOTE_LAYOUT_KEY: u128 = 0x6e6f_7465;
+
+/// What a text-editing session edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EditTarget {
+    /// The label of a shape, or a text box's text.
+    Label(Uuid),
+    /// The note of a topic.
+    // Opened by the note card (Task 9).
+    #[allow(dead_code)]
+    Note(Uuid),
+}
+
+impl EditTarget {
+    /// The shape whose text is edited.
+    pub fn id(&self) -> Uuid {
+        match *self {
+            EditTarget::Label(id) | EditTarget::Note(id) => id,
+        }
+    }
+
+    /// The id its text is laid out under in the layout cache: a note's
+    /// differs from its topic's label's.
+    pub fn layout_id(&self) -> Uuid {
+        match *self {
+            EditTarget::Label(id) => id,
+            EditTarget::Note(id) => Uuid::from_u128(id.as_u128() ^ NOTE_LAYOUT_KEY),
+        }
+    }
+}
+
+/// The text of `target` in `session` and the width it wraps at, in canvas
+/// units: a missing note is empty. `None` when the shape (or for a note,
+/// the topic, or for a label, the label) is not there.
+pub fn target_text(
+    session: &DocumentSession,
+    target: EditTarget,
+) -> Option<(Cow<'_, RichText>, Option<f32>)> {
+    let shape = session.find_shape(target.id())?;
+    match target {
+        EditTarget::Label(_) => {
+            let text = &shape.label.as_ref()?.text;
+            Some((Cow::Borrowed(text), text_wrap(shape)))
+        }
+        EditTarget::Note(_) => {
+            let note = match &shape.topic.as_ref()?.note {
+                Some(note) => Cow::Borrowed(note),
+                None => Cow::Owned(RichText::new(RunStyle::default(), HAlign::Left)),
+            };
+            Some((note, Some(NOTE_TEXT_WIDTH)))
+        }
+    }
+}
+
+/// Stores `text` as `target`'s text while it is being edited. A note is
+/// kept as typed, even blank, until its session ends.
+pub fn store_target_text(session: &mut DocumentSession, target: EditTarget, text: &RichText) {
+    session.update_shapes(&[target.id()], |shape| match target {
+        EditTarget::Label(_) => {
+            if let Some(label) = shape.label.as_mut() {
+                label.text = text.clone();
+            }
+        }
+        EditTarget::Note(_) => {
+            if let Some(topic) = shape.topic.as_mut() {
+                topic.note = Some(text.clone());
+            }
+        }
+    });
+}
+
+/// The index of the paragraph of `text` holding offset `at`.
+fn paragraph_index(text: &RichText, at: usize) -> usize {
+    let mut start = 0;
+    for (i, p) in text.paragraphs.iter().enumerate() {
+        let end = start + p.runs.iter().map(|r| r.text.len()).sum::<usize>();
+        if at <= end {
+            return i;
+        }
+        start = end + 1;
+    }
+    text.paragraphs.len().saturating_sub(1)
+}
+
+/// The style typing at `at` uses ([`RichText::style_at`]), without the
+/// link of a link the caret ends: typing after a link does not extend it.
+fn typing_style_at(text: &RichText, at: usize) -> RunStyle {
+    let mut style = text.style_at(at);
+    if style.link.is_some() && text.link_at(at) != style.link.as_deref() {
+        style.link = None;
+    }
+    style
+}
 
 /// Byte offset in `text` of UTF-16 offset `n` (inside a surrogate pair:
 /// the character's start; past the end: the end).
@@ -249,10 +348,19 @@ pub enum TextCommand {
     Backspace(bool),
     /// Deletes after the caret; `true`: a word.
     Delete(bool),
+    /// Return: a new paragraph, or in an empty list item, the end of the
+    /// list.
     NewParagraph,
     LineBreak,
     SelectAll,
     Toggle(Toggle),
+    /// Makes the touched paragraphs bulleted or numbered list items, or
+    /// plain again when the first already is one of that kind.
+    ToggleBullets,
+    ToggleNumbered,
+    /// Tab and Shift+Tab in a list item: a level deeper or shallower.
+    Indent,
+    Outdent,
     Copy,
     Cut,
     Paste,
@@ -269,10 +377,10 @@ pub enum Unit {
     Paragraph,
 }
 
-/// One text-editing session on the label or text of shape `target`.
-/// Offsets are byte offsets into the text's `plain()`.
+/// One text-editing session on `target`'s text. Offsets are byte offsets
+/// into the text's `plain()`.
 pub struct TextEditor {
-    pub target: Uuid,
+    pub target: EditTarget,
     pub caret: usize,
     pub anchor: usize,
     /// Text being composed by an input method.
@@ -291,7 +399,7 @@ pub struct TextEditor {
 
 impl TextEditor {
     /// A session on `text` with the caret at its end.
-    pub fn new(target: Uuid, text: &RichText) -> Self {
+    pub fn new(target: EditTarget, text: &RichText) -> Self {
         let caret = text.len();
         TextEditor {
             target,
@@ -357,12 +465,11 @@ impl TextEditor {
     /// Returns the inserted bytes.
     fn splice(&mut self, text: &mut RichText, range: Range<usize>, s: &str) -> Range<usize> {
         let style = self.typing_style.take().unwrap_or_else(|| {
-            let at = if range.is_empty() {
-                range.start
+            if range.is_empty() {
+                typing_style_at(text, range.start)
             } else {
-                text.next_grapheme(range.start)
-            };
-            text.style_at(at)
+                text.style_at(text.next_grapheme(range.start))
+            }
         });
         // Where the text model really cuts: `delete` widens the range to
         // grapheme boundaries and `insert` snaps back to one.
@@ -443,7 +550,7 @@ impl TextEditor {
             let mut style = self
                 .typing_style
                 .take()
-                .unwrap_or_else(|| text.style_at(self.caret));
+                .unwrap_or_else(|| typing_style_at(text, self.caret));
             let flag = which.flag(&mut style);
             *flag = !*flag;
             self.typing_style = Some(style);
@@ -469,7 +576,7 @@ impl TextEditor {
             let mut style = self
                 .typing_style
                 .take()
-                .unwrap_or_else(|| text.style_at(self.caret));
+                .unwrap_or_else(|| typing_style_at(text, self.caret));
             change.apply_to(&mut style);
             self.typing_style = Some(style);
             if !text.paragraph_range(self.caret).is_empty() {
@@ -489,6 +596,54 @@ impl TextEditor {
         text.set_align(self.selection(), align);
         if *text != before.text {
             self.record_style(before, false);
+        }
+    }
+
+    /// Whether the caret is in a list item.
+    pub fn in_list(&self, text: &RichText) -> bool {
+        text.paragraphs[paragraph_index(text, self.caret)]
+            .list
+            .is_some()
+    }
+
+    /// Return: a new paragraph, except that in an empty list item it ends
+    /// the list (the item becomes a plain paragraph), as an undo step.
+    fn new_paragraph(&mut self, text: &mut RichText) {
+        let empty_item = self.selection().is_empty()
+            && self.in_list(text)
+            && text.paragraph_range(self.caret).is_empty();
+        if empty_item {
+            let at = self.caret;
+            self.edit_paragraphs(text, |text| text.set_list(at..at, None));
+            self.typing_style = None;
+        } else {
+            self.type_text(text, "\n");
+        }
+    }
+
+    /// Makes the paragraphs the selection touches list items of `kind`, or
+    /// plain paragraphs when the first is one already, as an undo step.
+    fn toggle_list(&mut self, text: &mut RichText, kind: ListKind) {
+        let sel = self.selection();
+        let first = text.paragraphs[paragraph_index(text, sel.start)].list;
+        let kind = (first.map(|l| l.kind) != Some(kind)).then_some(kind);
+        self.edit_paragraphs(text, |text| text.set_list(sel, kind));
+    }
+
+    /// Changes the level of the list items the selection touches by
+    /// `delta`, as an undo step; plain paragraphs are left alone.
+    fn shift_level(&mut self, text: &mut RichText, delta: i8) {
+        let sel = self.selection();
+        self.edit_paragraphs(text, |text| text.shift_list_level(sel, delta));
+    }
+
+    /// Runs `f`, a change to paragraphs, recording it when it changed the
+    /// text.
+    fn edit_paragraphs(&mut self, text: &mut RichText, f: impl FnOnce(&mut RichText)) {
+        let before = self.snapshot(text);
+        f(text);
+        if *text != before.text {
+            self.history.record(before, EditKind::Other);
         }
     }
 
@@ -740,10 +895,14 @@ impl TextEditor {
             TextCommand::Move(m, extend) => self.motion(text, layout, m, extend),
             TextCommand::Backspace(word) => self.delete_backward(text, word),
             TextCommand::Delete(word) => self.delete_forward(text, word),
-            TextCommand::NewParagraph => self.type_text(text, "\n"),
+            TextCommand::NewParagraph => self.new_paragraph(text),
             TextCommand::LineBreak => self.type_text(text, LINE_BREAK.encode_utf8(&mut [0; 4])),
             TextCommand::SelectAll => self.select(text.len(), 0),
             TextCommand::Toggle(t) => self.toggle(text, t),
+            TextCommand::ToggleBullets => self.toggle_list(text, ListKind::Bullet),
+            TextCommand::ToggleNumbered => self.toggle_list(text, ListKind::Numbered),
+            TextCommand::Indent => self.shift_level(text, 1),
+            TextCommand::Outdent => self.shift_level(text, -1),
             TextCommand::Undo => {
                 self.undo(text);
             }
@@ -800,19 +959,24 @@ pub fn start_new_text_box(
     id
 }
 
-/// Opens a text-editing session's gesture on shape `target` of the active
-/// layer, giving a shape without a label an empty one
-/// ([`Label::new_shape_label`]). Returns `false`, opening nothing, when
-/// there is no such shape.
+/// Opens a text-editing session's gesture on `target`, a shape of the
+/// active layer, giving a shape without a label an empty one
+/// ([`Label::new_shape_label`]); a note's topic is left as it is until
+/// typing. Returns `false`, opening nothing, when there is no such shape
+/// (for a note: no such topic).
 pub fn start_text_session(
     session: &mut DocumentSession,
     gesture: &mut SessionGesture,
-    target: Uuid,
+    target: EditTarget,
 ) -> bool {
-    let Some(shape) = session.find_shape(target) else {
+    let Some(shape) = session.find_shape(target.id()) else {
         return false;
     };
-    let needs_label = shape.label.is_none();
+    let needs_label = match target {
+        EditTarget::Label(_) => shape.label.is_none(),
+        EditTarget::Note(_) if shape.topic.is_some() => false,
+        EditTarget::Note(_) => return false,
+    };
     let began = gesture.begin(session, GestureOwner::Text);
     // A new text box's session opened the gesture already.
     debug_assert!(
@@ -820,43 +984,70 @@ pub fn start_text_session(
         "a text session's gesture is its own"
     );
     if needs_label {
-        session.set_label(target, Some(Label::new_shape_label()));
+        session.set_label(target.id(), Some(Label::new_shape_label()));
     }
     true
 }
 
+/// Whether `target`'s text counts as empty when its session ends or is
+/// saved: an empty label, or a note of only whitespace.
+fn blank(target: EditTarget, text: &RichText) -> bool {
+    match target {
+        EditTarget::Label(_) => text.is_empty(),
+        EditTarget::Note(_) => text.plain().trim().is_empty(),
+    }
+}
+
 /// Ends the text-editing session on `target`: an empty text box is removed
-/// (a new one leaves no undo step), an empty label is cleared, and the
-/// session's edits become one undo step (none when nothing changed).
-/// Returns whether the target is still there.
+/// (a new one leaves no undo step), an empty label is cleared, a blank
+/// note removed ([`DocumentSession::set_topic_note`]), and the session's
+/// edits become one undo step (none when nothing changed). Returns whether
+/// the target's shape is still there.
 pub fn finish_text_session(
     session: &mut DocumentSession,
     gesture: &mut SessionGesture,
-    target: Uuid,
+    target: EditTarget,
 ) -> bool {
-    let empty = |s: &Shape| s.label.as_ref().is_none_or(|l| l.text.is_empty());
-    match session.find_shape(target) {
-        Some(shape) if shape.is_text_box() && empty(shape) => session.remove_shape_silently(target),
-        Some(shape) if shape.label.is_some() && empty(shape) => session.set_label(target, None),
-        _ => {}
+    let id = target.id();
+    match target {
+        EditTarget::Label(_) => {
+            let empty = |s: &Shape| s.label.as_ref().is_none_or(|l| l.text.is_empty());
+            match session.find_shape(id) {
+                Some(shape) if shape.is_text_box() && empty(shape) => {
+                    session.remove_shape_silently(id)
+                }
+                Some(shape) if shape.label.is_some() && empty(shape) => session.set_label(id, None),
+                _ => {}
+            }
+        }
+        EditTarget::Note(_) => {
+            let stored = session
+                .find_shape(id)
+                .and_then(|s| s.topic.as_ref())
+                .and_then(|t| t.note.as_ref());
+            if stored.is_some_and(|note| blank(target, note)) {
+                session.set_topic_note(id, None);
+            }
+        }
     }
     gesture.end(session, GestureOwner::Text);
-    session.find_shape(target).is_some()
+    session.find_shape(id).is_some()
 }
 
 /// Saves `session` while the text-editing session on `target` goes on:
 /// the edits so far become one undo step, the file is written, and a new
 /// gesture collects the edits that follow (the editor keeps its caret,
 /// selection and typing history). `None`, doing nothing, when the target
-/// is gone or its text is empty: an empty text box or label is cleared
-/// only when its session ends, so the caller ends the session first.
+/// is gone or its text is empty: an empty text box or label, or a blank
+/// note, is cleared only when its session ends, so the caller ends the
+/// session first.
 pub fn save_text_session(
     session: &mut DocumentSession,
     gesture: &mut SessionGesture,
-    target: Uuid,
+    target: EditTarget,
 ) -> Option<Result<(), FormatError>> {
-    let shape = session.find_shape(target)?;
-    if shape.label.as_ref().is_none_or(|l| l.text.is_empty()) {
+    let (text, _) = target_text(session, target)?;
+    if blank(target, &text) {
         return None;
     }
     gesture.end(session, GestureOwner::Text);
@@ -918,9 +1109,9 @@ pub fn on_line_label(shape: &Shape, size: Option<(f32, f32)>, at: Pt) -> bool {
 
 /// The target's text placement and click area, as last painted.
 #[derive(Clone, Copy, Debug)]
-struct EditGeometry {
-    frame: TextFrame,
-    area: Area,
+pub struct EditGeometry {
+    pub frame: TextFrame,
+    pub area: Area,
 }
 
 /// A mouse selection in progress.
@@ -951,32 +1142,33 @@ impl EditorWindow {
         self.finish_size_steps(cx);
     }
 
-    /// Starts editing the label (or text) of shape `target` on the active
-    /// layer, with the caret at its end; a shape without a label gets an
-    /// empty one. The session's edits form one undo step. Ends any edit in
-    /// progress first.
+    /// Starts editing `target`, the label (or text) of a shape on the
+    /// active layer or a topic's note, with the caret at its end; a shape
+    /// without a label gets an empty one. The session's edits form one
+    /// undo step. Ends any edit in progress first.
     ///
     /// A new text box is added inside the session's gesture (see
     /// [`start_new_text_box`]), so leaving it empty removes it without an
     /// undo step; no flag for new boxes is needed.
-    pub fn begin_text_edit(&mut self, target: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn begin_text_edit(
+        &mut self,
+        target: EditTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.prepare_text_edit(window, cx);
         let scope = self.selection_scope();
         if !start_text_session(&mut self.session, &mut self.session_gesture, target) {
             return;
         }
         self.prune_selection(scope);
-        self.selection = vec![target];
-        let Some(text) = self
-            .session
-            .find_shape(target)
-            .and_then(|s| s.label.as_ref())
-            .map(|l| l.text.clone())
-        else {
+        self.selection = vec![target.id()];
+        let Some((text, _)) = target_text(&self.session, target) else {
             // Not reached: the session gave the target a label.
             finish_text_session(&mut self.session, &mut self.session_gesture, target);
             return;
         };
+        let text = text.into_owned();
         self.text_edit = Some(TextEditor::new(target, &text));
         self.focus_handle.focus(window, cx);
         self.restart_blink(window, cx);
@@ -998,7 +1190,7 @@ impl EditorWindow {
             return;
         }
         let id = start_new_text_box(&mut self.session, &mut self.session_gesture, at);
-        self.begin_text_edit(id, window, cx);
+        self.begin_text_edit(EditTarget::Label(id), window, cx);
     }
 
     /// A click with the Text tool at canvas point `at`: edits the text of
@@ -1024,7 +1216,7 @@ impl EditorWindow {
         match text_target_at(hit, at) {
             TextTarget::NewBox(at) => self.begin_new_text_box(at, window, cx),
             TextTarget::Existing(id) => {
-                self.begin_text_edit(id, window, cx);
+                self.begin_text_edit(EditTarget::Label(id), window, cx);
                 if self.text_edit.is_some() {
                     self.text_press(at, 1, false, window, cx);
                     // A press, not a drag: the mouse-up may come anywhere.
@@ -1040,14 +1232,14 @@ impl EditorWindow {
         let Some(id) = enter_target(&self.session, &self.selection) else {
             return;
         };
-        self.begin_text_edit(id, window, cx);
+        self.begin_text_edit(EditTarget::Label(id), window, cx);
         self.text_command(TextCommand::SelectAll, window, cx);
     }
 
-    /// Stops editing text: an empty text box is removed and an emptied
-    /// label cleared, the session's edits become one undo step (none when
-    /// nothing changed) and the keys go back to the shapes. The target, if
-    /// still there, becomes the selection.
+    /// Stops editing text: an empty text box is removed, an emptied label
+    /// cleared and a blank note removed, the session's edits become one
+    /// undo step (none when nothing changed) and the keys go back to the
+    /// shapes. The target's shape, if still there, becomes the selection.
     pub fn end_text_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A composition in progress is kept, as its own undo step.
         if self.text_edit.as_ref().is_some_and(|e| e.marked.is_some()) {
@@ -1060,7 +1252,7 @@ impl EditorWindow {
         let scope = self.selection_scope();
         let kept = finish_text_session(&mut self.session, &mut self.session_gesture, edit.target);
         if kept {
-            self.selection = vec![edit.target];
+            self.selection = vec![edit.target.id()];
         }
         self.prune_selection(scope);
         self.focus_handle.focus(window, cx);
@@ -1078,28 +1270,14 @@ impl EditorWindow {
     ) -> Option<R> {
         let edit = self.text_edit.as_mut()?;
         let target = edit.target;
-        let shape = self.session.find_shape(target)?;
-        let wrap = text_wrap(shape);
-        let mut text = shape.label.as_ref()?.text.clone();
+        let (text, wrap) = target_text(&self.session, target)?;
+        let mut text = text.into_owned();
         edit.clamp(&text);
-        let layout = self.text_layouts.cached(target, &text, wrap);
+        let layout = self.text_layouts.cached(target.layout_id(), &text, wrap);
         let result = f(edit, &mut text, layout);
-        let changed = self
-            .session
-            .find_shape(target)
-            .and_then(|s| s.label.as_ref())
-            .is_some_and(|l| l.text != text);
+        let changed = target_text(&self.session, target).is_some_and(|(t, _)| *t != text);
         if changed {
-            self.update_session(
-                |s| {
-                    s.update_shapes(&[target], |shape| {
-                        if let Some(label) = shape.label.as_mut() {
-                            label.text = text.clone();
-                        }
-                    })
-                },
-                cx,
-            );
+            self.update_session(|s| store_target_text(s, target, &text), cx);
         }
         self.restart_blink(window, cx);
         cx.notify();
@@ -1167,6 +1345,24 @@ impl EditorWindow {
         }
     }
 
+    /// Tab or Shift+Tab while editing: `command` (a level change) in a list
+    /// item; elsewhere the key goes on as it did before lists.
+    fn list_level_key(
+        &mut self,
+        command: TextCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let in_list = self.text_edit.as_ref().is_some_and(|ed| {
+            target_text(&self.session, ed.target).is_some_and(|(text, _)| ed.in_list(&text))
+        });
+        if in_list {
+            self.text_command(command, window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
     /// Shows the caret and restarts its blink, so it stays on while typing.
     /// While the editor does not have focus (a Properties field has it)
     /// the caret is hidden and the blink, with its repaints, stops; it
@@ -1199,18 +1395,24 @@ impl EditorWindow {
     }
 
     /// The placement and click area of the text being edited, from its
-    /// current layout, with that layout (`None` before it is laid out).
+    /// current layout, with that layout (`None` before it is laid out). A
+    /// note's placement is the note card's ([`EditorWindow::note_geometry`];
+    /// `None` while there is none).
     fn edit_layout(&mut self) -> Option<(EditGeometry, &TextLayout)> {
-        let edit = self.text_edit.as_ref()?;
-        let shape = self.session.find_shape(edit.target)?;
-        let text = &shape.label.as_ref()?.text;
-        let layout = self
-            .text_layouts
-            .cached(edit.target, text, text_wrap(shape))?;
-        let size = layout.size();
-        let frame = text_frame(shape, size);
-        let area = target_area(shape, size, &frame);
-        Some((EditGeometry { frame, area }, layout))
+        let target = self.text_edit.as_ref()?.target;
+        let (text, wrap) = target_text(&self.session, target)?;
+        let layout = self.text_layouts.cached(target.layout_id(), &text, wrap)?;
+        let geometry = match target {
+            EditTarget::Label(id) => {
+                let shape = self.session.find_shape(id)?;
+                let size = layout.size();
+                let frame = text_frame(shape, size);
+                let area = target_area(shape, size, &frame);
+                EditGeometry { frame, area }
+            }
+            EditTarget::Note(_) => self.note_geometry?,
+        };
+        Some((geometry, layout))
     }
 
     /// Whether canvas point `at` is on the text being edited.
@@ -1291,13 +1493,17 @@ impl EditorWindow {
         let Some(edit) = self.text_edit.as_ref() else {
             return;
         };
+        // A note is painted in its card.
+        let EditTarget::Label(id) = edit.target else {
+            return;
+        };
         let theme = cx.theme();
         let (selection_color, caret_color) = (theme.selection, theme.caret);
         let canvas = canvas_background(
             self.session.page().canvas.background.as_deref(),
             theme.background,
         );
-        let Some(shape) = self.session.find_shape(edit.target) else {
+        let Some(shape) = self.session.find_shape(id) else {
             return;
         };
         let Some(label) = &shape.label else {
@@ -1367,8 +1573,7 @@ impl EditorWindow {
     /// The plain text of the target being edited.
     fn edited_plain(&self) -> Option<String> {
         let edit = self.text_edit.as_ref()?;
-        let shape = self.session.find_shape(edit.target)?;
-        Some(shape.label.as_ref()?.text.plain())
+        Some(target_text(&self.session, edit.target)?.0.plain())
     }
 
     /// `range` (UTF-16, of the edited text) in bytes.
@@ -1424,12 +1629,22 @@ pub(super) fn on_text_actions(root: Div, cx: &mut Context<EditorWindow>) -> Div 
         TextItalic => C::Toggle(Toggle::Italic),
         TextUnderline => C::Toggle(Toggle::Underline),
         TextStrike => C::Toggle(Toggle::Strike),
+        TextToggleBullets => C::ToggleBullets,
+        TextToggleNumbered => C::ToggleNumbered,
         TextCopy => C::Copy,
         TextCut => C::Cut,
         TextPaste => C::Paste,
         TextUndo => C::Undo,
         TextRedo => C::Redo,
         TextExit => C::Exit,
+    )
+    .on_action(
+        cx.listener(|this, _: &TextIndent, window, cx| this.list_level_key(C::Indent, window, cx)),
+    )
+    .on_action(
+        cx.listener(|this, _: &TextOutdent, window, cx| {
+            this.list_level_key(C::Outdent, window, cx)
+        }),
     )
 }
 
@@ -1567,13 +1782,15 @@ mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
         byte_to_utf16, enter_target, finish_text_session, on_line_label, parse_text_payload,
-        pasted, press_hit, save_text_session, start_new_text_box, start_text_session, target_area,
-        text_payload, text_target_at, utf16_to_byte, Lines, Motion, Pasted, TextEditor, TextTarget,
-        Toggle, Unit,
+        pasted, press_hit, save_text_session, start_new_text_box, start_text_session,
+        store_target_text, target_area, target_text, text_payload, text_target_at, utf16_to_byte,
+        EditTarget, Lines, Motion, Pasted, TextCommand, TextEditor, TextTarget, Toggle, Unit,
+        NOTE_TEXT_WIDTH,
     };
     use crate::editor::interaction::hit_shape;
     use crate::editor::{GestureOwner, SessionGesture};
     use mindweave_core::geometry::Frame;
+    use mindweave_core::text::{ListItem, ListKind};
     use mindweave_core::{
         builtin_libraries, DocumentSession, HAlign, Label, LibraryRegistry, RichText, RunStyle,
         Shape, StyleChange, MAX_PASTE_CHARS,
@@ -1588,7 +1805,7 @@ mod tests {
     }
 
     fn editor(text: &RichText) -> TextEditor {
-        TextEditor::new(Uuid::new_v4(), text)
+        TextEditor::new(EditTarget::Label(Uuid::new_v4()), text)
     }
 
     #[test]
@@ -2091,7 +2308,11 @@ mod tests {
         s.add_shapes(vec![text_box]);
         s.save().unwrap();
         let mut gesture = SessionGesture::default();
-        assert!(start_text_session(&mut s, &mut gesture, id));
+        assert!(start_text_session(
+            &mut s,
+            &mut gesture,
+            EditTarget::Label(id)
+        ));
         let set = |s: &mut DocumentSession, t: &str| {
             s.update_shapes(&[id], |sh| sh.label.as_mut().unwrap().text = plain(t));
         };
@@ -2109,7 +2330,7 @@ mod tests {
 
         // Saved: the edits so far are one step, and the session goes on.
         assert!(matches!(
-            save_text_session(&mut s, &mut gesture, id),
+            save_text_session(&mut s, &mut gesture, EditTarget::Label(id)),
             Some(Ok(()))
         ));
         assert!(!s.is_dirty());
@@ -2118,7 +2339,11 @@ mod tests {
         // A further edit makes the document dirty again.
         set(&mut s, "abcd");
         assert!(s.is_dirty());
-        assert!(finish_text_session(&mut s, &mut gesture, id));
+        assert!(finish_text_session(
+            &mut s,
+            &mut gesture,
+            EditTarget::Label(id)
+        ));
         assert!(s.undo());
         assert_eq!(text(&s), "abc");
         assert!(s.undo());
@@ -2131,19 +2356,19 @@ mod tests {
         let id = text_box.id;
         s.add_shapes(vec![text_box]);
         let mut gesture = SessionGesture::default();
-        start_text_session(&mut s, &mut gesture, id);
+        start_text_session(&mut s, &mut gesture, EditTarget::Label(id));
         assert!(matches!(
-            save_text_session(&mut s, &mut gesture, id),
+            save_text_session(&mut s, &mut gesture, EditTarget::Label(id)),
             Some(Ok(()))
         ));
-        finish_text_session(&mut s, &mut gesture, id);
+        finish_text_session(&mut s, &mut gesture, EditTarget::Label(id));
         assert!(!s.is_dirty());
 
         // An empty new text box is not saved: the session must end first.
         let (_dir, mut s) = session();
         let mut gesture = SessionGesture::default();
         let id = start_new_text_box(&mut s, &mut gesture, (0., 0.));
-        assert!(save_text_session(&mut s, &mut gesture, id).is_none());
+        assert!(save_text_session(&mut s, &mut gesture, EditTarget::Label(id)).is_none());
         assert_eq!(gesture.owner(), Some(GestureOwner::Text));
         assert!(s.find_shape(id).is_some());
     }
@@ -2254,7 +2479,7 @@ mod tests {
         let shape = s.find_shape(id).unwrap();
         assert!(shape.is_text_box());
         assert_eq!((shape.frame.x, shape.frame.y), (10., 20.));
-        assert!(!finish_text_session(&mut s, &mut g, id));
+        assert!(!finish_text_session(&mut s, &mut g, EditTarget::Label(id)));
         assert!(s.find_shape(id).is_none());
         assert!(!s.can_undo());
         assert!(!s.is_dirty());
@@ -2271,7 +2496,7 @@ mod tests {
                 .text
                 .insert(0, "hi", &RunStyle::default());
         });
-        assert!(finish_text_session(&mut s, &mut g, id));
+        assert!(finish_text_session(&mut s, &mut g, EditTarget::Label(id)));
         assert!(s.is_dirty());
         assert!(s.undo());
         assert!(s.find_shape(id).is_none());
@@ -2290,10 +2515,10 @@ mod tests {
 
         // Editing a shape without a label gives it an empty default one;
         // leaving it empty takes it away again, leaving no step.
-        assert!(start_text_session(&mut s, &mut g, id));
+        assert!(start_text_session(&mut s, &mut g, EditTarget::Label(id)));
         let label = s.find_shape(id).unwrap().label.clone().unwrap();
         assert_eq!(label, Label::new_shape_label());
-        assert!(finish_text_session(&mut s, &mut g, id));
+        assert!(finish_text_session(&mut s, &mut g, EditTarget::Label(id)));
         assert_eq!(s.find_shape(id).unwrap().label, None);
         s.undo();
         assert!(s.find_shape(id).is_none(), "the only step left adds it");
@@ -2309,9 +2534,9 @@ mod tests {
                 .text
                 .insert(0, "x", &RunStyle::default());
         });
-        assert!(start_text_session(&mut s, &mut g, id));
+        assert!(start_text_session(&mut s, &mut g, EditTarget::Label(id)));
         s.update_shapes(&[id], |sh| sh.label.as_mut().unwrap().text.delete(0..1));
-        assert!(finish_text_session(&mut s, &mut g, id));
+        assert!(finish_text_session(&mut s, &mut g, EditTarget::Label(id)));
         assert_eq!(s.find_shape(id).unwrap().label, None);
         assert!(s.undo());
         assert_eq!(
@@ -2329,15 +2554,27 @@ mod tests {
         let text_box = mindweave_core::plain_text_box("hello", (0., 0.)).unwrap();
         let box_id = text_box.id;
         s.add_shapes(vec![text_box]);
-        assert!(start_text_session(&mut s, &mut g, box_id));
+        assert!(start_text_session(
+            &mut s,
+            &mut g,
+            EditTarget::Label(box_id)
+        ));
         s.update_shapes(&[box_id], |sh| sh.label.as_mut().unwrap().text.delete(0..5));
-        assert!(!finish_text_session(&mut s, &mut g, box_id));
+        assert!(!finish_text_session(
+            &mut s,
+            &mut g,
+            EditTarget::Label(box_id)
+        ));
         assert!(s.find_shape(box_id).is_none());
         assert!(s.undo());
         assert!(s.find_shape(box_id).is_some());
 
         // A missing shape starts nothing.
-        assert!(!start_text_session(&mut s, &mut g, Uuid::new_v4()));
+        assert!(!start_text_session(
+            &mut s,
+            &mut g,
+            EditTarget::Label(Uuid::new_v4())
+        ));
         assert!(g.begin(&mut s, GestureOwner::Pointer));
     }
 
@@ -2356,6 +2593,181 @@ mod tests {
         assert_eq!(enter_target(&s, &[ids[2]]), Some(ids[2]));
         assert_eq!(enter_target(&s, &[ids[1], ids[2]]), None);
         assert_eq!(enter_target(&s, &[]), None);
+    }
+
+    /// The list item of paragraph `i`.
+    fn item(text: &RichText, i: usize) -> Option<ListItem> {
+        text.paragraphs[i].list
+    }
+
+    #[test]
+    fn bullets_toggle_and_enter_on_empty_item_ends_the_list() {
+        let mut text = plain("one");
+        let mut ed = editor(&text);
+        ed.command(&mut text, None, TextCommand::ToggleBullets);
+        assert_eq!(item(&text, 0).map(|l| l.kind), Some(ListKind::Bullet));
+        // Enter continues the list.
+        ed.command(&mut text, None, TextCommand::NewParagraph);
+        assert_eq!(text.paragraphs.len(), 2);
+        assert_eq!(item(&text, 1).map(|l| l.kind), Some(ListKind::Bullet));
+        // Enter on the empty item ends the list instead of splitting.
+        ed.command(&mut text, None, TextCommand::NewParagraph);
+        assert_eq!(text.paragraphs.len(), 2);
+        assert_eq!(item(&text, 1), None);
+        assert_eq!(item(&text, 0).map(|l| l.kind), Some(ListKind::Bullet));
+        // An undo step of its own.
+        assert!(ed.undo(&mut text));
+        assert_eq!(item(&text, 1).map(|l| l.kind), Some(ListKind::Bullet));
+        // Toggling again on a bullet takes the list away; numbered swaps.
+        ed.select(0, 0);
+        ed.command(&mut text, None, TextCommand::ToggleNumbered);
+        assert_eq!(item(&text, 0).map(|l| l.kind), Some(ListKind::Numbered));
+        ed.command(&mut text, None, TextCommand::ToggleNumbered);
+        assert_eq!(item(&text, 0), None);
+        assert!(ed.undo(&mut text));
+        assert_eq!(item(&text, 0).map(|l| l.kind), Some(ListKind::Numbered));
+        // Enter on an empty plain paragraph still splits.
+        let mut text = plain("");
+        let mut ed = editor(&text);
+        ed.command(&mut text, None, TextCommand::NewParagraph);
+        assert_eq!(text.paragraphs.len(), 2);
+    }
+
+    #[test]
+    fn tab_indents_only_inside_lists() {
+        // A plain paragraph: nothing list-related, no step.
+        let mut text = plain("one");
+        let mut ed = editor(&text);
+        assert!(!ed.in_list(&text));
+        let before = text.clone();
+        ed.command(&mut text, None, TextCommand::Indent);
+        assert_eq!(text, before);
+        assert!(!ed.undo(&mut text));
+        // A bullet: a level deeper, then back.
+        ed.command(&mut text, None, TextCommand::ToggleBullets);
+        assert!(ed.in_list(&text));
+        ed.command(&mut text, None, TextCommand::Indent);
+        assert_eq!(item(&text, 0).map(|l| l.level), Some(1));
+        ed.command(&mut text, None, TextCommand::Outdent);
+        assert_eq!(item(&text, 0).map(|l| l.level), Some(0));
+        assert!(ed.undo(&mut text));
+        assert_eq!(item(&text, 0).map(|l| l.level), Some(1));
+    }
+
+    #[test]
+    fn typing_after_a_link_does_not_extend_it() {
+        let link = RunStyle {
+            link: Some("https://a.b".into()),
+            ..RunStyle::default()
+        };
+        let mut text = plain("go ");
+        text.insert(3, "here", &link);
+        let mut ed = editor(&text);
+        // At the end of the link: plain text.
+        ed.type_text(&mut text, "x");
+        assert_eq!(text.link_at(7), None);
+        // Inside it: the link goes on.
+        ed.select(5, 5);
+        ed.type_text(&mut text, "y");
+        assert_eq!(text.link_at(5), Some("https://a.b"));
+        // Return at its end: the new paragraph has no link.
+        let mut text = plain("go ");
+        text.insert(3, "here", &link);
+        let mut ed = editor(&text);
+        ed.command(&mut text, None, TextCommand::NewParagraph);
+        ed.type_text(&mut text, "z");
+        assert_eq!(text.paragraphs[1].style.link, None);
+        assert_eq!(text.link_at(8), None);
+        // A style toggled at the end does not bring the link back.
+        let mut text = plain("go ");
+        text.insert(3, "here", &link);
+        let mut ed = editor(&text);
+        ed.toggle(&mut text, Toggle::Bold);
+        ed.type_text(&mut text, "w");
+        assert_eq!(text.link_at(7), None);
+        assert!(text.style_at(8).bold);
+    }
+
+    #[test]
+    fn huge_paste_into_a_note_is_capped() {
+        let mut text = plain("");
+        let mut ed = TextEditor::new(EditTarget::Note(Uuid::new_v4()), &text);
+        ed.paste_plain(&mut text, &"x".repeat(MAX_PASTE_CHARS + 10));
+        assert_eq!(text.len(), MAX_PASTE_CHARS);
+    }
+
+    #[test]
+    fn note_sessions_store_and_clear_notes() {
+        let (_dir, mut s) = session();
+        let id = s.add_central_topic((0., 0.));
+        let target = EditTarget::Note(id);
+        let note = |s: &DocumentSession| {
+            s.find_shape(id)
+                .unwrap()
+                .topic
+                .as_ref()
+                .unwrap()
+                .note
+                .clone()
+        };
+        let mut g = SessionGesture::default();
+
+        // Type "Hi" into a new note: stored, as one undo step.
+        assert!(start_text_session(&mut s, &mut g, target));
+        let (text, wrap) = target_text(&s, target).unwrap();
+        assert_eq!(wrap, Some(NOTE_TEXT_WIDTH));
+        let mut text = text.into_owned();
+        assert!(text.is_empty());
+        let mut ed = TextEditor::new(target, &text);
+        for t in ["H", "i"] {
+            ed.type_text(&mut text, t);
+            store_target_text(&mut s, target, &text);
+        }
+        assert!(finish_text_session(&mut s, &mut g, target));
+        assert_eq!(note(&s).map(|n| n.plain()).as_deref(), Some("Hi"));
+        // The topic's label is left alone.
+        assert_eq!(
+            s.find_shape(id)
+                .unwrap()
+                .label
+                .as_ref()
+                .unwrap()
+                .text
+                .plain(),
+            "Central Topic"
+        );
+        assert!(s.undo());
+        assert_eq!(note(&s), None);
+        assert!(s.redo());
+
+        // Select all, delete: the note is removed.
+        assert!(start_text_session(&mut s, &mut g, target));
+        let mut text = target_text(&s, target).unwrap().0.into_owned();
+        let mut ed = TextEditor::new(target, &text);
+        ed.select(text.len(), 0);
+        ed.command(&mut text, None, TextCommand::Backspace(false));
+        store_target_text(&mut s, target, &text);
+        assert!(finish_text_session(&mut s, &mut g, target));
+        assert_eq!(note(&s), None);
+        assert!(s.undo());
+        assert_eq!(note(&s).map(|n| n.plain()).as_deref(), Some("Hi"));
+
+        // Only whitespace left: removed too.
+        assert!(start_text_session(&mut s, &mut g, target));
+        store_target_text(&mut s, target, &plain("  "));
+        assert!(finish_text_session(&mut s, &mut g, target));
+        assert_eq!(note(&s), None);
+
+        // Not a topic: no session.
+        let text_box = Shape::new_text_box((0., 300.));
+        let box_id = text_box.id;
+        s.add_shapes(vec![text_box]);
+        assert!(!start_text_session(
+            &mut s,
+            &mut g,
+            EditTarget::Note(box_id)
+        ));
+        assert!(g.begin(&mut s, GestureOwner::Pointer));
     }
 
     #[test]

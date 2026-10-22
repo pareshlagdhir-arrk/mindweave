@@ -23,8 +23,8 @@ use super::shape_paint::{
     AutoColors,
 };
 use super::text_paint::{
-    auto_color, canvas_background, text_background, text_box_wrap, text_color, TextPaint,
-    TEXT_BOX_PADDING,
+    auto_color, canvas_background, link_color, text_background, text_box_wrap, text_color,
+    TextPaint, TEXT_BOX_PADDING,
 };
 use super::tool::Tool;
 use super::{hex_to_hsla, EditorWindow};
@@ -416,7 +416,9 @@ impl EditorWindow {
             self.session.page().canvas.background.as_deref(),
             cx.theme().background,
         );
-        self.text_layouts.begin_frame(window);
+        let theme = cx.theme();
+        let links = link_color(theme.link, theme.primary);
+        self.text_layouts.begin_frame(window, links);
         self.equation_cache.begin_frame();
         self.layout_text_boxes(window, canvas, cx);
         let page = self.session.page();

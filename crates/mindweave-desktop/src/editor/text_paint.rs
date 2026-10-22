@@ -10,10 +10,15 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::text_layout::{max_font_size, should_greek, CacheEntry, TextLayoutCache};
+use super::text_layout::{
+    canvas_default_family, installed_font_families, max_font_size, should_greek, text_run,
+    CacheEntry, TextLayoutCache,
+};
 use gpui_kit::*;
 use mindweave_core::geometry::{line_label_placement, Pt, Rect};
-use mindweave_core::{auto_text_color, parse_hex_color, RichText, Shape, VAlign, Viewport};
+use mindweave_core::{
+    auto_text_color, parse_hex_color, RichText, RunStyle, Shape, VAlign, Viewport,
+};
 use uuid::Uuid;
 
 /// Inner padding of a shape label, in canvas units.
@@ -30,6 +35,18 @@ const UNDERLINE_DESCENT: f32 = 0.618;
 const STRIKE_RISE: f32 = 0.3;
 /// Opacity of the bars standing in for too-small text, times the text's.
 const GREEK_OPACITY: f32 = 0.4;
+/// Space between a list marker and its item's text, in canvas units.
+const MARKER_GAP: f32 = 6.;
+
+/// The colour links are drawn in: the theme's link colour, else (when the
+/// theme leaves it transparent) its primary colour.
+pub fn link_color(link: Hsla, primary: Hsla) -> Hsla {
+    if link.a > 0. {
+        link
+    } else {
+        primary
+    }
+}
 
 /// What painting text needs besides the shape.
 pub struct TextPaint<'a> {
@@ -335,7 +352,71 @@ fn draw(window: &mut Window, cx: &mut App, text: &mut TextPaint, job: &TextJob, 
     let entry = text
         .layouts
         .entry(window, job.id, job.text, job.wrap, job.zoom, job.color);
+    let markers = entry.layout.list_markers();
     paint_layout(window, cx, entry, text.glyphs, at);
+    paint_markers(window, cx, job, &markers, at);
+}
+
+/// Paints `job`'s list `markers` (see `TextLayout::list_markers`) placed
+/// by `at`, each ending [`MARKER_GAP`] before its item's text, in the
+/// item's size, weight and colour. A turned text's markers sit at their
+/// turned places, upright.
+fn paint_markers(
+    window: &mut Window,
+    cx: &mut App,
+    job: &TextJob,
+    markers: &[(f32, f32, String)],
+    at: &Placement,
+) {
+    if markers.is_empty() {
+        return;
+    }
+    let family = canvas_default_family(
+        &window.text_style().font().family,
+        &installed_font_families(cx),
+    );
+    // One marker per list paragraph, in order.
+    let items = job.text.paragraphs.iter().filter(|p| p.list.is_some());
+    let zoom = job.zoom;
+    let paint = |window: &mut Window, cx: &mut App| {
+        for ((x, baseline, marker), p) in markers.iter().zip(items) {
+            let (x, baseline) = (x * zoom, baseline * zoom);
+            if at
+                .clip
+                .is_some_and(|(top, bottom)| baseline < top || baseline > bottom)
+            {
+                continue;
+            }
+            let style = RunStyle {
+                size: p.style.size,
+                bold: p.style.bold,
+                color: p.style.color.clone(),
+                ..RunStyle::default()
+            };
+            let run = text_run(&style, marker.len(), family.clone(), job.color, zoom);
+            let shaped = window.text_system().shape_line(
+                SharedString::from(marker.clone()),
+                px(style.size * zoom),
+                &[run],
+                None,
+            );
+            let left = x - MARKER_GAP * zoom - f32::from(shaped.width());
+            let origin = rotated(
+                at.centre,
+                (left + at.offset.0, baseline + at.offset.1),
+                at.angle,
+            );
+            let top_left = point(origin.x, origin.y - shaped.ascent);
+            let height = shaped.ascent + shaped.descent;
+            shaped
+                .paint(top_left, height, TextAlign::Left, None, window, cx)
+                .ok();
+        }
+    };
+    match at.mask {
+        Some(bounds) => window.with_content_mask(Some(ContentMask { bounds }), |w| paint(w, cx)),
+        None => paint(window, cx),
+    }
 }
 
 /// Paints `bars` (canvas units from the text's top-left corner) placed by

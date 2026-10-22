@@ -59,7 +59,7 @@ use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
 use interaction::{Gesture, Press, NUDGE_FAR_STEP, NUDGE_STEP};
 use shape_paint::GeometryCache;
-use text_edit::{TextCommand, TextEditUi, TextEditor};
+use text_edit::{EditGeometry, TextCommand, TextEditUi, TextEditor};
 use text_layout::TextLayoutCache;
 use text_paint::{canvas_background, text_box_wrap, text_color, GlyphOutlines, TEXT_BOX_PADDING};
 use tool::{Tool, ToolState, BASIC_SHAPES};
@@ -253,6 +253,9 @@ pub struct EditorWindow {
     pub text_edit: Option<TextEditor>,
     /// Caret blink, drag selection and placement of the text being edited.
     text_ui: TextEditUi,
+    /// Where the note card shows the note being edited, set by the card
+    /// each frame (`None`: no card painted).
+    note_geometry: Option<EditGeometry>,
     properties: properties_panel::PropertyFields,
     /// The title last given to the window.
     window_title: String,
@@ -320,6 +323,7 @@ impl EditorWindow {
             equation_card: None,
             text_edit: None,
             text_ui: TextEditUi::default(),
+            note_geometry: None,
             properties,
             window_title,
             _subscriptions,
