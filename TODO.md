@@ -3,8 +3,22 @@
 ### Must have features
 
 - [ ] reduce the app size
-- [ ] shapes are not connected
+- [x] shapes are not connected
 - [ ] settings should be graphical when possible
+- [x] Text field
+- [x] add text to any object when double clicked
+- [x] connect object with each other
+- [ ] pen tool
+- [ ] point edit
+- [ ] lasso tool
+- [x] image import
+- [x] group
+- [x] send to back and bring to front
+- [x] default fill should not be there
+- [x] changing shapes property should be remember for that shape type or may be globally
+- [ ] Manage icon pack (show/hide one or more pack if not reqiure)
+- [ ] Image crope
+- [ ]
 
 ### Next Milestone
 
