@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 
+use super::mindmap_edit::normalized_link;
 use super::text_layout::TextLayout;
 use super::text_paint::{
     canvas_background, paint_polygon, text_color, text_frame, text_wrap, TextFrame,
@@ -251,6 +252,36 @@ pub fn press_hit(current: Option<(bool, usize)>, painted: bool) -> Option<Option
     }
 }
 
+/// The link under local point `at`, given the caret `offset` it hits and
+/// the `rects` a text range covers: the link of the character at the
+/// offset or of the one before it, when the point is on that character.
+/// (A press on the right half of a link's last character hits the offset
+/// after it.)
+pub fn link_hit(
+    text: &RichText,
+    rects: &dyn Fn(Range<usize>) -> Vec<Rect>,
+    offset: usize,
+    at: Pt,
+) -> Option<String> {
+    let plain = text.plain();
+    let offset = offset.min(plain.len());
+    let before = plain[..offset]
+        .chars()
+        .next_back()
+        .map(|c| offset - c.len_utf8()..offset);
+    let after = plain[offset..]
+        .chars()
+        .next()
+        .map(|c| offset..offset + c.len_utf8());
+    [before, after].into_iter().flatten().find_map(|range| {
+        let link = text.link_at(range.start)?;
+        rects(range)
+            .iter()
+            .any(|r| r.contains(at))
+            .then(|| link.to_string())
+    })
+}
+
 /// The line geometry caret moves follow: a text layout.
 pub trait Lines {
     /// The caret's x at `offset`, in canvas units from the text's left.
@@ -354,6 +385,8 @@ pub enum TextCommand {
     LineBreak,
     SelectAll,
     Toggle(Toggle),
+    /// Cmd+K: opens the link popover on the selection (or the caret's word).
+    EditLink,
     /// Makes the touched paragraphs bulleted or numbered list items, or
     /// plain again when the first already is one of that kind.
     ToggleBullets,
@@ -586,6 +619,27 @@ impl TextEditor {
         text.apply(sel, change);
         if *text != before.text {
             self.record_style(before, preview);
+        }
+    }
+
+    /// The text a link applies to: the selection, or with only a caret the
+    /// word at it (the double-click word).
+    pub fn link_range(&self, text: &RichText) -> Range<usize> {
+        let sel = self.selection();
+        if sel.is_empty() {
+            text.word_range(self.caret)
+        } else {
+            sel
+        }
+    }
+
+    /// Sets (`Some`) or removes (`None`) the link on `range` as one undo
+    /// step. The caret and selection stay.
+    pub fn set_link(&mut self, text: &mut RichText, range: Range<usize>, link: Option<String>) {
+        let before = self.snapshot(text);
+        text.apply(range, &StyleChange::Link(link));
+        if *text != before.text {
+            self.record_style(before, false);
         }
     }
 
@@ -909,7 +963,11 @@ impl TextEditor {
             TextCommand::Redo => {
                 self.redo(text);
             }
-            TextCommand::Copy | TextCommand::Cut | TextCommand::Paste | TextCommand::Exit => {}
+            TextCommand::Copy
+            | TextCommand::Cut
+            | TextCommand::Paste
+            | TextCommand::Exit
+            | TextCommand::EditLink => {}
         }
     }
 }
@@ -1218,7 +1276,7 @@ impl EditorWindow {
             TextTarget::Existing(id) => {
                 self.begin_text_edit(EditTarget::Label(id), window, cx);
                 if self.text_edit.is_some() {
-                    self.text_press(at, 1, false, window, cx);
+                    self.text_press(at, 1, false, false, window, cx);
                     // A press, not a drag: the mouse-up may come anywhere.
                     self.end_text_drag();
                 }
@@ -1248,6 +1306,7 @@ impl EditorWindow {
         let Some(edit) = self.text_edit.take() else {
             return;
         };
+        self.link_popover = None;
         self.text_ui = TextEditUi::default();
         let scope = self.selection_scope();
         let kept = finish_text_session(&mut self.session, &mut self.session_gesture, edit.target);
@@ -1296,6 +1355,7 @@ impl EditorWindow {
         }
         match command {
             TextCommand::Exit => self.end_text_edit(window, cx),
+            TextCommand::EditLink => self.open_link_popover(window, cx),
             TextCommand::Copy | TextCommand::Cut => {
                 let cut = command == TextCommand::Cut;
                 let copied = self
@@ -1423,12 +1483,14 @@ impl EditorWindow {
     /// A left press at canvas point `at` while editing. On the target it
     /// places the caret (Shift: extends the selection), or with a double
     /// or triple click selects a word or paragraph, and starts a drag
-    /// selection; returns `false` elsewhere.
+    /// selection; returns `false` elsewhere. With the platform key (`open`,
+    /// ⌘) held, a press on a link opens it instead and leaves the caret.
     pub(super) fn text_press(
         &mut self,
         at: Pt,
         clicks: usize,
         shift: bool,
+        open: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -1439,6 +1501,12 @@ impl EditorWindow {
         let Some(offset) = press_hit(current, painted) else {
             return false;
         };
+        if open {
+            if let Some(link) = self.link_under(at, offset) {
+                cx.open_url(&normalized_link(&link));
+                return true;
+            }
+        }
         let unit = match clicks {
             0 | 1 => Unit::Grapheme,
             2 => Unit::Word,
@@ -1456,6 +1524,22 @@ impl EditorWindow {
             TextDrag { origin, unit }
         });
         true
+    }
+
+    /// The link of the text being edited under canvas point `at`, which
+    /// hits caret position `offset` (`None`: not laid out yet).
+    fn link_under(&mut self, at: Pt, offset: Option<usize>) -> Option<String> {
+        let offset = offset?;
+        let target = self.text_edit.as_ref()?.target;
+        let (text, _) = target_text(&self.session, target)?;
+        let text = text.into_owned();
+        let (geometry, layout) = self.edit_layout()?;
+        link_hit(
+            &text,
+            &|range| layout.selection_rects(range),
+            offset,
+            geometry.frame.to_local(at),
+        )
     }
 
     /// Continues a drag selection to canvas point `at`; `false` when none
@@ -1570,6 +1654,32 @@ impl EditorWindow {
         }
     }
 
+    /// The corners (top left, bottom right) in screen pixels relative to the
+    /// canvas of the first line of the byte `range` of the text being
+    /// edited (or of the caret at its start), around the turned box.
+    pub(super) fn range_bounds(&mut self, range: Range<usize>) -> Option<((f32, f32), (f32, f32))> {
+        let vp = self.session.page().viewport;
+        let (geometry, layout) = self.edit_layout()?;
+        let r = layout
+            .selection_rects(range.clone())
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| layout.caret_rect(range.start));
+        let corners = [
+            (r.x, r.y),
+            (r.x + r.w, r.y),
+            (r.x + r.w, r.y + r.h),
+            (r.x, r.y + r.h),
+        ]
+        .map(|p| vp.canvas_to_screen(geometry.frame.to_canvas(p)));
+        let (mut lo, mut hi) = (corners[0], corners[0]);
+        for (x, y) in corners {
+            lo = (lo.0.min(x), lo.1.min(y));
+            hi = (hi.0.max(x), hi.1.max(y));
+        }
+        Some((lo, hi))
+    }
+
     /// The plain text of the target being edited.
     fn edited_plain(&self) -> Option<String> {
         let edit = self.text_edit.as_ref()?;
@@ -1629,6 +1739,7 @@ pub(super) fn on_text_actions(root: Div, cx: &mut Context<EditorWindow>) -> Div 
         TextItalic => C::Toggle(Toggle::Italic),
         TextUnderline => C::Toggle(Toggle::Underline),
         TextStrike => C::Toggle(Toggle::Strike),
+        TextLink => C::EditLink,
         TextToggleBullets => C::ToggleBullets,
         TextToggleNumbered => C::ToggleNumbered,
         TextCopy => C::Copy,
@@ -1732,25 +1843,7 @@ impl EntityInputHandler for EditorWindow {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let range = self.bytes_of(range_utf16)?;
-        let vp = self.session.page().viewport;
-        let (geometry, layout) = self.edit_layout()?;
-        let r = layout
-            .selection_rects(range.clone())
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| layout.caret_rect(range.start));
-        let corners = [
-            (r.x, r.y),
-            (r.x + r.w, r.y),
-            (r.x + r.w, r.y + r.h),
-            (r.x, r.y + r.h),
-        ]
-        .map(|p| vp.canvas_to_screen(geometry.frame.to_canvas(p)));
-        let (mut lo, mut hi) = (corners[0], corners[0]);
-        for (x, y) in corners {
-            lo = (lo.0.min(x), lo.1.min(y));
-            hi = (hi.0.max(x), hi.1.max(y));
-        }
+        let (lo, hi) = self.range_bounds(range)?;
         let origin = element_bounds.origin;
         Some(Bounds::from_corners(
             point(origin.x + px(lo.0), origin.y + px(lo.1)),
@@ -1781,15 +1874,15 @@ impl EntityInputHandler for EditorWindow {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        byte_to_utf16, enter_target, finish_text_session, on_line_label, parse_text_payload,
-        pasted, press_hit, save_text_session, start_new_text_box, start_text_session,
-        store_target_text, target_area, target_text, text_payload, text_target_at, utf16_to_byte,
-        EditTarget, Lines, Motion, Pasted, TextCommand, TextEditor, TextTarget, Toggle, Unit,
-        NOTE_TEXT_WIDTH,
+        byte_to_utf16, enter_target, finish_text_session, link_hit, on_line_label,
+        parse_text_payload, pasted, press_hit, save_text_session, start_new_text_box,
+        start_text_session, store_target_text, target_area, target_text, text_payload,
+        text_target_at, utf16_to_byte, EditTarget, Lines, Motion, Pasted, TextCommand, TextEditor,
+        TextTarget, Toggle, Unit, NOTE_TEXT_WIDTH,
     };
     use crate::editor::interaction::hit_shape;
     use crate::editor::{GestureOwner, SessionGesture};
-    use mindweave_core::geometry::Frame;
+    use mindweave_core::geometry::{Frame, Rect};
     use mindweave_core::text::{ListItem, ListKind};
     use mindweave_core::{
         builtin_libraries, DocumentSession, HAlign, Label, LibraryRegistry, RichText, RunStyle,
@@ -1806,6 +1899,63 @@ mod tests {
 
     fn editor(text: &RichText) -> TextEditor {
         TextEditor::new(EditTarget::Label(Uuid::new_v4()), text)
+    }
+
+    #[test]
+    fn link_applies_to_word_at_caret() {
+        let mut text = plain("say hello there");
+        let mut ed = editor(&text);
+        ed.select(7, 7);
+        let range = ed.link_range(&text);
+        assert_eq!(range, 4..9);
+        ed.set_link(&mut text, range, Some("example.com".into()));
+        assert_eq!(text.link_at(4), Some("example.com"));
+        assert_eq!(text.link_at(8), Some("example.com"));
+        assert_eq!(text.link_at(2), None);
+        assert_eq!(text.link_at(10), None);
+        // The caret stays where it was; one undo removes the link.
+        assert_eq!(ed.selection(), 7..7);
+        assert!(ed.undo(&mut text));
+        assert_eq!(text.link_at(6), None);
+    }
+
+    #[test]
+    fn link_applies_to_the_selection_when_there_is_one() {
+        let text = plain("say hello there");
+        let mut ed = editor(&text);
+        ed.select(12, 4);
+        assert_eq!(ed.link_range(&text), 4..12);
+    }
+
+    #[test]
+    fn empty_link_removes_it() {
+        let mut text = plain("say hello there");
+        let mut ed = editor(&text);
+        ed.set_link(&mut text, 4..9, Some("example.com".into()));
+        assert_eq!(text.link_at(5), Some("example.com"));
+        ed.set_link(&mut text, 4..9, None);
+        assert_eq!(text.link_at(5), None);
+    }
+
+    #[test]
+    fn link_hit_finds_the_link_under_the_pointer() {
+        let mut text = plain("go home now");
+        text.apply(3..7, &StyleChange::Link(Some("a.b".into())));
+        // Each character is 10 wide on one line.
+        let rects = |r: Range<usize>| {
+            vec![Rect {
+                x: r.start as f32 * 10.,
+                y: 0.,
+                w: (r.end - r.start) as f32 * 10.,
+                h: 12.,
+            }]
+        };
+        // On the middle of the link; on the right half of its last
+        // character (the caret offset is past the link); just past it.
+        assert_eq!(link_hit(&text, &rects, 5, (55., 5.)), Some("a.b".into()));
+        assert_eq!(link_hit(&text, &rects, 7, (68., 5.)), Some("a.b".into()));
+        assert_eq!(link_hit(&text, &rects, 7, (75., 5.)), None);
+        assert_eq!(link_hit(&text, &rects, 1, (15., 5.)), None);
     }
 
     #[test]

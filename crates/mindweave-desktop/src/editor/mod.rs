@@ -11,6 +11,7 @@ mod images;
 mod interaction;
 mod layers_panel;
 mod line_properties;
+mod link_popover;
 mod mindmap_edit;
 mod page_tabs;
 mod properties_panel;
@@ -249,6 +250,8 @@ pub struct EditorWindow {
     session_gesture: SessionGesture,
     /// The equation card, when open.
     equation_card: Option<equation_card::EquationCard>,
+    /// The link popover (Cmd+K) open on the text being edited.
+    link_popover: Option<link_popover::LinkPopover>,
     /// The text being edited on the canvas, if any.
     pub text_edit: Option<TextEditor>,
     /// Caret blink, drag selection and placement of the text being edited.
@@ -321,6 +324,7 @@ impl EditorWindow {
             glyph_outlines: GlyphOutlines::default(),
             session_gesture: SessionGesture::default(),
             equation_card: None,
+            link_popover: None,
             text_edit: None,
             text_ui: TextEditUi::default(),
             note_geometry: None,
@@ -1156,6 +1160,7 @@ impl EditorWindow {
             .min_h_0()
             .child(canvas::canvas(cx.entity(), self.session.page()))
             .children(self.render_equation_card(cx))
+            .children(self.render_link_popover(cx))
             .on_drop(
                 cx.listener(|this, drag: &icons_panel::IconDrag, window, cx| {
                     // Dropped where the pointer is.

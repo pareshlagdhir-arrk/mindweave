@@ -127,6 +127,9 @@ actions!(
         TextItalic,
         TextUnderline,
         TextStrike,
+        /// Cmd+K: add, change or remove the link on the selection (or the
+        /// word at the caret).
+        TextLink,
         /// Bulleted and numbered lists on or off for the paragraphs the
         /// selection touches (no keys: the note card's buttons).
         TextToggleBullets,
@@ -262,6 +265,7 @@ fn text_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-i", TextItalic, text),
         KeyBinding::new("cmd-u", TextUnderline, text),
         KeyBinding::new("cmd-shift-x", TextStrike, text),
+        KeyBinding::new("cmd-k", TextLink, text),
         KeyBinding::new("tab", TextIndent, text),
         KeyBinding::new("shift-tab", TextOutdent, text),
         KeyBinding::new("cmd-c", TextCopy, text),
@@ -413,7 +417,7 @@ mod tests {
         let keymap = Keymap::new(key_bindings());
         let editing = stack(&["Root", "Editor TextEditing"]);
         let text = text_key_bindings();
-        assert_eq!(text.len(), 40);
+        assert_eq!(text.len(), 41);
         for binding in &text {
             let (found, pending) = keymap.bindings_for_input(binding.keystrokes(), &editing);
             assert!(!pending);
@@ -465,6 +469,9 @@ mod tests {
             first("cmd-b", &stack(&["Root"])),
             Some("mindweave::ToggleLeftSidebar")
         );
+        // Cmd+K edits a link while editing text, without disturbing the
+        // global "cmd-k cmd-t" chord.
+        assert_eq!(first("cmd-k", &editing), Some("mindweave::TextLink"));
         // Tab and Shift+Tab change a list item's level while editing (the
         // editor passes them on outside lists); elsewhere Tab adds a
         // subtopic.

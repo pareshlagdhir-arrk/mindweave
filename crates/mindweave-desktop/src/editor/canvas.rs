@@ -267,6 +267,7 @@ fn register_input(
                 editor.finish_size_steps(cx);
                 editor.commit_focused_shape_number(window, cx);
                 editor.commit_focused_text_size(window, cx);
+                editor.close_link_popover(window, cx);
                 editor.focus_handle.focus(window, cx);
                 let pans = match event.button {
                     MouseButton::Middle => true,
@@ -278,7 +279,15 @@ fn register_input(
                 // what it would have done.
                 if !pans && event.button == MouseButton::Left && editor.text_edit.is_some() {
                     let at = editor.to_canvas(local(event.position, bounds));
-                    if editor.text_press(at, event.click_count, event.modifiers.shift, window, cx) {
+                    let pressed = editor.text_press(
+                        at,
+                        event.click_count,
+                        event.modifiers.shift,
+                        event.modifiers.platform,
+                        window,
+                        cx,
+                    );
+                    if pressed {
                         return;
                     }
                     editor.end_text_edit(window, cx);
