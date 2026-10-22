@@ -106,9 +106,9 @@ pub struct ListItem {
     pub level: u8,
 }
 
-/// A paragraph: styled runs plus alignment (and list membership). `style` is what typing uses
-/// while the paragraph is empty; [`RichText::normalize`] keeps it equal to
-/// the first run's style otherwise.
+/// A paragraph: styled runs plus alignment and list membership. `style` is
+/// what typing uses while the paragraph is empty; [`RichText::normalize`]
+/// keeps it equal to the first run's style otherwise.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Paragraph {
     pub runs: Vec<Run>,
@@ -558,7 +558,7 @@ impl RichText {
     /// Restores the invariants: at least one paragraph, no empty runs,
     /// adjacent identical runs merged, sizes clamped to
     /// `MIN_FONT_SIZE..=MAX_FONT_SIZE` (non-finite → default), invalid
-    /// colours dropped, stray `'\r'`/`'\n'` inside runs turned into line
+    /// colours dropped, list levels capped at `MAX_LIST_LEVEL`, stray `'\r'`/`'\n'` inside runs turned into line
     /// breaks, and each non-empty paragraph's typing style equal to its
     /// first run's.
     pub fn normalize(&mut self) {
@@ -568,6 +568,9 @@ impl RichText {
         }
         for p in &mut self.paragraphs {
             p.style.sanitize();
+            if let Some(l) = &mut p.list {
+                l.level = l.level.min(MAX_LIST_LEVEL);
+            }
             let mut runs: Vec<Run> = Vec::with_capacity(p.runs.len());
             for mut run in std::mem::take(&mut p.runs) {
                 if run.text.is_empty() {
@@ -1261,6 +1264,13 @@ mod tests {
         assert_eq!(t.paragraphs[0].runs[0].style.link, None);
         let out = serde_json::to_string(&t).unwrap();
         assert!(!out.contains("list") && !out.contains("link"));
+    }
+
+    #[test]
+    fn oversized_list_level_is_clamped_on_load() {
+        let json = r#"{"paragraphs":[{"runs":[],"list":{"kind":"bullet","level":200}}]}"#;
+        let t: RichText = serde_json::from_str(json).unwrap();
+        assert_eq!(t.paragraphs[0].list.unwrap().level, MAX_LIST_LEVEL);
     }
 
     #[test]
