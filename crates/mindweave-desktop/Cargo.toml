@@ -12,6 +12,10 @@ path = "src/main.rs"
 gpui-kit.workspace = true
 image.workspace = true
 mindweave-core = { path = "../mindweave-core" }
+ratex-layout.workspace = true
+ratex-parser.workspace = true
+ratex-svg.workspace = true
+ratex-types.workspace = true
 rfd.workspace = true
 serde_json.workspace = true
 trash.workspace = true
