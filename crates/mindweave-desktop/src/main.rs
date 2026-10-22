@@ -2,9 +2,8 @@ mod actions;
 mod app_state;
 mod assets;
 mod dashboard;
-#[allow(dead_code)] // Until topics paint equations.
-mod equation;
 mod editor;
+mod equation;
 mod icon_library;
 mod libraries;
 mod menu_bar;

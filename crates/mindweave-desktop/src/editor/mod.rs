@@ -24,6 +24,8 @@ pub mod tool;
 mod toolbar;
 mod topic_properties;
 
+pub(crate) use text_layout::max_font_size;
+
 use std::collections::HashSet;
 use std::future::Future;
 
@@ -228,6 +230,8 @@ pub struct EditorWindow {
     geometry_cache: GeometryCache,
     /// Pictures decoded for painting.
     image_cache: images::ImageCache,
+    /// Topics' equations rendered for fitting and painting.
+    equation_cache: crate::equation::EquationCache,
     /// The background's dot pattern tile.
     dot_tile: dot_tile::DotTile,
     /// The Icons pane's search and set filter.
@@ -301,6 +305,7 @@ impl EditorWindow {
             attach_highlight: None,
             geometry_cache: GeometryCache::default(),
             image_cache: images::ImageCache::default(),
+            equation_cache: crate::equation::EquationCache::default(),
             dot_tile: dot_tile::DotTile::default(),
             icons,
             topic_fields,

@@ -5,8 +5,9 @@
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
-use mindweave_core::geometry::Pt;
-use mindweave_core::{fit_topic_picture, ImageData, TOPIC_IMAGE_SIZE};
+use mindweave_core::geometry::{Pt, Rect};
+use mindweave_core::mindmap::TopicParts;
+use mindweave_core::{fit_topic_picture, DocumentSession, ImageData, Shape, TOPIC_IMAGE_SIZE};
 use uuid::Uuid;
 
 use super::EditorWindow;
@@ -284,24 +285,62 @@ impl EditorWindow {
 
     /// The link of the topic whose link badge is at canvas point `at`.
     pub(super) fn link_badge_at(&self, at: Pt) -> Option<String> {
-        self.session
-            .shapes_on_active_layer()
-            .iter()
-            .rev()
-            .find_map(|s| {
-                let t = s.topic.as_ref()?;
-                let link = t.link.clone()?;
-                let badge = t.parts(s.frame.w, s.frame.h).badge?;
-                let (x, y) = (at.0 - s.frame.x, at.1 - s.frame.y);
-                // A little slack round the small badge.
-                let slack = 3.;
-                (x >= badge.x - slack
-                    && x <= badge.x + badge.w + slack
-                    && y >= badge.y - slack
-                    && y <= badge.y + badge.h + slack)
-                    .then_some(link)
-            })
+        link_badge_at(&self.session, at)
     }
+
+    /// The topic whose note badge is at canvas point `at`.
+    #[allow(dead_code)] // Until the note and equation editors open from the canvas.
+    pub(super) fn note_badge_at(&self, at: Pt) -> Option<Uuid> {
+        note_badge_at(&self.session, at)
+    }
+
+    /// The topic whose equation is at canvas point `at`.
+    #[allow(dead_code)] // Until the note and equation editors open from the canvas.
+    pub(super) fn equation_at(&self, at: Pt) -> Option<Uuid> {
+        equation_at(&self.session, at)
+    }
+}
+
+/// A little slack round the small badges, in canvas units.
+const BADGE_SLACK: f32 = 3.;
+
+/// The topmost topic on the active layer whose `part` (topic-local),
+/// grown by `slack` on every side, holds canvas point `at`.
+fn topic_part_at(
+    session: &DocumentSession,
+    at: Pt,
+    part: impl Fn(&TopicParts) -> Option<Rect>,
+    slack: f32,
+) -> Option<&Shape> {
+    session.shapes_on_active_layer().iter().rev().find(|s| {
+        let Some(t) = s.topic.as_ref() else {
+            return false;
+        };
+        let Some(r) = part(&t.parts(s.frame.w, s.frame.h)) else {
+            return false;
+        };
+        let (x, y) = (at.0 - s.frame.x, at.1 - s.frame.y);
+        x >= r.x - slack && x <= r.x + r.w + slack && y >= r.y - slack && y <= r.y + r.h + slack
+    })
+}
+
+/// The link of the topic whose link badge is at canvas point `at`.
+fn link_badge_at(session: &DocumentSession, at: Pt) -> Option<String> {
+    topic_part_at(session, at, |p| p.badge, BADGE_SLACK)?
+        .topic
+        .as_ref()?
+        .link
+        .clone()
+}
+
+/// The topic whose note badge is at canvas point `at`.
+fn note_badge_at(session: &DocumentSession, at: Pt) -> Option<Uuid> {
+    topic_part_at(session, at, |p| p.note, BADGE_SLACK).map(|s| s.id)
+}
+
+/// The topic whose equation is at canvas point `at`.
+fn equation_at(session: &DocumentSession, at: Pt) -> Option<Uuid> {
+    topic_part_at(session, at, |p| p.equation, 0.).map(|s| s.id)
 }
 
 /// `link` as a URL to open: as typed when it names a scheme, else a web
@@ -316,7 +355,10 @@ pub fn normalized_link(link: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalized_link;
+    use super::{equation_at, link_badge_at, normalized_link, note_badge_at};
+    use mindweave_core::geometry::Rect;
+    use mindweave_core::mindmap::Equation;
+    use mindweave_core::{DocumentSession, HAlign, RichText, Run, RunStyle};
 
     #[test]
     fn links_without_a_scheme_are_web_addresses() {
@@ -324,5 +366,59 @@ mod tests {
         assert_eq!(normalized_link("http://x.org"), "http://x.org");
         assert_eq!(normalized_link("mailto:a@b.c"), "mailto:a@b.c");
         assert_eq!(normalized_link("/Users/me/notes.md"), "/Users/me/notes.md");
+    }
+
+    /// The centre of topic-local `r` on a topic at `(x, y)`.
+    fn centre((x, y): (f32, f32), r: Rect) -> (f32, f32) {
+        (x + r.x + r.w / 2., y + r.y + r.h / 2.)
+    }
+
+    #[test]
+    fn note_badge_and_equation_are_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("n.mindweave")).unwrap();
+        let id = s.add_central_topic((0., 0.));
+        let mut note = RichText::new(RunStyle::default(), HAlign::default());
+        note.paragraphs[0].runs.push(Run {
+            text: "A note".into(),
+            style: RunStyle::default(),
+        });
+        s.update_shapes(&[id], |shape| {
+            let t = shape.topic.as_mut().unwrap();
+            t.note = Some(note.clone());
+            t.link = Some("https://example.com".into());
+            t.equation = Some(Equation {
+                latex: "x^2".into(),
+                size: (40., 20.),
+            });
+        });
+        let shape = s.find_shape(id).unwrap();
+        let t = shape.topic.as_ref().unwrap();
+        let (w, h) = t.size_for_text((80., 20.));
+        s.set_topic_size(id, w, h);
+        let shape = s.find_shape(id).unwrap();
+        let at = (shape.frame.x, shape.frame.y);
+        let parts = shape.topic.as_ref().unwrap().parts(w, h);
+
+        let note = centre(at, parts.note.unwrap());
+        assert_eq!(note_badge_at(&s, note), Some(id));
+        assert_eq!(link_badge_at(&s, note), None);
+        let link = centre(at, parts.badge.unwrap());
+        assert_eq!(
+            link_badge_at(&s, link).as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(note_badge_at(&s, link), None);
+        let equation = centre(at, parts.equation.unwrap());
+        assert_eq!(equation_at(&s, equation), Some(id));
+        assert_eq!(note_badge_at(&s, equation), None);
+
+        let text = (
+            at.0 + parts.text.x + 10.,
+            at.1 + parts.text.y + parts.text.h / 2.,
+        );
+        assert_eq!(note_badge_at(&s, text), None);
+        assert_eq!(link_badge_at(&s, text), None);
+        assert_eq!(equation_at(&s, text), None);
     }
 }

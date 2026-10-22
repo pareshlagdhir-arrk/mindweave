@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gpui_kit::{Hsla, Rgba};
+use gpui_kit::{App, Hsla, RenderImage, Rgba, Window};
 use mindweave_core::{RichText, DEFAULT_FONT_SIZE};
 use ratex_layout::{layout, to_display_list, LayoutOptions};
 use ratex_parser::parser::parse;
@@ -17,6 +17,11 @@ use ratex_types::math_style::MathStyle;
 pub const MAX_EQUATION_CHARS: usize = 4_000;
 /// The longest side a rendered equation may have, in canvas units.
 const MAX_SIDE: f32 = 800.;
+
+/// Pixels per point when an SVG is rasterised: RaTeX sizes its SVG in
+/// `pt`, which the rasteriser reads at 96 dpi, so this undoes that to
+/// give one pixel per canvas unit at scale 1.
+const PX_PER_PT: f32 = 96. / 72.;
 
 /// An equation rendered to SVG.
 pub struct RenderedEquation {
@@ -63,7 +68,8 @@ fn svg_size(svg: &str) -> Option<(f32, f32)> {
     Some((attr("width")?, attr("height")?))
 }
 
-/// Renders `latex` in `color` with an em of `font_size` canvas units. The
+/// Renders `latex` in `color` with an em of `font_size` canvas units
+/// ([`DEFAULT_FONT_SIZE`] when that is not a positive number). The
 /// equation is scaled down to fit [`MAX_SIDE`]. Errors are RaTeX's parse
 /// message.
 pub fn render_equation(
@@ -74,6 +80,11 @@ pub fn render_equation(
     if latex.chars().count() > MAX_EQUATION_CHARS {
         return Err("Equation is too long".to_string());
     }
+    let font_size = if font_size.is_finite() && font_size > 0. {
+        font_size
+    } else {
+        DEFAULT_FONT_SIZE
+    };
     let (mut svg, mut size) = render_svg(latex, color, font_size)?;
     let longest = size.0.max(size.1);
     if longest > MAX_SIDE {
@@ -88,17 +99,7 @@ pub fn render_equation(
 /// The em of an equation under `label`: the topic text's largest font
 /// size, [`DEFAULT_FONT_SIZE`] when it has none.
 pub fn equation_font_size(label: Option<&RichText>) -> f32 {
-    let largest = label.map_or(0., |text| {
-        text.paragraphs
-            .iter()
-            .flat_map(|p| {
-                let runs = p.runs.iter().map(|r| r.style.size);
-                std::iter::once(p.style.size)
-                    .filter(move |_| p.runs.is_empty())
-                    .chain(runs)
-            })
-            .fold(0., f32::max)
-    });
+    let largest = label.map_or(0., crate::editor::max_font_size);
     if largest > 0. {
         largest
     } else {
@@ -109,10 +110,16 @@ pub fn equation_font_size(label: Option<&RichText>) -> f32 {
 /// What an equation is rendered from: its LaTeX, colour and size.
 type Key = (String, u32, u32);
 
-/// A render and the frame it was last used in.
-type Entry = (Result<RenderedEquation, String>, u64);
+/// A render, its rasters by scale (`None`: the SVG did not rasterise)
+/// and the frame it was last used in.
+struct Entry {
+    render: Result<RenderedEquation, String>,
+    rasters: HashMap<u32, Option<Arc<RenderImage>>>,
+    used: u64,
+}
 
-/// Rendered equations, by LaTeX, colour and font size.
+/// Rendered equations, by LaTeX, colour and font size, with their rasters
+/// for painting.
 #[derive(Default)]
 pub struct EquationCache {
     entries: HashMap<Key, Entry>,
@@ -128,6 +135,22 @@ fn key(latex: &str, color: Hsla, font_size: f32) -> Key {
 }
 
 impl EquationCache {
+    /// The entry for `latex` in `color` at `font_size`, rendered on a miss
+    /// and marked used this frame.
+    fn entry(&mut self, latex: &str, color: Hsla, font_size: f32) -> &mut Entry {
+        let frame = self.frame;
+        let entry = self
+            .entries
+            .entry(key(latex, color, font_size))
+            .or_insert_with(|| Entry {
+                render: render_equation(latex, color, font_size),
+                rasters: HashMap::new(),
+                used: frame,
+            });
+        entry.used = frame;
+        entry
+    }
+
     /// The render of `latex`, on a miss rendering it.
     pub fn get(
         &mut self,
@@ -135,20 +158,38 @@ impl EquationCache {
         color: Hsla,
         font_size: f32,
     ) -> &Result<RenderedEquation, String> {
-        let frame = self.frame;
-        let entry = self
-            .entries
-            .entry(key(latex, color, font_size))
-            .or_insert_with(|| (render_equation(latex, color, font_size), frame));
-        entry.1 = frame;
-        &entry.0
+        &self.entry(latex, color, font_size).render
+    }
+
+    /// The render of `latex` rasterised at `scale` (chosen as for SVG
+    /// pictures, so it stays sharp when zoomed), on a miss rasterising it;
+    /// `None` when it does not render.
+    pub fn image(
+        &mut self,
+        latex: &str,
+        color: Hsla,
+        font_size: f32,
+        scale: u32,
+        cx: &App,
+    ) -> Option<Arc<RenderImage>> {
+        let entry = self.entry(latex, color, font_size);
+        let svg = entry.render.as_ref().ok()?.svg.clone();
+        entry
+            .rasters
+            .entry(scale)
+            .or_insert_with(|| {
+                cx.svg_renderer()
+                    .render_single_frame(&svg, scale as f32 * PX_PER_PT.recip())
+                    .ok()
+            })
+            .clone()
     }
 
     /// Keeps the render of `latex` for another frame without painting it.
     pub fn keep(&mut self, latex: &str, color: Hsla, font_size: f32) {
         let frame = self.frame;
         if let Some(entry) = self.entries.get_mut(&key(latex, color, font_size)) {
-            entry.1 = frame;
+            entry.used = frame;
         }
     }
 
@@ -158,10 +199,25 @@ impl EquationCache {
         self.frame = self.frame.wrapping_add(1);
     }
 
-    /// Releases the renders not used this frame.
-    pub fn end_frame(&mut self) {
+    /// Releases the renders not used this frame, and their textures.
+    pub fn end_frame(&mut self, window: &mut Window) {
+        for image in self.release_unused() {
+            window.drop_image(image).ok();
+        }
+    }
+
+    /// Removes the renders not used this frame; returns their rasters.
+    fn release_unused(&mut self) -> Vec<Arc<RenderImage>> {
         let frame = self.frame;
-        self.entries.retain(|_, (_, used)| *used == frame);
+        let mut released = Vec::new();
+        self.entries.retain(|_, entry| {
+            let keep = entry.used == frame;
+            if !keep {
+                released.extend(entry.rasters.drain().filter_map(|(_, image)| image));
+            }
+            keep
+        });
+        released
     }
 }
 
@@ -182,6 +238,13 @@ mod tests {
             assert!(eq.size.0 > 0. && eq.size.1 > 0., "{latex}");
             assert!(!String::from_utf8_lossy(&eq.svg).contains("<text"));
         }
+    }
+
+    #[test]
+    fn a_bad_font_size_falls_back_to_the_default() {
+        let size = |f: f32| render_equation("x", black(), f).unwrap().size;
+        assert_eq!(size(f32::NAN), size(DEFAULT_FONT_SIZE));
+        assert_eq!(size(0.), size(DEFAULT_FONT_SIZE));
     }
 
     #[test]
@@ -225,14 +288,14 @@ mod tests {
         cache.begin_frame();
         cache.get("a", black(), 28.);
         cache.get("b", black(), 28.);
-        cache.end_frame();
+        cache.release_unused();
         assert_eq!(cache.entries.len(), 2);
         cache.begin_frame();
         cache.get("a", black(), 28.);
-        cache.end_frame();
+        cache.release_unused();
         assert_eq!(cache.entries.len(), 1);
         cache.begin_frame();
-        cache.end_frame();
+        cache.release_unused();
         assert!(cache.entries.is_empty());
     }
 
@@ -241,10 +304,10 @@ mod tests {
         let mut cache = EquationCache::default();
         cache.begin_frame();
         cache.get("a", black(), 28.);
-        cache.end_frame();
+        cache.release_unused();
         cache.begin_frame();
         cache.keep("a", black(), 28.);
-        cache.end_frame();
+        cache.release_unused();
         assert_eq!(cache.entries.len(), 1);
     }
 

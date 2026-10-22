@@ -17,8 +17,9 @@ use mindweave_core::{
 use uuid::Uuid;
 
 use super::hex_to_hsla;
-use super::images::{contrast_plate, hsla_luminance, ImageCache};
-use super::text_paint::{paint_shape_text, TextPaint};
+use super::images::{contrast_plate, hsla_luminance, svg_scale, ImageCache};
+use super::text_paint::{paint_shape_text, text_color, TextPaint};
+use crate::equation::{equation_font_size, EquationCache};
 
 /// Outline colour of a placeholder.
 const PLACEHOLDER_COLOR: &str = "#7F8EA3";
@@ -354,6 +355,7 @@ pub fn paint_shapes(
     vp: &Viewport,
     cache: &mut GeometryCache,
     images: &mut ImageCache,
+    equations: &mut EquationCache,
     text: &mut TextPaint,
 ) {
     let auto = AutoColors::new(page.canvas.background.as_deref(), cx);
@@ -417,7 +419,13 @@ pub fn paint_shapes(
                         painter.paint_paths(&t.paths, window);
                     }
                     if shape.topic.is_some() {
-                        paint_topic_extras(window, cx, bounds, vp, shape, images, auto);
+                        let extras = TopicExtras {
+                            images: &mut *images,
+                            equations: &mut *equations,
+                            auto,
+                            canvas: text.canvas,
+                        };
+                        paint_topic_extras(window, cx, bounds, vp, shape, extras);
                     }
                     if entry.outline.placeholder {
                         painter.paint_label(shape, &entry.outline, window, cx);
@@ -428,6 +436,9 @@ pub fn paint_shapes(
                     let topic_picture = shape.topic.as_ref().and_then(|t| t.picture.as_ref());
                     for data in shape.image.iter().chain(topic_picture) {
                         images.keep(data);
+                    }
+                    if let Some((latex, color, font_size)) = equation_key(shape, text.canvas) {
+                        equations.keep(latex, color, font_size);
                     }
                 }
                 paint_shape_text(window, cx, bounds, vp, shape, visible, text);
@@ -500,16 +511,39 @@ fn boundary_paths(
     paths
 }
 
-/// Paints topic `shape`'s picture and link badge in their places.
+/// What painting a topic's extras draws with.
+struct TopicExtras<'a> {
+    images: &'a mut ImageCache,
+    equations: &'a mut EquationCache,
+    auto: AutoColors,
+    /// The canvas background (see `canvas_background`).
+    canvas: (u8, u8, u8),
+}
+
+/// What topic `shape`'s equation is rendered from: its LaTeX, its
+/// topic's Auto text colour and text size (as the fit pass renders it).
+fn equation_key(shape: &Shape, canvas: (u8, u8, u8)) -> Option<(&str, Hsla, f32)> {
+    let eq = shape.topic.as_ref()?.equation.as_ref()?;
+    let font_size = equation_font_size(shape.label.as_ref().map(|l| &l.text));
+    Some((&eq.latex, text_color(shape, canvas), font_size))
+}
+
+/// Paints topic `shape`'s picture, equation and link and note badges in
+/// their places.
 fn paint_topic_extras(
     window: &mut Window,
     cx: &mut App,
     bounds: Bounds<Pixels>,
     vp: &Viewport,
     shape: &Shape,
-    images: &mut ImageCache,
-    auto: AutoColors,
+    extras: TopicExtras,
 ) {
+    let TopicExtras {
+        images,
+        equations,
+        auto,
+        canvas,
+    } = extras;
     let Some(t) = &shape.topic else { return };
     let f = &shape.frame;
     let parts = t.parts(f.w, f.h);
@@ -545,16 +579,29 @@ fn paint_topic_extras(
                 .ok();
         }
     }
-    if let Some(rect) = parts.badge {
-        let color =
-            style_color(shape.style.stroke.as_deref(), auto.stroke, 1.).unwrap_or(auto.stroke);
+    if let (Some((latex, color, font_size)), Some(rect)) =
+        (equation_key(shape, canvas), parts.equation)
+    {
+        let at = on_screen(&rect);
+        let shown = f32::from(at.size.width.max(at.size.height)) * window.scale_factor();
+        let scale = svg_scale(rect.w.max(rect.h), shown);
+        if let Some(image) = equations.image(latex, color, font_size, scale, cx) {
+            window
+                .paint_image(bounds, at, Corners::default(), image, 0, false)
+                .ok();
+        }
+    }
+    let badge_color =
+        style_color(shape.style.stroke.as_deref(), auto.stroke, 1.).unwrap_or(auto.stroke);
+    for (rect, icon) in [(parts.badge, "link"), (parts.note, "sticky-note")] {
+        let Some(rect) = rect else { continue };
         window
             .paint_svg(
                 on_screen(&rect),
-                crate::libraries::lucide_icon_path("link", cx),
+                crate::libraries::lucide_icon_path(icon, cx),
                 None,
                 TransformationMatrix::unit(),
-                color,
+                badge_color,
                 cx,
             )
             .ok();

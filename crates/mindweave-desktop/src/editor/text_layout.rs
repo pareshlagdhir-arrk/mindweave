@@ -1112,7 +1112,7 @@ pub fn should_greek(max_size: f32, zoom: f32) -> bool {
 
 /// The largest font size in `text`, runs and (for empty paragraphs)
 /// paragraph styles.
-pub fn max_font_size(text: &RichText) -> f32 {
+pub(crate) fn max_font_size(text: &RichText) -> f32 {
     text.paragraphs
         .iter()
         .flat_map(|p| {

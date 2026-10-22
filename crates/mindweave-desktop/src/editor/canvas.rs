@@ -23,11 +23,13 @@ use super::shape_paint::{
     AutoColors,
 };
 use super::text_paint::{
-    auto_color, canvas_background, text_background, text_box_wrap, TextPaint, TEXT_BOX_PADDING,
+    auto_color, canvas_background, text_background, text_box_wrap, text_color, TextPaint,
+    TEXT_BOX_PADDING,
 };
 use super::tool::Tool;
 use super::{hex_to_hsla, EditorWindow};
 use crate::actions::{ZoomIn, ZoomOut, ZoomReset};
+use crate::equation::equation_font_size;
 use crate::libraries::Libraries;
 
 /// Width of a major grid line, in pixels (other lines are 1px).
@@ -411,6 +413,7 @@ impl EditorWindow {
             cx.theme().background,
         );
         self.text_layouts.begin_frame(window);
+        self.equation_cache.begin_frame();
         self.layout_text_boxes(window, canvas, cx);
         let page = self.session.page();
         let viewport = page.viewport;
@@ -429,8 +432,10 @@ impl EditorWindow {
             &viewport,
             &mut self.geometry_cache,
             &mut self.image_cache,
+            &mut self.equation_cache,
             &mut text,
         );
+        self.equation_cache.end_frame(window);
         self.paint_text_edit(bounds, window, cx);
         self.text_layouts.end_frame();
         let preview = match self.gesture {
@@ -511,12 +516,16 @@ impl EditorWindow {
     /// every frame and compares with every box's frame, so sizes left stale
     /// by undo, redo or opening a file are corrected before painting.
     /// Sizes come from layouts at zoom 1, so zooming changes nothing here.
+    /// Topics' equations are rendered and their sizes stored first, so
+    /// the same pass fits each topic to its equation.
     fn layout_text_boxes(
         &mut self,
         window: &mut Window,
         canvas: (u8, u8, u8),
         cx: &mut Context<Self>,
     ) {
+        let generation = self.session.layout_generation();
+        self.measure_equations(canvas);
         let page = self.session.page();
         let mut changes = Vec::new();
         for shape in page.layers.iter().flat_map(|l| &l.objects) {
@@ -535,8 +544,8 @@ impl EditorWindow {
                 changes.push((shape.id, w, h));
             }
         }
-        // Topics fit their text (wrapped at TOPIC_TEXT_MAX), icon, image
-        // and link badge.
+        // Topics fit their text (wrapped at TOPIC_TEXT_MAX), icon, image,
+        // badges and equation.
         let mut topics = Vec::new();
         for shape in page.layers.iter().flat_map(|l| &l.objects) {
             let (Some(t), Some(label)) = (&shape.topic, &shape.label) else {
@@ -568,10 +577,6 @@ impl EditorWindow {
                 topics.push((shape.id, w, h));
             }
         }
-        if changes.is_empty() && topics.is_empty() {
-            return;
-        }
-        let generation = self.session.layout_generation();
         for (id, w, h) in changes {
             self.session.set_text_box_layout(id, w, h);
         }
@@ -583,6 +588,33 @@ impl EditorWindow {
         // nothing, and must not repaint every frame.
         if self.session.layout_generation() != generation {
             cx.notify();
+        }
+    }
+
+    /// Renders the active page's equations at their topic's text size, in
+    /// its Auto text colour (as painting does, so the render is reused),
+    /// and stores the sizes that changed; one that does not render is
+    /// `(0, 0)`, shown as nothing.
+    fn measure_equations(&mut self, canvas: (u8, u8, u8)) {
+        let page = self.session.page();
+        let mut sizes = Vec::new();
+        for shape in page.layers.iter().flat_map(|l| &l.objects) {
+            let Some(eq) = shape.topic.as_ref().and_then(|t| t.equation.as_ref()) else {
+                continue;
+            };
+            let font_size = equation_font_size(shape.label.as_ref().map(|l| &l.text));
+            let color = text_color(shape, canvas);
+            let size = self
+                .equation_cache
+                .get(&eq.latex, color, font_size)
+                .as_ref()
+                .map_or((0., 0.), |r| r.size);
+            if size != eq.size {
+                sizes.push((shape.id, size));
+            }
+        }
+        for (id, size) in sizes {
+            self.session.set_topic_equation_size(id, size);
         }
     }
 

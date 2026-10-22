@@ -104,6 +104,20 @@ const ACCENTS: &[(&str, &[Accent])] = &[
             color: ROSE,
         }],
     ),
+    (
+        "sticky-note",
+        &[Accent {
+            body: r#"<path d="M15 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9h-5a1 1 0 0 1-1-1z"/>"#,
+            color: AMBER,
+        }],
+    ),
+    (
+        "sigma",
+        &[Accent {
+            body: r#"<path d="M6.5 4.8H17v14.4H6.5l4.1-5.4a3 3 0 0 0 0-3.6z"/>"#,
+            color: PURPLE,
+        }],
+    ),
 ];
 
 /// The accent layers of Lucide icon `name`, if it has hand-drawn ones.
