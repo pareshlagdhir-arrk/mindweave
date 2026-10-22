@@ -17,7 +17,8 @@ use gpui_kit::*;
 use mindweave_core::geometry::{Geometry, PathCmd};
 use mindweave_core::{Icon, ShapeDef};
 
-use super::tool::{shape_key, Tool, HOME_TAB};
+use super::mindmap_edit::NewTopic;
+use super::tool::{shape_key, Tool, HOME_TAB, MINDMAP_TAB};
 use super::{shape_gallery, EditorWindow, SMALL_TEXT_SIZE};
 use crate::libraries::{lucide_icon_path, Libraries};
 
@@ -133,7 +134,13 @@ impl EditorWindow {
 /// every tab at the right end.
 fn tab_row(editor: &mut EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoElement {
     let libraries = &cx.global::<Libraries>().0;
-    let mut tabs = vec![(SharedString::from(HOME_TAB), SharedString::from("Home"))];
+    let mut tabs = vec![
+        (SharedString::from(HOME_TAB), SharedString::from("Home")),
+        (
+            SharedString::from(MINDMAP_TAB),
+            SharedString::from("Mind Map"),
+        ),
+    ];
     tabs.extend(
         libraries
             .libraries()
@@ -214,6 +221,13 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
             .enumerate()
             .map(|(ix, shape)| shape_button(&library.id, ("tool-shape", ix), shape, cx))
             .collect(),
+        None if editor.tools.tab == MINDMAP_TAB => vec![ToolButton {
+            id: "tool-relationship".into(),
+            tool: Tool::Relationship,
+            icon: ButtonIcon::Svg(lucide_icon_path("spline", cx)),
+            name: "Relationship".into(),
+            tooltip: "Relationship: drag from one topic to another".into(),
+        }],
         None => home_buttons(),
     };
     let shown = match editor.ribbon.tool_row_width {
@@ -236,7 +250,52 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
         .take(shown)
         .map(|b| tool_button(editor, b, cx).into_any_element())
         .collect();
-    if library.is_none() {
+    if library.is_none() && editor.tools.tab == MINDMAP_TAB {
+        // Mind map commands, before the Relationship tool.
+        type Run = fn(&mut EditorWindow, &mut Window, &mut Context<EditorWindow>);
+        let commands: [(&'static str, &str, &'static str, Run); 5] = [
+            (
+                "mm-central",
+                "network",
+                "New Mind Map",
+                |this, window, cx| this.add_central_topic(window, cx),
+            ),
+            (
+                "mm-sub",
+                "corner-down-right",
+                "Subtopic (Tab)",
+                |this, window, cx| this.add_topic(NewTopic::Sub, window, cx),
+            ),
+            (
+                "mm-sibling",
+                "list-plus",
+                "Topic (Enter; Shift+Enter before)",
+                |this, window, cx| this.add_topic(NewTopic::After, window, cx),
+            ),
+            (
+                "mm-summary",
+                "braces",
+                "Summary of the Selected Topics",
+                |this, window, cx| this.add_summary(window, cx),
+            ),
+            (
+                "mm-boundary",
+                "square-dashed",
+                "Boundary round the Selected Topics",
+                |this, window, cx| this.toggle_boundary(window, cx),
+            ),
+        ];
+        let commands: Vec<AnyElement> = commands
+            .into_iter()
+            .map(|(id, icon, tip, run)| action_button(id, icon, tip, run, cx).into_any_element())
+            .collect();
+        let tools = std::mem::take(&mut button_elements);
+        button_elements = commands
+            .into_iter()
+            .map(IntoElement::into_any_element)
+            .collect();
+        button_elements.extend(tools);
+    } else if library.is_none() {
         button_elements.push(image_button(cx).into_any_element());
     }
     let this = cx.entity().downgrade();
@@ -306,6 +365,36 @@ fn home_buttons() -> Vec<ToolButton> {
             tooltip: "Text (T)".into(),
         },
     ]
+}
+
+/// A ribbon button that runs `run` (an action, not a tool).
+fn action_button(
+    id: &'static str,
+    icon: &str,
+    tooltip: &'static str,
+    run: impl Fn(&mut EditorWindow, &mut Window, &mut Context<EditorWindow>) + 'static,
+    cx: &mut Context<EditorWindow>,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let hover_bg = theme.list_hover;
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(BUTTON_SIZE))
+        .rounded(theme.radius)
+        .hover(move |style| style.bg(hover_bg))
+        .child(button_icon(
+            ButtonIcon::Svg(lucide_icon_path(icon, cx)),
+            theme.muted_foreground,
+        ))
+        .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.focus_handle.focus(window, cx);
+            run(this, window, cx);
+        }))
 }
 
 /// Home's Image button: imports picture files. An action, not a tool.

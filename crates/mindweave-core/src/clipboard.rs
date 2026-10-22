@@ -188,6 +188,25 @@ fn renew_ids(shapes: &mut [Shape]) {
             line.start = line.start.and_then(|id| ids.get(&id).copied());
             line.end = line.end.and_then(|id| ids.get(&id).copied());
         }
+        // Topics keep their tree among the copies; a topic whose parent
+        // was not copied becomes the central topic of a map of its own.
+        if let Some(t) = &mut s.topic {
+            match t.parent.and_then(|p| ids.get(&p).copied()) {
+                Some(parent) => {
+                    t.parent = Some(parent);
+                    t.map = ids.get(&t.map).copied().unwrap_or(t.map);
+                }
+                None => {
+                    t.parent = None;
+                    t.map = s.id;
+                    t.summary = None;
+                    t.branch.get_or_insert_with(Default::default);
+                }
+            }
+            t.summary = t
+                .summary
+                .and_then(|(a, b)| Some((*ids.get(&a)?, *ids.get(&b)?)));
+        }
     }
 }
 

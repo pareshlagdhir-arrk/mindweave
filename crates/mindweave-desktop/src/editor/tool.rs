@@ -2,6 +2,8 @@
 
 /// The ribbon tab holding Pointer, Hand and Text.
 pub const HOME_TAB: &str = "home";
+/// The ribbon tab holding the mind map tools.
+pub const MINDMAP_TAB: &str = "mindmap";
 /// The built-in library whose tools have their own keys.
 pub const BASIC_SHAPES: &str = "basic-shapes";
 /// Basic Shapes tools with a key of their own: shape id and key.
@@ -14,6 +16,9 @@ pub enum Tool {
     Hand,
     /// A click adds a text box there and starts editing it.
     Text,
+    /// Draws a mind map relationship: a curved, dashed arrow between two
+    /// topics.
+    Relationship,
     /// Places shape `shape` of library `library`.
     Shape {
         library: String,
@@ -34,6 +39,7 @@ impl Tool {
     pub fn tab(&self) -> &str {
         match self {
             Tool::Pointer | Tool::Hand | Tool::Text => HOME_TAB,
+            Tool::Relationship => MINDMAP_TAB,
             Tool::Shape { library, .. } => library,
         }
     }

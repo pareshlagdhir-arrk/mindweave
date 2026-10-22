@@ -81,7 +81,7 @@ impl AppSettings {
     /// remembered line style and properties, other library shapes the
     /// remembered shape style. Text boxes and images keep their own.
     pub fn apply_remembered_style(&self, shape: &mut Shape) {
-        if shape.is_text_box() || shape.is_image() {
+        if shape.is_text_box() || shape.is_image() || shape.is_topic() {
             return;
         }
         if shape.is_line() {
@@ -92,6 +92,7 @@ impl AppSettings {
                 *props = LineProps {
                     start: None,
                     end: None,
+                    relationship: props.relationship,
                     vertical: props.vertical,
                     ..remembered.clone()
                 };
@@ -105,7 +106,7 @@ impl AppSettings {
     /// Remembers `shape`'s style for new shapes of its kind (see
     /// [`Self::apply_remembered_style`]). Returns whether anything changed.
     pub fn remember_style(&mut self, shape: &Shape) -> bool {
-        if shape.is_text_box() || shape.is_image() {
+        if shape.is_text_box() || shape.is_image() || shape.is_topic() {
             return false;
         }
         let before = (
@@ -118,6 +119,7 @@ impl AppSettings {
             self.line_props = shape.line.clone().map(|p| LineProps {
                 start: None,
                 end: None,
+                relationship: false,
                 vertical: false,
                 ..p
             });

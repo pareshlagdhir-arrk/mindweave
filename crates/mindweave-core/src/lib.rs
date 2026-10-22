@@ -12,6 +12,7 @@ pub mod icons;
 pub mod image;
 pub mod library;
 pub mod line;
+pub mod mindmap;
 pub mod session;
 pub mod settings;
 pub mod shape;
@@ -49,9 +50,15 @@ pub use library::{
     MAX_USER_LIBRARIES,
 };
 pub use line::{
-    double_outline, edge_point, line_frame, line_geometry, line_jumps, route_line, ArrowHead,
-    LineDash, LineEnd, LineJump, LineProps, LineRoute, Target, JUMP_SIZES, LINE_LIBRARY,
-    LINE_SHAPE,
+    bend_through, double_outline, edge_point, line_frame, line_geometry, line_jumps, line_midpoint,
+    route_line, ArrowHead, LineDash, LineEnd, LineJump, LineProps, LineRoute, Target, JUMP_SIZES,
+    LINE_LIBRARY, LINE_SHAPE,
+};
+pub use mindmap::{
+    branch_style, clamp_topic_picture, fit_topic_picture, map_decor, rounded_polygon,
+    BoundaryProps, BranchStyle, Direction, MapDecor, Structure, TopicParts, TopicProps,
+    BOUNDARY_SHAPE, BRANCH_COLORS, TOPIC_ICON_SIZE, TOPIC_IMAGE_SIZE, TOPIC_PADDING, TOPIC_SHAPE,
+    TOPIC_TEXT_MAX,
 };
 pub use session::DocumentSession;
 pub use settings::{

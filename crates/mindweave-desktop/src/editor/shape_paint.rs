@@ -6,11 +6,13 @@ use std::collections::{BTreeMap, HashMap};
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
-use mindweave_core::geometry::{bounds, to_canvas, FillRole, Frame, Geometry, PathCmd, Pt, Rect};
+use mindweave_core::geometry::{
+    bounds, primitive_geometry, to_canvas, FillRole, Frame, Geometry, PathCmd, Primitive, Pt, Rect,
+};
 use mindweave_core::{
     double_outline, frame_aabb, handle_positions, is_auto_color, line_geometry, line_jumps,
-    rotate_handle_position, Handle, LibraryRegistry, LineDash, LineProps, Page, Shape, Style,
-    Viewport,
+    map_decor, rotate_handle_position, rounded_polygon, Handle, LibraryRegistry, LineDash,
+    LineProps, Page, Shape, Style, Viewport,
 };
 use uuid::Uuid;
 
@@ -59,6 +61,22 @@ pub fn shape_geometry_with(shape: &Shape, libs: &LibraryRegistry, jumps: &[f32])
     let line = shape.line.as_ref().filter(|_| shape.is_line());
     let (local, placeholder) = if shape.is_text_box() || shape.is_image() {
         (box_geometry(f.w, f.h, FillRole::Shape), false)
+    } else if let Some(b) = &shape.boundary {
+        // Round its members' hull, once laid out.
+        let g = if b.outline.len() >= 3 {
+            rounded_polygon(&b.outline, 18.)
+        } else {
+            primitive_geometry(Primitive::Rect, f.w, f.h, &|k| {
+                (k == "corner_radius").then_some(12.)
+            })
+        };
+        (g, false)
+    } else if let Some(t) = &shape.topic {
+        let radius = if t.is_central() { 12. } else { 6. };
+        let g = primitive_geometry(Primitive::Rect, f.w, f.h, &|k| {
+            (k == "corner_radius").then_some(radius)
+        });
+        (g, false)
     } else if let Some(props) = line {
         (
             line_geometry(f, props, style.stroke_width, style.double, jumps),
@@ -144,6 +162,8 @@ impl CacheEntry {
 #[derive(Clone, Debug, PartialEq)]
 struct GeomKey {
     line: Option<LineProps>,
+    /// A boundary's outline.
+    outline: Option<Vec<Pt>>,
     width: f32,
     double: bool,
     dash: LineDash,
@@ -153,6 +173,7 @@ struct GeomKey {
 fn geom_key(s: &Shape, jumps: &[f32]) -> GeomKey {
     GeomKey {
         line: s.line.clone(),
+        outline: s.boundary.as_ref().map(|b| b.outline.clone()),
         width: s.style.stroke_width,
         double: s.style.double,
         dash: s.style.dash,
@@ -341,6 +362,7 @@ pub fn paint_shapes(
     cache.update_jumps(page);
     images.begin_frame();
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        paint_map_decor(window, page, &painter);
         // Layers are stored top first.
         for layer in page.layers.iter().rev().filter(|l| l.visible) {
             for shape in &layer.objects {
@@ -384,11 +406,18 @@ pub fn paint_shapes(
                             zoom: vp.zoom,
                             style: shape.style.clone(),
                             auto,
-                            paths: painter.tessellate(&shape.style, &entry.outline),
+                            paths: if shape.is_boundary() {
+                                boundary_paths(&painter, &shape.style, &entry.outline)
+                            } else {
+                                painter.tessellate(&shape.style, &entry.outline)
+                            },
                         });
                     }
                     if let Some(t) = &entry.tessellation {
                         painter.paint_paths(&t.paths, window);
+                    }
+                    if shape.topic.is_some() {
+                        paint_topic_extras(window, cx, bounds, vp, shape, images, auto);
                     }
                     if entry.outline.placeholder {
                         painter.paint_label(shape, &entry.outline, window, cx);
@@ -400,6 +429,129 @@ pub fn paint_shapes(
     });
     cache.end_frame();
     images.end_frame(window);
+}
+
+/// Paints the branch lines and summary brackets of `page`'s mind maps,
+/// beneath every shape, each in the stroke of the topic it leads to.
+fn paint_map_decor(window: &mut Window, page: &Page, painter: &ShapePainter) {
+    let shapes: HashMap<Uuid, &Shape> = page
+        .layers
+        .iter()
+        .flat_map(|l| &l.objects)
+        .filter(|s| s.topic.is_some())
+        .map(|s| (s.id, s))
+        .collect();
+    if shapes.is_empty() {
+        return;
+    }
+    let width = |id: Uuid| shapes.get(&id).map_or(2., |s| s.style.stroke_width.max(1.));
+    let decor = map_decor(page, width);
+    let outline = |geometry: Geometry, dash: Option<[f32; 2]>| {
+        let aabb = bounds(&geometry).unwrap_or_default();
+        CanvasGeometry {
+            geometry,
+            aabb,
+            placeholder: false,
+            dash,
+        }
+    };
+    let line_style = |s: &Shape| Style {
+        fill: None,
+        stroke: s.style.stroke.clone(),
+        stroke_width: s.style.stroke_width.max(1.),
+        opacity: s.style.opacity,
+        ..Style::default()
+    };
+    for (id, g) in decor.branches.into_iter().chain(decor.brackets) {
+        let Some(s) = shapes.get(&id) else { continue };
+        let o = outline(g, None);
+        if painter.visible(&line_style(s), &o) {
+            painter.paint_paths(&painter.tessellate(&line_style(s), &o), window);
+        }
+    }
+}
+
+/// A boundary's paths: a light tint of its fill colour and its outline
+/// (dashed by default) a little lighter than its stroke colour.
+fn boundary_paths(
+    painter: &ShapePainter,
+    style: &Style,
+    outline: &CanvasGeometry,
+) -> Vec<(Path<Pixels>, Hsla)> {
+    let tint = Style {
+        stroke: None,
+        opacity: 0.1 * style.opacity,
+        ..style.clone()
+    };
+    let edge = Style {
+        fill: None,
+        opacity: 0.8 * style.opacity,
+        ..style.clone()
+    };
+    let mut paths = painter.tessellate(&tint, outline);
+    paths.extend(painter.tessellate(&edge, outline));
+    paths
+}
+
+/// Paints topic `shape`'s picture and link badge in their places.
+fn paint_topic_extras(
+    window: &mut Window,
+    cx: &mut App,
+    bounds: Bounds<Pixels>,
+    vp: &Viewport,
+    shape: &Shape,
+    images: &mut ImageCache,
+    auto: AutoColors,
+) {
+    let Some(t) = &shape.topic else { return };
+    let f = &shape.frame;
+    let parts = t.parts(f.w, f.h);
+    let on_screen = |r: &Rect| {
+        let r = screen_rect(
+            &Rect {
+                x: f.x + r.x,
+                y: f.y + r.y,
+                w: r.w,
+                h: r.h,
+            },
+            vp,
+            0.,
+        );
+        Bounds::new(bounds.origin + point(px(r.x), px(r.y)), size_of(r.w, r.h))
+    };
+    if let (Some(data), Some(rect)) = (&t.picture, parts.picture) {
+        let at = on_screen(&rect);
+        let shown = f32::from(at.size.width.max(at.size.height)) * window.scale_factor();
+        if let Some(image) = images.get(data, shown, cx) {
+            // Fit, keeping the picture's proportions.
+            let s = image.size(0);
+            let (iw, ih) = (s.width.0.max(1) as f32, s.height.0.max(1) as f32);
+            let (bw, bh) = (f32::from(at.size.width), f32::from(at.size.height));
+            let k = (bw / iw).min(bh / ih);
+            let (w, h) = (iw * k, ih * k);
+            let fit = Bounds::new(
+                at.origin + point(px((bw - w) / 2.), px((bh - h) / 2.)),
+                size_of(w, h),
+            );
+            window
+                .paint_image(bounds, fit, Corners::default(), image, 0, false)
+                .ok();
+        }
+    }
+    if let Some(rect) = parts.badge {
+        let color =
+            style_color(shape.style.stroke.as_deref(), auto.stroke, 1.).unwrap_or(auto.stroke);
+        window
+            .paint_svg(
+                on_screen(&rect),
+                crate::libraries::lucide_icon_path("link", cx),
+                None,
+                TransformationMatrix::unit(),
+                color,
+                cx,
+            )
+            .ok();
+    }
 }
 
 /// Paints `shape` as a placement preview, at `opacity` times its own.
@@ -601,14 +753,14 @@ impl<'a> ShapePainter<'a> {
 
 /// Paints the selection chrome on `chrome` (canvas coordinates): a 1px
 /// `accent` box, the square `resize_handles` and the rotate handle
-/// `rotate_offset` pixels above the top edge, all white with an accent
-/// border.
+/// `rotate_offset` pixels above the top edge (none for `None`), all white
+/// with an accent border.
 pub fn paint_selection(
     window: &mut Window,
     bounds: Bounds<Pixels>,
     vp: &Viewport,
     chrome: &Frame,
-    rotate_offset: f32,
+    rotate_offset: Option<f32>,
     resize_handles: &[(Handle, Pt)],
     accent: Hsla,
 ) {
@@ -647,7 +799,7 @@ pub fn paint_selection(
                 window.paint_path(path, accent);
             }
         }
-        let rotate = to_window(rotate_handle_position(chrome, rotate_offset / vp.zoom));
+        let rotate = rotate_offset.map(|o| to_window(rotate_handle_position(chrome, o / vp.zoom)));
         let half = HANDLE_SIZE_PX / 2.;
         let knob = |centre: Point<Pixels>, radius: f32| {
             let origin = point(
@@ -666,7 +818,9 @@ pub fn paint_selection(
         for &(_, p) in resize_handles {
             window.paint_quad(knob(to_window(p), 0.));
         }
-        window.paint_quad(knob(rotate, half));
+        if let Some(rotate) = rotate {
+            window.paint_quad(knob(rotate, half));
+        }
     });
 }
 

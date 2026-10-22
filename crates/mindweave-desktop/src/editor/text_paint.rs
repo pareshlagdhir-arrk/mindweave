@@ -167,7 +167,9 @@ pub fn paint_shape_text(
         let (_, th) = text
             .layouts
             .size(window, shape.id, &label.text, wrap, color);
-        let ((_, y), _) = label_origin(f.w, f.h, LABEL_PADDING, th, label.valign);
+        let area = label_area(shape);
+        let ((_, y), _) = label_origin(area.w, area.h, LABEL_PADDING, th, label.valign);
+        let y = y + area.y;
         let top_left = to_window((f.x, f.y));
         // The frame, from the text's top-left corner.
         let clip = Some((-y * zoom, (f.h - y) * zoom));
@@ -221,13 +223,29 @@ impl TextFrame {
 /// The width `shape`'s text wraps at, in canvas units: none for line
 /// labels and growing text boxes.
 pub fn text_wrap(shape: &Shape) -> Option<f32> {
-    let f = &shape.frame;
     if shape.is_line_like_label() {
         None
     } else if shape.is_text_box() {
         text_box_wrap(shape)
     } else {
-        Some(label_origin(f.w, f.h, LABEL_PADDING, 0., VAlign::Top).1)
+        let area = label_area(shape);
+        Some(label_origin(area.w, area.h, LABEL_PADDING, 0., VAlign::Top).1)
+    }
+}
+
+/// The part of `shape`'s box (local coordinates) its label goes in: all
+/// of it, but for a topic the part beside its icon and badge and below
+/// its image.
+pub fn label_area(shape: &Shape) -> Rect {
+    let f = &shape.frame;
+    match &shape.topic {
+        Some(t) => t.parts(f.w, f.h).text,
+        None => Rect {
+            x: 0.,
+            y: 0.,
+            w: f.w,
+            h: f.h,
+        },
     }
 }
 
@@ -239,8 +257,18 @@ pub fn text_frame(shape: &Shape, (w, h): (f32, f32)) -> TextFrame {
     let f = &shape.frame;
     if shape.is_line_like_label() {
         let (centre, angle) = line_label_placement(f);
+        // On the middle of the route, which a bend moves.
+        let centre = shape
+            .line
+            .as_ref()
+            .map_or(centre, |l| mindweave_core::line_midpoint(f, l));
         let route = shape.line.as_ref().map(|l| l.route).unwrap_or_default();
-        let angle = mindweave_core::line::line_label_angle(route, angle);
+        let bent = shape.line.as_ref().is_some_and(|l| l.bend.is_some());
+        let angle = if bent {
+            0.
+        } else {
+            mindweave_core::line::line_label_angle(route, angle)
+        };
         return TextFrame {
             centre,
             offset: (-w / 2., -h / 2.),
@@ -252,7 +280,9 @@ pub fn text_frame(shape: &Shape, (w, h): (f32, f32)) -> TextFrame {
         (TEXT_BOX_PADDING, TEXT_BOX_PADDING)
     } else {
         let valign = shape.label.as_ref().map_or(VAlign::Middle, |l| l.valign);
-        label_origin(f.w, f.h, LABEL_PADDING, h, valign).0
+        let area = label_area(shape);
+        let (x, y) = label_origin(area.w, area.h, LABEL_PADDING, h, valign).0;
+        (x + area.x, y + area.y)
     };
     TextFrame {
         centre,

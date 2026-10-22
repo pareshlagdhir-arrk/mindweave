@@ -138,6 +138,32 @@ fn corner_offset(f: &Frame) -> (f32, f32) {
 /// Whether two text-box frames place the box at the same spot: the same
 /// `x`/`y` unrotated; rotated, the same top-left corner (which layout
 /// keeps fixed) up to float rounding.
+/// Topic (or boundary) equality ignoring what the layout derives: every
+/// topic's size, a placed topic's position, a boundary's frame. A central
+/// topic's centre is content.
+fn topic_content_eq(a: &Shape, b: &Shape) -> bool {
+    let central = a
+        .topic
+        .as_ref()
+        .is_some_and(crate::mindmap::TopicProps::is_central);
+    let centre = |f: &Frame| (f.x + f.w / 2.0, f.y + f.h / 2.0);
+    if central {
+        let (ca, cb) = (centre(&a.frame), centre(&b.frame));
+        let near = |u: f32, v: f32| (u - v).abs() <= 1e-3 * u.abs().max(v.abs()).max(1.0);
+        if !(near(ca.0, cb.0) && near(ca.1, cb.1)) {
+            return false;
+        }
+    }
+    let (mut a, mut b) = (a.clone(), b.clone());
+    for s in [&mut a, &mut b] {
+        s.frame = Frame::default();
+        if let Some(bound) = s.boundary.as_mut() {
+            bound.outline.clear();
+        }
+    }
+    a == b
+}
+
 fn same_text_box_position(a: &Frame, b: &Frame) -> bool {
     if a.rotation != b.rotation {
         return false;
@@ -157,6 +183,9 @@ fn same_text_box_position(a: &Frame, b: &Frame) -> bool {
 /// layout: `frame.h` always, `frame.w` while it grows with its text, and
 /// the `x`/`y` shift that keeps a rotated box's top-left corner in place.
 fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
+    if (a.topic.is_some() && b.topic.is_some()) || (a.is_boundary() && b.is_boundary()) {
+        return topic_content_eq(a, b);
+    }
     if !(a.is_text_box() && b.is_text_box()) || a.auto_width() != b.auto_width() {
         return a == b;
     }
@@ -175,6 +204,8 @@ fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
         line,
         image,
         groups,
+        topic,
+        boundary,
         extra,
     } = a;
     let auto = a.auto_width();
@@ -199,6 +230,8 @@ fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
         && *line == b.line
         && *image == b.image
         && *groups == b.groups
+        && *topic == b.topic
+        && *boundary == b.boundary
         && *extra == b.extra
 }
 
@@ -604,6 +637,7 @@ impl DocumentSession {
     /// the step that changed them.
     fn reroute_lines(&mut self) {
         let libs = self.libs.clone();
+        crate::mindmap::layout_page(self.page_mut());
         reroute_page(self.page_mut(), libs.as_deref());
     }
 
@@ -753,6 +787,396 @@ impl DocumentSession {
                 self.reroute_lines();
             }
         }
+    }
+
+    /// Stores the size topic `id` derives from its text, icon and image,
+    /// and lays its map out again. Like [`Self::set_text_box_layout`] this
+    /// is not an edit. Non-finite sizes and other shapes are ignored.
+    pub fn set_topic_size(&mut self, id: Uuid, w: f32, h: f32) {
+        if !(w.is_finite() && h.is_finite()) {
+            return;
+        }
+        let shape = self
+            .page_mut()
+            .layers
+            .iter_mut()
+            .flat_map(|l| l.objects.iter_mut())
+            .find(|s| s.id == id && s.topic.is_some());
+        if let Some(shape) = shape {
+            let f = &mut shape.frame;
+            if (f.w, f.h) == (w, h) {
+                return;
+            }
+            // A central topic grows about its centre.
+            let central = shape.topic.as_ref().is_some_and(|t| t.is_central());
+            if central {
+                f.x += (f.w - w) / 2.0;
+                f.y += (f.h - h) / 2.0;
+            }
+            (f.w, f.h) = (w, h);
+            shape.normalize();
+            self.layout_generation += 1;
+            self.reroute_lines();
+        }
+    }
+
+    /// Adds a new mind map whose central topic is centred on `at`; returns
+    /// its id.
+    pub fn add_central_topic(&mut self, at: (f32, f32)) -> Uuid {
+        let (w, h) = (140.0, 48.0);
+        let mut topic = Shape::new_topic(Frame {
+            x: at.0 - w / 2.0,
+            y: at.1 - h / 2.0,
+            w,
+            h,
+            ..Frame::default()
+        });
+        topic.style.fill = Some(crate::color::AUTO_COLOR.to_string());
+        let id = topic.id;
+        self.add_shapes(vec![topic]);
+        id
+    }
+
+    /// The topic `id` on the active layer and its properties.
+    fn topic_of(&self, id: Uuid) -> Option<(&Shape, &crate::mindmap::TopicProps)> {
+        let s = self.find_shape(id)?;
+        Some((s, s.topic.as_ref()?))
+    }
+
+    /// Adds a topic under `parent` after its last child (`order: None`)
+    /// or at `order`, as one undo step; returns its id. Main topics get
+    /// the next branch colour; deeper topics their parent's.
+    fn add_topic_under(&mut self, parent: Uuid, order: Option<f64>) -> Option<Uuid> {
+        use crate::mindmap::{TopicProps, BRANCH_COLORS};
+        let (p, props) = self.topic_of(parent)?;
+        if props.summary.is_some() {
+            return None;
+        }
+        let map = props.map;
+        let central = props.is_central();
+        let siblings: Vec<&Shape> = self
+            .shapes_on_active_layer()
+            .iter()
+            .filter(|s| {
+                s.topic
+                    .as_ref()
+                    .is_some_and(|t| t.parent == Some(parent) && t.summary.is_none())
+            })
+            .collect();
+        let order = order.unwrap_or_else(|| {
+            siblings
+                .iter()
+                .filter_map(|s| s.topic.as_ref().map(|t| t.order))
+                .fold(-1.0, f64::max)
+                + 1.0
+        });
+        let mut topic = Shape::new_topic(Frame {
+            x: p.frame.x,
+            y: p.frame.y,
+            w: 100.0,
+            h: 32.0,
+            ..Frame::default()
+        });
+        let text = if central {
+            format!("Main Topic {}", siblings.len() + 1)
+        } else {
+            format!("Subtopic {}", siblings.len() + 1)
+        };
+        if let Some(label) = &mut topic.label {
+            label.text = crate::text::RichText::new(
+                crate::text::RunStyle {
+                    size: crate::text::LABEL_FONT_SIZE,
+                    ..crate::text::RunStyle::default()
+                },
+                crate::text::HAlign::Center,
+            );
+            label.text.insert(0, &text, &label.text.style_at(0));
+        }
+        topic.style.stroke = if central {
+            Some(BRANCH_COLORS[siblings.len() % BRANCH_COLORS.len()].to_string())
+        } else {
+            p.style.stroke.clone()
+        };
+        topic.style.fill = Some(crate::color::AUTO_COLOR.to_string());
+        topic.groups = p.groups.clone();
+        topic.topic = Some(TopicProps::child(map, parent, order));
+        let id = topic.id;
+        self.add_shapes(vec![topic]);
+        Some(id)
+    }
+
+    /// Adds a subtopic to topic `parent`; returns its id.
+    pub fn add_subtopic(&mut self, parent: Uuid) -> Option<Uuid> {
+        self.add_topic_under(parent, None)
+    }
+
+    /// Adds a topic beside topic `id`, after it (or before it with
+    /// `before`); the central topic gets a subtopic instead, as it has no
+    /// siblings. Returns the new topic's id.
+    pub fn add_sibling(&mut self, id: Uuid, before: bool) -> Option<Uuid> {
+        let (_, props) = self.topic_of(id)?;
+        let Some(parent) = props.parent.filter(|_| props.summary.is_none()) else {
+            return self.add_subtopic(id);
+        };
+        let order = props.order;
+        let neighbour = self
+            .shapes_on_active_layer()
+            .iter()
+            .filter_map(|s| s.topic.as_ref())
+            .filter(|t| t.parent == Some(parent) && t.summary.is_none())
+            .map(|t| t.order)
+            .filter(|o| if before { *o < order } else { *o > order })
+            .fold(None, |best: Option<f64>, o| {
+                Some(match best {
+                    Some(b) if (before && b > o) || (!before && b < o) => b,
+                    _ => o,
+                })
+            });
+        let new = match neighbour {
+            Some(n) => (order + n) / 2.0,
+            None if before => order - 1.0,
+            None => order + 1.0,
+        };
+        self.add_topic_under(parent, Some(new))
+    }
+
+    /// Removes topics `ids` with their subtrees, the summaries of what is
+    /// removed, and relationship lines to any of them, as one undo step.
+    /// Other shapes among `ids` are removed too.
+    pub fn delete_with_branches(&mut self, ids: &[Uuid]) -> Vec<Shape> {
+        let mut gone = crate::mindmap::with_descendants(self.page(), ids);
+        for s in self.page().layers.iter().flat_map(|l| &l.objects) {
+            if let Some(l) = s.line.as_ref().filter(|l| l.relationship) {
+                if [l.start, l.end]
+                    .into_iter()
+                    .flatten()
+                    .any(|e| gone.contains(&e))
+                {
+                    gone.insert(s.id);
+                }
+            }
+        }
+        // Boundaries lose removed members; one left with none goes too.
+        let mut pruned: Vec<(Uuid, Vec<Uuid>)> = Vec::new();
+        for s in self.page().layers.iter().flat_map(|l| &l.objects) {
+            if let Some(b) = &s.boundary {
+                let left: Vec<Uuid> = b
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|m| !gone.contains(m))
+                    .collect();
+                if left.is_empty() {
+                    gone.insert(s.id);
+                } else if left.len() != b.members.len() {
+                    pruned.push((s.id, left));
+                }
+            }
+        }
+        let gone: Vec<Uuid> = gone.into_iter().collect();
+        self.begin_gesture();
+        let removed = self.remove_shapes(&gone);
+        for (id, left) in pruned {
+            self.update_shapes(&[id], |s| {
+                if let Some(b) = s.boundary.as_mut() {
+                    b.members = left.clone();
+                }
+            });
+        }
+        self.end_gesture();
+        removed
+    }
+
+    /// Moves topic `id` (not a central or summary topic) to the end of
+    /// `new_parent`'s children, as one undo step. Refused when the new
+    /// parent is in its own subtree, or in another map. Returns whether
+    /// it moved.
+    pub fn move_topic(&mut self, id: Uuid, new_parent: Uuid) -> bool {
+        let Some((_, props)) = self.topic_of(id) else {
+            return false;
+        };
+        if props.is_central() || props.summary.is_some() || props.parent == Some(new_parent) {
+            return false;
+        }
+        let map = props.map;
+        let Some((_, target)) = self.topic_of(new_parent) else {
+            return false;
+        };
+        if target.map != map || target.summary.is_some() {
+            return false;
+        }
+        if crate::mindmap::with_descendants(self.page(), &[id]).contains(&new_parent) {
+            return false;
+        }
+        let order = self
+            .shapes_on_active_layer()
+            .iter()
+            .filter_map(|s| s.topic.as_ref())
+            .filter(|t| t.parent == Some(new_parent))
+            .map(|t| t.order)
+            .fold(-1.0, f64::max)
+            + 1.0;
+        // Summaries of a range the topic leaves are removed.
+        let stale: Vec<Uuid> = self
+            .shapes_on_active_layer()
+            .iter()
+            .filter(|s| {
+                s.topic
+                    .as_ref()
+                    .and_then(|t| t.summary)
+                    .is_some_and(|(a, b)| a == id || b == id)
+            })
+            .map(|s| s.id)
+            .collect();
+        self.begin_gesture();
+        self.update_shapes(&[id], |s| {
+            if let Some(t) = s.topic.as_mut() {
+                t.parent = Some(new_parent);
+                t.order = order;
+                t.offset = None;
+            }
+        });
+        self.remove_shapes(&stale);
+        self.end_gesture();
+        true
+    }
+
+    /// Adds a summary topic for the siblings among `ids` (the span from
+    /// the first to the last of them), as one undo step; returns its id.
+    /// Needs topics with one parent, none central or a summary.
+    pub fn add_summary(&mut self, ids: &[Uuid]) -> Option<Uuid> {
+        let topics: Vec<&crate::mindmap::TopicProps> = ids
+            .iter()
+            .filter_map(|id| self.topic_of(*id).map(|(_, t)| t))
+            .collect();
+        let parent = topics.first()?.parent?;
+        if topics.len() != ids.len()
+            || topics
+                .iter()
+                .any(|t| t.parent != Some(parent) || t.summary.is_some())
+        {
+            return None;
+        }
+        let first = ids
+            .iter()
+            .zip(&topics)
+            .min_by(|a, b| a.1.order.total_cmp(&b.1.order))?
+            .0;
+        let last = ids
+            .iter()
+            .zip(&topics)
+            .max_by(|a, b| a.1.order.total_cmp(&b.1.order))?
+            .0;
+        let (first, last) = (*first, *last);
+        self.begin_gesture();
+        let id = self.add_topic_under(parent, Some(f64::MAX / 2.0));
+        if let Some(id) = id {
+            self.update_shapes(&[id], |s| {
+                if let Some(t) = s.topic.as_mut() {
+                    t.summary = Some((first, last));
+                }
+                if let Some(label) = &mut s.label {
+                    let style = label.text.style_at(0);
+                    label.text =
+                        crate::text::RichText::new(style.clone(), crate::text::HAlign::Center);
+                    label.text.insert(0, "Summary", &style);
+                }
+            });
+        }
+        self.end_gesture();
+        id
+    }
+
+    /// Draws one boundary round topics `ids` (with their subtrees), at the
+    /// back, as one undo step; returns its id. When a boundary round
+    /// exactly these topics exists, removes it instead and returns `None`.
+    pub fn toggle_boundary(&mut self, ids: &[Uuid]) -> Option<Uuid> {
+        let topics: Vec<Uuid> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.topic_of(*id).is_some())
+            .collect();
+        if topics.is_empty() {
+            return None;
+        }
+        let wanted: HashSet<Uuid> = topics.iter().copied().collect();
+        let existing = self.shapes_on_active_layer().iter().find(|s| {
+            s.boundary
+                .as_ref()
+                .is_some_and(|b| b.members.iter().copied().collect::<HashSet<_>>() == wanted)
+        });
+        if let Some(existing) = existing {
+            let id = existing.id;
+            self.remove_shapes(&[id]);
+            return None;
+        }
+        let color = self
+            .find_shape(topics[0])
+            .and_then(|s| s.style.stroke.clone());
+        let boundary = Shape::new_boundary(topics, color);
+        let id = boundary.id;
+        self.begin_gesture();
+        self.add_shapes(vec![boundary]);
+        self.arrange_shapes(&[id], crate::arrange::Arrange::ToBack);
+        self.end_gesture();
+        Some(id)
+    }
+
+    /// Moves topic `id` (with its subtree) by `(dx, dy)` from where the
+    /// layout puts it, as one undo step (or part of an open gesture).
+    pub fn set_topic_offset(&mut self, id: Uuid, offset: Option<(f32, f32)>) {
+        self.update_shapes(&[id], |s| {
+            if let Some(t) = s.topic.as_mut().filter(|t| !t.is_central()) {
+                t.offset = offset;
+            }
+        });
+    }
+
+    /// Turns automatic layout of maps `maps` (central topic ids) on or off,
+    /// as one undo step; turned on, their topics go back where the layout
+    /// puts them.
+    pub fn set_auto_layout(&mut self, maps: &[Uuid], on: bool) {
+        self.begin_gesture();
+        self.update_shapes(maps, |s| {
+            if let Some(t) = s.topic.as_mut().filter(|t| t.is_central()) {
+                t.auto_layout = on;
+            }
+        });
+        if on {
+            self.reset_layout(maps);
+        }
+        self.end_gesture();
+    }
+
+    /// Whether map `map` (a central topic id) keeps its topics arranged.
+    pub fn auto_layout(&self, map: Uuid) -> bool {
+        self.page()
+            .layers
+            .iter()
+            .flat_map(|l| &l.objects)
+            .find(|s| s.id == map)
+            .and_then(|s| s.topic.as_ref())
+            .is_none_or(|t| t.auto_layout)
+    }
+
+    /// Puts every topic of the maps `maps` (central topic ids) back where
+    /// the layout puts it, as one undo step.
+    pub fn reset_layout(&mut self, maps: &[Uuid]) {
+        let ids: Vec<Uuid> = self
+            .shapes_on_active_layer()
+            .iter()
+            .filter(|s| {
+                s.topic
+                    .as_ref()
+                    .is_some_and(|t| maps.contains(&t.map) && t.offset.is_some())
+            })
+            .map(|s| s.id)
+            .collect();
+        self.update_shapes(&ids, |s| {
+            if let Some(t) = s.topic.as_mut() {
+                t.offset = None;
+            }
+        });
     }
 
     /// Removes shape `id` from the active page without an undo step of its
@@ -1243,6 +1667,119 @@ mod tests {
         props.start = start;
         props.end = end;
         s
+    }
+
+    #[test]
+    fn mind_map_commands_build_and_prune_the_tree() {
+        let (_d, mut s) = new_session("m.mindweave");
+        let c = s.add_central_topic((0.0, 0.0));
+        let topic = |s: &DocumentSession, id| s.find_shape(id).unwrap().topic.clone().unwrap();
+        // The central topic has no siblings: Enter adds a subtopic.
+        let a = s.add_sibling(c, false).unwrap();
+        assert_eq!(topic(&s, a).parent, Some(c));
+        let b = s.add_sibling(a, false).unwrap();
+        let before_a = s.add_sibling(a, true).unwrap();
+        assert!(topic(&s, before_a).order < topic(&s, a).order);
+        assert!(topic(&s, a).order < topic(&s, b).order);
+        let a1 = s.add_subtopic(a).unwrap();
+        assert_eq!(topic(&s, a1).parent, Some(a));
+        // Main topics get branch colours; subtopics their parent's.
+        let stroke = |s: &DocumentSession, id| s.find_shape(id).unwrap().style.stroke.clone();
+        assert_eq!(stroke(&s, a1), stroke(&s, a));
+        assert_ne!(stroke(&s, a), stroke(&s, b));
+        // Children sit right of the central topic, laid out.
+        assert!(s.find_shape(a).unwrap().frame.x > s.find_shape(c).unwrap().frame.x);
+
+        let sum = s.add_summary(&[a, b]).unwrap();
+        assert_eq!(topic(&s, sum).summary, Some((a, b)));
+        assert!(s.add_summary(&[a, a1]).is_none());
+        // One boundary round both topics; the same pair again removes it.
+        let boundary = s.toggle_boundary(&[a, b]).unwrap();
+        let members = s
+            .find_shape(boundary)
+            .unwrap()
+            .boundary
+            .clone()
+            .unwrap()
+            .members;
+        assert_eq!(members, vec![a, b]);
+        assert_eq!(
+            s.shapes_on_active_layer()[0].id,
+            boundary,
+            "boundaries go at the back"
+        );
+        assert!(s.toggle_boundary(&[b, a]).is_none());
+        assert!(s.find_shape(boundary).is_none());
+        let boundary = s.toggle_boundary(&[a, b]).unwrap();
+
+        // A relationship line between two topics goes with either.
+        let libs = crate::library::builtin_libraries();
+        let mut rel = Shape::new(
+            libs[0].shape("line").unwrap(),
+            "basic-shapes",
+            crate::line::line_frame((0.0, 0.0), (1.0, 1.0)),
+        );
+        let props = rel.line.as_mut().unwrap();
+        (props.start, props.end, props.relationship) = (Some(a1), Some(b), true);
+        let rel_id = rel.id;
+        s.add_shapes(vec![rel]);
+
+        // Moving a topic into its own subtree is refused.
+        assert!(!s.move_topic(a, a1));
+        assert!(s.move_topic(a1, b));
+        assert_eq!(topic(&s, a1).parent, Some(b));
+        s.undo();
+        assert_eq!(topic(&s, a1).parent, Some(a));
+
+        s.delete_with_branches(&[a]);
+        for gone in [a, a1, sum, rel_id] {
+            assert!(s.find_shape(gone).is_none());
+        }
+        assert!(s.find_shape(b).is_some());
+        // The boundary keeps its remaining member.
+        let members = s
+            .find_shape(boundary)
+            .unwrap()
+            .boundary
+            .clone()
+            .unwrap()
+            .members;
+        assert_eq!(members, vec![b]);
+        s.undo();
+        assert!(s.find_shape(rel_id).is_some());
+
+        // A dragged topic keeps its offset until the layout is reset.
+        s.set_topic_offset(b, Some((10.0, 50.0)));
+        assert_eq!(topic(&s, b).offset, Some((10.0, 50.0)));
+        s.reset_layout(&[c]);
+        assert_eq!(topic(&s, b).offset, None);
+        // Turning automatic layout back on re-arranges the map.
+        s.set_auto_layout(&[c], false);
+        assert!(!s.auto_layout(c));
+        s.set_topic_offset(b, Some((10.0, 50.0)));
+        s.set_auto_layout(&[c], true);
+        assert!(s.auto_layout(c));
+        assert_eq!(topic(&s, b).offset, None);
+    }
+
+    #[test]
+    fn topic_sizes_from_text_are_not_edits() {
+        let (_d, mut s) = new_session("t.mindweave");
+        let c = s.add_central_topic((50.0, 50.0));
+        let a = s.add_subtopic(c).unwrap();
+        s.save().unwrap();
+        let rev = s.revision();
+        s.set_topic_size(c, 300.0, 60.0);
+        s.set_topic_size(a, 120.0, 40.0);
+        assert_eq!(s.revision(), rev);
+        assert!(!s.is_dirty());
+        // The central topic grew about its centre; its child moved along.
+        let f = s.find_shape(c).unwrap().frame;
+        assert_eq!((f.x + f.w / 2.0, f.y + f.h / 2.0), (50.0, 50.0));
+        assert_eq!(
+            s.find_shape(a).unwrap().frame.x,
+            f.x + f.w + crate::mindmap::LEVEL_GAP
+        );
     }
 
     #[test]

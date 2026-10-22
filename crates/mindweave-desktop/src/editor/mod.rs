@@ -8,6 +8,7 @@ mod images;
 mod interaction;
 mod layers_panel;
 mod line_properties;
+mod mindmap_edit;
 mod page_tabs;
 mod properties_panel;
 mod shape_gallery;
@@ -20,6 +21,7 @@ mod text_paint;
 mod text_properties;
 pub mod tool;
 mod toolbar;
+mod topic_properties;
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -40,11 +42,12 @@ use mindweave_core::{
 
 // `Copy` is used by path: importing it would hide the derivable trait.
 use crate::actions::{
-    self, BringForward, BringToFront, Cancel, CloseWindow, Cut, Delete, Duplicate, EditText, Group,
-    NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp,
-    NudgeUpFar, Paste, Redo, Save, SelectAll, SendBackward, SendToBack, ToggleIcons, ToggleLayers,
-    ToggleProperties, ToolEllipse, ToolHand, ToolLine, ToolPointer, ToolRectangle, ToolText, Undo,
-    Ungroup, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
+    self, AddCentralTopic, AddSiblingBefore, AddSubtopic, AddSummary, BringForward, BringToFront,
+    Cancel, CloseWindow, Cut, Delete, Duplicate, EditLabel, EditText, Group, NudgeDown,
+    NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp, NudgeUpFar, Paste,
+    Redo, Save, SelectAll, SendBackward, SendToBack, ToggleBoundary, ToggleIcons, ToggleLayers,
+    ToggleProperties, ToolEllipse, ToolHand, ToolLine, ToolPointer, ToolRectangle,
+    ToolRelationship, ToolText, Undo, Ungroup, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
 };
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
@@ -214,6 +217,10 @@ pub struct EditorWindow {
     pub selection: Vec<Uuid>,
     /// While a line is drawn: the shapes its start and end attach to.
     line_ends: [Option<Uuid>; 2],
+    /// The line being drawn is a mind map relationship.
+    placing_relationship: bool,
+    /// While a topic is dragged: its offset when the drag began.
+    topic_drag_from: Option<Option<(f32, f32)>>,
     /// The shape a line end being drawn or dragged would attach to.
     attach_highlight: Option<Uuid>,
     /// Canvas outlines of the shapes painted last frame.
@@ -222,6 +229,8 @@ pub struct EditorWindow {
     image_cache: images::ImageCache,
     /// The Icons pane's search and set filter.
     icons: icons_panel::IconsPane,
+    /// The Topic section's link field.
+    topic_fields: topic_properties::TopicFields,
     /// Text layouts of the active page's labels and text boxes.
     text_layouts: TextLayoutCache,
     /// Glyph outlines for drawing rotated text.
@@ -266,6 +275,8 @@ impl EditorWindow {
         ]);
         let (icons, icons_subscription) = icons_panel::IconsPane::new(window, cx);
         _subscriptions.push(icons_subscription);
+        let (topic_fields, topic_subscription) = topic_properties::TopicFields::new(window, cx);
+        _subscriptions.push(topic_subscription);
         let window_title = session.title();
         Self {
             session,
@@ -282,10 +293,13 @@ impl EditorWindow {
             press: Press::default(),
             selection: Vec::new(),
             line_ends: [None; 2],
+            placing_relationship: false,
+            topic_drag_from: None,
             attach_highlight: None,
             geometry_cache: GeometryCache::default(),
             image_cache: images::ImageCache::default(),
             icons,
+            topic_fields,
             text_layouts: TextLayoutCache::default(),
             glyph_outlines: GlyphOutlines::default(),
             session_gesture: SessionGesture::default(),
@@ -743,9 +757,64 @@ impl EditorWindow {
     }
 
     /// Return: edits the one selected text box or labelled shape.
+    /// Return: adds a topic after the one selected topic (a subtopic of a
+    /// central topic); otherwise edits the selected text.
     fn on_edit_text(&mut self, _: &EditText, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_topic().is_some() {
+            self.add_topic(mindmap_edit::NewTopic::After, window, cx);
+            return;
+        }
         self.begin_edit_action(window, cx);
         self.edit_selected_text(window, cx);
+    }
+
+    fn on_edit_label(&mut self, _: &EditLabel, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_action(window, cx);
+        self.edit_selected_text(window, cx);
+    }
+
+    fn on_add_subtopic(&mut self, _: &AddSubtopic, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_topic(mindmap_edit::NewTopic::Sub, window, cx);
+    }
+
+    fn on_add_sibling_before(
+        &mut self,
+        _: &AddSiblingBefore,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_topic(mindmap_edit::NewTopic::Before, window, cx);
+    }
+
+    fn on_add_central_topic(
+        &mut self,
+        _: &AddCentralTopic,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_central_topic(window, cx);
+    }
+
+    fn on_add_summary(&mut self, _: &AddSummary, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_summary(window, cx);
+    }
+
+    fn on_toggle_boundary(
+        &mut self,
+        _: &ToggleBoundary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_boundary(window, cx);
+    }
+
+    fn on_tool_relationship(
+        &mut self,
+        _: &ToolRelationship,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_tool(Tool::Relationship, window, cx);
     }
 
     /// Escape: aborts the gesture in progress; otherwise clears the
@@ -833,9 +902,10 @@ impl EditorWindow {
             return;
         }
         let ids = self.selection.clone();
+        // A topic goes with its branch and its relationships.
         self.update_session(
             |s| {
-                s.remove_shapes(&ids);
+                s.delete_with_branches(&ids);
             },
             cx,
         );
@@ -1055,7 +1125,22 @@ impl EditorWindow {
                     };
                     let p = window.mouse_position() - bounds.origin;
                     let at = this.to_canvas((f32::from(p.x), f32::from(p.y)));
-                    this.place_icon(&drag.path.clone(), Some(at), window, cx);
+                    // Dropped on a topic, the icon becomes the topic's icon.
+                    let topic = this.shape_at(at, cx).filter(|id| {
+                        this.session
+                            .find_shape(*id)
+                            .is_some_and(|s| s.topic.is_some())
+                    });
+                    match topic {
+                        Some(id) => this.set_topic_picture_file(
+                            &[id],
+                            &drag.path.clone(),
+                            mindweave_core::TOPIC_ICON_SIZE,
+                            window,
+                            cx,
+                        ),
+                        None => this.place_icon(&drag.path.clone(), Some(at), window, cx),
+                    }
                 }),
             )
             .context_menu(move |menu, _, _| canvas_menu(menu, focus.clone()))
@@ -1248,6 +1333,7 @@ impl Render for EditorWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_window_title(window);
         self.sync_properties(window, cx);
+        self.sync_topic_fields(window, cx);
 
         let (show_layers, show_properties, show_icons) = {
             let settings = &cx.global::<AppState>().settings;
@@ -1339,6 +1425,13 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_tool_hand))
             .on_action(cx.listener(Self::on_tool_text))
             .on_action(cx.listener(Self::on_edit_text))
+            .on_action(cx.listener(Self::on_edit_label))
+            .on_action(cx.listener(Self::on_add_subtopic))
+            .on_action(cx.listener(Self::on_add_sibling_before))
+            .on_action(cx.listener(Self::on_add_central_topic))
+            .on_action(cx.listener(Self::on_add_summary))
+            .on_action(cx.listener(Self::on_toggle_boundary))
+            .on_action(cx.listener(Self::on_tool_relationship))
             .on_action(cx.listener(Self::on_tool_rectangle))
             .on_action(cx.listener(Self::on_tool_ellipse))
             .on_action(cx.listener(Self::on_tool_line))

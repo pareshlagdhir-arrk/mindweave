@@ -14,10 +14,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::color::normalize_style_color;
+use crate::color::AUTO_COLOR;
 use crate::geometry::{Frame, Pt};
 use crate::image::{ImageData, IMAGE_SHAPE};
 use crate::library::ShapeDef;
 use crate::line::{ArrowHead, LineDash, LineProps, LINE_LIBRARY, LINE_SHAPE, OLD_ARROW_SHAPE};
+use crate::mindmap::{BoundaryProps, TopicProps, BOUNDARY_SHAPE, TOPIC_SHAPE};
 use crate::text::{HAlign, RichText, RunStyle, DEFAULT_FONT_SIZE, LABEL_FONT_SIZE};
 
 /// Library id reserved for Mindweave's built-in objects.
@@ -155,6 +157,12 @@ pub struct Shape {
     /// [`crate::arrange`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<Uuid>,
+    /// Set on mind map topics only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<TopicProps>,
+    /// Set on mind map boundaries only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<BoundaryProps>,
     /// Fields this version does not know, written back unchanged.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -188,6 +196,8 @@ impl Shape {
             line: None,
             image: None,
             groups: Vec::new(),
+            topic: None,
+            boundary: None,
             extra: serde_json::Map::new(),
         }
         .normalized()
@@ -231,6 +241,8 @@ impl Shape {
             line: None,
             image: None,
             groups: Vec::new(),
+            topic: None,
+            boundary: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -244,6 +256,77 @@ impl Shape {
         s.text_box = None;
         s.image = Some(data);
         s.normalized()
+    }
+
+    /// A new central topic of a new mind map in `frame`: "Central Topic",
+    /// centred, in theme colours (its size follows its text).
+    pub fn new_topic(frame: Frame) -> Shape {
+        let mut s = Shape::new_text_box((frame.x, frame.y));
+        s.shape = TOPIC_SHAPE.to_string();
+        s.frame = frame;
+        s.text_box = None;
+        s.style = Style {
+            fill: Some(AUTO_COLOR.to_string()),
+            stroke: Some(AUTO_COLOR.to_string()),
+            stroke_width: 2.0,
+            ..Style::default()
+        };
+        let mut label = Label::new_shape_label();
+        label
+            .text
+            .insert(0, "Central Topic", &label.text.style_at(0));
+        s.label = Some(label);
+        s.topic = Some(TopicProps::central(s.id));
+        s.normalized()
+    }
+
+    /// Whether this is a mind map topic.
+    pub fn is_topic(&self) -> bool {
+        self.library == TEXT_LIBRARY && self.shape == TOPIC_SHAPE
+    }
+
+    /// A new boundary round topics `members`, tinted and outlined in
+    /// `color` (its frame follows them; see [`crate::mindmap::layout_page`]).
+    pub fn new_boundary(members: Vec<Uuid>, color: Option<String>) -> Shape {
+        let mut s = Shape::new_text_box((0.0, 0.0));
+        s.shape = BOUNDARY_SHAPE.to_string();
+        s.label = None;
+        s.text_box = None;
+        s.style = Style {
+            fill: color.clone(),
+            stroke: color,
+            stroke_width: 1.5,
+            dash: LineDash::Dashed,
+            ..Style::default()
+        };
+        s.boundary = Some(BoundaryProps {
+            members,
+            outline: Vec::new(),
+        });
+        s.normalized()
+    }
+
+    /// Whether this is a mind map boundary.
+    pub fn is_boundary(&self) -> bool {
+        self.library == TEXT_LIBRARY && self.shape == BOUNDARY_SHAPE
+    }
+
+    /// The pictures the shape shows: an image's, a topic's.
+    pub fn pictures(&self) -> Vec<&ImageData> {
+        let mut out: Vec<&ImageData> = self.image.iter().collect();
+        if let Some(t) = &self.topic {
+            out.extend(t.picture.iter());
+        }
+        out
+    }
+
+    /// [`Self::pictures`], to change.
+    pub fn pictures_mut(&mut self) -> Vec<&mut Option<ImageData>> {
+        let mut out = vec![&mut self.image];
+        if let Some(t) = &mut self.topic {
+            out.push(&mut t.picture);
+        }
+        out
     }
 
     /// Whether this is an image.
@@ -348,6 +431,21 @@ impl Shape {
             self.line.get_or_insert_with(LineProps::default);
         } else {
             self.line = None;
+        }
+        if self.is_topic() {
+            let id = self.id;
+            self.topic.get_or_insert_with(|| TopicProps::central(id));
+            if self.label.is_none() {
+                self.label = Some(Label::new_shape_label());
+            }
+        } else {
+            self.topic = None;
+        }
+        if self.is_boundary() {
+            self.boundary.get_or_insert_with(BoundaryProps::default);
+            self.label = None;
+        } else {
+            self.boundary = None;
         }
         if self.is_image() {
             // Pictures are drawn upright and unmirrored.

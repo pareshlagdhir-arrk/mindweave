@@ -125,7 +125,7 @@ pub type ImageStore = BTreeMap<String, StoredImage>;
 /// One stored copy of each picture the `shapes` show.
 pub fn collect_images<'a>(shapes: impl IntoIterator<Item = &'a Shape>) -> ImageStore {
     let mut store = ImageStore::new();
-    for data in shapes.into_iter().filter_map(|s| s.image.as_ref()) {
+    for data in shapes.into_iter().flat_map(|s| s.pictures()) {
         if !data.bytes.is_empty() {
             store.entry(data.id.clone()).or_insert_with(|| StoredImage {
                 format: data.format,
@@ -141,12 +141,14 @@ pub fn collect_images<'a>(shapes: impl IntoIterator<Item = &'a Shape>) -> ImageS
 /// it and is left an empty box.
 pub fn resolve_images<'a>(shapes: impl IntoIterator<Item = &'a mut Shape>, store: &ImageStore) {
     for shape in shapes {
-        let Some(data) = shape.image.as_mut() else {
-            continue;
-        };
-        match store.get(&data.id) {
-            Some(stored) if stored.format == data.format => data.bytes = stored.bytes.clone(),
-            _ => shape.image = None,
+        for slot in shape.pictures_mut() {
+            let Some(data) = slot.as_mut() else {
+                continue;
+            };
+            match store.get(&data.id) {
+                Some(stored) if stored.format == data.format => data.bytes = stored.bytes.clone(),
+                _ => *slot = None,
+            }
         }
     }
 }

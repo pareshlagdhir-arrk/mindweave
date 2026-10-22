@@ -58,6 +58,18 @@ actions!(
         BringForward,
         SendBackward,
         SendToBack,
+        /// Mind maps: a new map, a subtopic (Tab), a sibling before the
+        /// selected topic (Shift+Enter; Enter adds one after it), a
+        /// summary, a boundary, and the Relationship tool.
+        AddCentralTopic,
+        AddSubtopic,
+        AddSiblingBefore,
+        AddSummary,
+        ToggleBoundary,
+        ToolRelationship,
+        /// F2: edits the selected object's text (Enter adds a sibling to a
+        /// selected topic).
+        EditLabel,
         /// Stands in for menu items that are not built yet. Nothing handles
         /// it, so the native menu always shows such items disabled.
         NotImplemented,
@@ -180,6 +192,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("backspace", Delete, editor),
         KeyBinding::new("delete", Delete, editor),
         KeyBinding::new("cmd-a", SelectAll, editor),
+        KeyBinding::new("tab", AddSubtopic, editor),
+        KeyBinding::new("shift-enter", AddSiblingBefore, editor),
+        KeyBinding::new("f2", EditLabel, editor),
         KeyBinding::new("cmd-g", Group, editor),
         KeyBinding::new("cmd-shift-g", Ungroup, editor),
         KeyBinding::new("cmd-shift-]", BringToFront, editor),
@@ -296,6 +311,9 @@ mod tests {
             ("backspace", "mindweave::Delete"),
             ("delete", "mindweave::Delete"),
             ("cmd-a", "mindweave::SelectAll"),
+            ("tab", "mindweave::AddSubtopic"),
+            ("shift-enter", "mindweave::AddSiblingBefore"),
+            ("f2", "mindweave::EditLabel"),
             ("cmd-g", "mindweave::Group"),
             ("cmd-shift-g", "mindweave::Ungroup"),
             ("cmd-shift-]", "mindweave::BringToFront"),

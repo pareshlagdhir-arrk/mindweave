@@ -218,6 +218,24 @@ pub(super) fn summarize(shapes: &[&Shape], libs: &LibraryRegistry) -> Option<Sum
         "Text".to_string()
     } else if first.is_image() {
         "Image".to_string()
+    } else if first.is_boundary() {
+        "Boundary".to_string()
+    } else if first.topic.is_some() {
+        // Topics belong to no shape library either.
+        if shapes
+            .iter()
+            .all(|s| s.topic.as_ref().is_some_and(|t| t.is_central()))
+        {
+            "Central Topic"
+        } else if shapes
+            .iter()
+            .all(|s| s.topic.as_ref().is_some_and(|t| t.summary.is_some()))
+        {
+            "Summary"
+        } else {
+            "Topic"
+        }
+        .to_string()
     } else {
         match (libs.libraries().iter().find(|l| l.id == first.library), def) {
             (None, _) => "Missing library".to_string(),
@@ -818,10 +836,12 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
     let lines = line_properties::all_lines(&editor.shapes_among(&editor.selection));
     let line_section = line_properties::render(editor, cx);
     let outline_rows = line_properties::style_rows(editor, cx);
+    let topic_section = super::topic_properties::render(editor, cx);
     panel
         .child(section_label("Shape", cx))
         .child(title)
         .child(arrange_row(cx))
+        .children(topic_section)
         .child(section_label("Transform", cx).mt(px(SECTION_GAP)))
         .child(pair(BoundsField::X, BoundsField::Y))
         .child(pair(BoundsField::W, BoundsField::H))
@@ -1303,6 +1323,20 @@ mod tests {
         );
         let f = s.find_shape(id).unwrap().frame;
         assert_eq!((f.w, f.h), (128., 64.));
+    }
+
+    #[test]
+    fn topics_and_boundaries_are_named_not_missing() {
+        let libs = libs();
+        let central = Shape::new_topic(frame(0., 0., 100., 40.));
+        let mut child = Shape::new_topic(frame(0., 0., 100., 40.));
+        child.topic = Some(mindweave_core::TopicProps::child(central.id, central.id, 0.));
+        let boundary = Shape::new_boundary(vec![central.id], None);
+        let title = |shapes: &[&Shape]| summarize(shapes, &libs).unwrap().title;
+        assert_eq!(title(&[&central]), "Central Topic");
+        assert_eq!(title(&[&child]), "Topic");
+        assert_eq!(title(&[&central, &child]), "Topic");
+        assert_eq!(title(&[&boundary]), "Boundary");
     }
 
     #[test]

@@ -200,6 +200,14 @@ pub struct LineProps {
     /// The shape the end is attached to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end: Option<Uuid>,
+    /// How far the middle of the route was dragged, in canvas units: a
+    /// straight or curved line bows through it, an elbow's middle segment
+    /// moves across. `None` for the plain route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bend: Option<(f32, f32)>,
+    /// A mind map relationship: removed with either topic it joins.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub relationship: bool,
     /// Angular, rounded and curved routes leave and arrive vertically
     /// rather than horizontally. Set by [`route_line`].
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -216,6 +224,8 @@ impl Default for LineProps {
             jump_size: default_jump_size(),
             start: None,
             end: None,
+            bend: None,
+            relationship: false,
             vertical: false,
         }
     }
@@ -427,14 +437,26 @@ fn head_length(width: f32) -> f32 {
 
 /// The route's points in the local box `0..w × 0..h`, from `(0, 0)` to
 /// `(w, h)`, curves flattened.
-fn route_points(w: f32, h: f32, props: &LineProps) -> Vec<Pt> {
+fn route_points(w: f32, h: f32, props: &LineProps, bend: Pt) -> Vec<Pt> {
     let v = props.vertical;
     let corners = if v {
-        [(0.0, 0.0), (0.0, h / 2.0), (w, h / 2.0), (w, h)]
+        let y = h / 2.0 + bend.1;
+        [(0.0, 0.0), (0.0, y), (w, y), (w, h)]
     } else {
-        [(0.0, 0.0), (w / 2.0, 0.0), (w / 2.0, h), (w, h)]
+        let x = w / 2.0 + bend.0;
+        [(0.0, 0.0), (x, 0.0), (x, h), (w, h)]
     };
+    let bent = bend != (0.0, 0.0);
     let pts = match props.route {
+        // A cubic's middle moves by 3/4 of its control points' move, a
+        // quadratic's by half of its control point's.
+        LineRoute::Straight if bent => flatten_cmds(vec![
+            PathCmd::MoveTo((0.0, 0.0)),
+            PathCmd::QuadTo {
+                ctrl: (w / 2.0 + 2.0 * bend.0, h / 2.0 + 2.0 * bend.1),
+                to: (w, h),
+            },
+        ]),
         LineRoute::Straight => vec![(0.0, 0.0), (w, h)],
         LineRoute::Angular => corners.to_vec(),
         LineRoute::Rounded => {
@@ -457,6 +479,11 @@ fn route_points(w: f32, h: f32, props: &LineProps) -> Vec<Pt> {
             } else {
                 ((w / 2.0, 0.0), (w / 2.0, h))
             };
+            let k = 4.0 / 3.0;
+            let (c1, c2) = (
+                (c1.0 + bend.0 * k, c1.1 + bend.1 * k),
+                (c2.0 + bend.0 * k, c2.1 + bend.1 * k),
+            );
             flatten_cmds(vec![
                 PathCmd::MoveTo((0.0, 0.0)),
                 PathCmd::CubicTo { c1, c2, to: (w, h) },
@@ -758,6 +785,54 @@ fn with_jumps(
     pieces
 }
 
+/// Canvas direction `v` in `f`'s local box (the inverse of
+/// [`canvas_direction`]).
+fn local_direction(f: &Frame, (x, y): Pt) -> Pt {
+    let (sin, cos) = (-f.rotation).to_radians().sin_cos();
+    let (x, y) = (x * cos - y * sin, x * sin + y * cos);
+    (if f.flip_x { -x } else { x }, if f.flip_y { -y } else { y })
+}
+
+/// A line's bend in its frame's local box.
+fn local_bend(f: &Frame, props: &LineProps) -> Pt {
+    props.bend.map_or((0.0, 0.0), |b| local_direction(f, b))
+}
+
+/// The middle of a line's route, in canvas coordinates: where its bend
+/// handle sits and its label is centred.
+pub fn line_midpoint(f: &Frame, props: &LineProps) -> Pt {
+    let (bx, by) = local_bend(f, props);
+    let (w, h) = (f.w, f.h);
+    let local = match props.route {
+        LineRoute::Angular | LineRoute::Rounded if props.vertical => (w / 2.0, h / 2.0 + by),
+        LineRoute::Angular | LineRoute::Rounded => (w / 2.0 + bx, h / 2.0),
+        _ => (w / 2.0 + bx, h / 2.0 + by),
+    };
+    let g = to_canvas(
+        &Geometry {
+            paths: vec![SubPath {
+                cmds: vec![PathCmd::MoveTo(local)],
+                fill: FillRole::None,
+            }],
+        },
+        f,
+    );
+    match g.paths[0].cmds[0] {
+        PathCmd::MoveTo(p) => p,
+        _ => local,
+    }
+}
+
+/// The bend that puts a line's middle at canvas point `p`.
+pub fn bend_through(f: &Frame, props: &LineProps, p: Pt) -> (f32, f32) {
+    let plain = LineProps {
+        bend: None,
+        ..props.clone()
+    };
+    let mid = line_midpoint(f, &plain);
+    (p.0 - mid.0, p.1 - mid.1)
+}
+
 /// `v`, a direction in `f`'s local box, as a canvas direction.
 fn canvas_direction(f: &Frame, (x, y): Pt) -> Pt {
     let x = if f.flip_x { -x } else { x };
@@ -779,7 +854,7 @@ pub fn line_geometry(
     double: bool,
     jumps: &[f32],
 ) -> Geometry {
-    let mut pts = route_points(frame.w, frame.h, props);
+    let mut pts = route_points(frame.w, frame.h, props, local_bend(frame, props));
     // A double line is about three strokes wide; its heads match.
     let head_width = if double { 3.0 * width } else { width };
     let len = head_length(head_width);
@@ -846,7 +921,12 @@ pub fn line_geometry(
 
 /// A line's route in canvas coordinates, start first.
 fn canvas_route(shape: &Shape, props: &LineProps) -> Vec<Pt> {
-    let local = polyline_path(&route_points(shape.frame.w, shape.frame.h, props));
+    let local = polyline_path(&route_points(
+        shape.frame.w,
+        shape.frame.h,
+        props,
+        local_bend(&shape.frame, props),
+    ));
     let g = to_canvas(&Geometry { paths: vec![local] }, &shape.frame);
     g.paths[0]
         .cmds
@@ -1098,7 +1178,7 @@ mod tests {
             "{p:?} {q:?}"
         );
         let g = line_geometry(&frame, &props, 2.0, false, &[]);
-        let pts = route_points(frame.w, frame.h, &props);
+        let pts = route_points(frame.w, frame.h, &props, (0.0, 0.0));
         assert_eq!(
             pts,
             vec![(0.0, 0.0), (100.0, 0.0), (100.0, 150.0), (200.0, 150.0)]
@@ -1152,7 +1232,7 @@ mod tests {
                     vertical,
                     ..LineProps::default()
                 };
-                let pts = route_points(80.0, 40.0, &props);
+                let pts = route_points(80.0, 40.0, &props, (0.0, 0.0));
                 assert!(close(pts[0], (0.0, 0.0)), "{route:?}");
                 assert!(close(*pts.last().unwrap(), (80.0, 40.0)), "{route:?}");
                 let b = bounds(&line_geometry(
@@ -1305,6 +1385,33 @@ mod tests {
             (inner, outer)
         };
         assert!((big.w - 12.0).abs() < 1e-3 && (small.w - 8.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_bent_line_passes_through_its_dragged_middle() {
+        for route in LineRoute::ALL {
+            for (a, b) in [((0.0, 0.0), (100.0, 40.0)), ((100.0, 40.0), (0.0, 0.0))] {
+                let f = line_frame(a, b);
+                let mut props = LineProps {
+                    route,
+                    ..LineProps::default()
+                };
+                let target = (70.0, -30.0);
+                props.bend = Some(bend_through(&f, &props, target));
+                let mid = line_midpoint(&f, &props);
+                // Elbows move only their middle segment, across it.
+                match route {
+                    LineRoute::Angular | LineRoute::Rounded => assert!((mid.0 - 70.0).abs() < 1e-3),
+                    _ => assert!(close(mid, target), "{route:?} {mid:?}"),
+                }
+                // The drawn route goes through that middle.
+                let g = to_canvas(&line_geometry(&f, &props, 2.0, false, &[]), &f);
+                assert!(
+                    crate::geometry::hit_test(&g, mid, 0.5),
+                    "{route:?} does not pass {mid:?}"
+                );
+            }
+        }
     }
 
     #[test]

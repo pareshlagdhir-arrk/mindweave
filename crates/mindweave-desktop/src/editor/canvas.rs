@@ -5,11 +5,12 @@
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
-use mindweave_core::geometry::Rect;
+use mindweave_core::geometry::{Pt, Rect};
 use mindweave_core::{
     dot_stride, grid_lines, is_major_line, pinch_zoom_factor, scroll_zoom_factor, stride_offset,
-    BackgroundPattern, CanvasSettings, Page, Viewport, ZOOM_STEP,
+    BackgroundPattern, CanvasSettings, Page, Viewport, TOPIC_TEXT_MAX, ZOOM_STEP,
 };
+use uuid::Uuid;
 
 use super::interaction::{
     marquee_rect, visible_handles, Gesture, HANDLE_GRAB_PX, PREVIEW_OPACITY,
@@ -33,6 +34,9 @@ const MAJOR_LINE_WIDTH: f32 = 2.;
 /// Most dots painted in one frame; denser patterns skip lines (see
 /// [`dot_stride`]).
 const MAX_DOTS: usize = 40_000;
+
+/// Mixed into a topic's id to name the layout its size is measured from.
+const TOPIC_MEASURE_ID: u128 = 0x6d69_6e64_7765_6176_6574_6f70_6963_7321;
 
 /// The canvas area a canvas of `size` pixels shows through `viewport`, in
 /// canvas units.
@@ -74,7 +78,7 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
                     editor.pan_drag.is_some(),
                     editor.left_drag_pans(),
                     ibeam,
-                    matches!(editor.tools.tool, Tool::Shape { .. })
+                    matches!(editor.tools.tool, Tool::Shape { .. } | Tool::Relationship)
                         || matches!(editor.gesture, Gesture::Placing { .. }),
                     editor.tools.tool == Tool::Text,
                     pointer,
@@ -298,7 +302,9 @@ fn register_input(
                     }
                     match editor.tools.tool {
                         Tool::Pointer => editor.begin_pointer_press(at, event.modifiers, cx),
-                        Tool::Shape { .. } => editor.begin_placing(at, event.modifiers, window, cx),
+                        Tool::Shape { .. } | Tool::Relationship => {
+                            editor.begin_placing(at, event.modifiers, window, cx)
+                        }
                         Tool::Text => editor.place_text_box(at, window, cx),
                         Tool::Hand => {}
                     }
@@ -453,19 +459,34 @@ impl EditorWindow {
             paint_line_ends(window, bounds, &viewport, &ends, accent);
         }
         if let Some(chrome) = self.selection_chrome() {
+            let handles = self.chrome_has_handles();
+            let resize = if handles {
+                visible_handles(
+                    &chrome,
+                    HANDLE_GRAB_PX / viewport.zoom,
+                    self.chrome_width_only(),
+                )
+            } else {
+                Vec::new()
+            };
             paint_selection(
                 window,
                 bounds,
                 &viewport,
                 &chrome,
-                ROTATE_HANDLE_OFFSET_PX,
-                &visible_handles(
-                    &chrome,
-                    HANDLE_GRAB_PX / viewport.zoom,
-                    self.chrome_width_only(),
-                ),
+                handles.then_some(ROTATE_HANDLE_OFFSET_PX),
+                &resize,
                 accent,
             );
+        }
+        // Handles to bend the selected line and resize a topic's picture.
+        let knobs: Vec<Pt> = self
+            .bend_handle()
+            .into_iter()
+            .chain(self.picture_handle())
+            .collect();
+        if !knobs.is_empty() {
+            paint_line_ends(window, bounds, &viewport, &knobs, accent);
         }
         if let Gesture::Marquee { start, current, .. } = self.gesture {
             if self.press.dragged {
@@ -509,12 +530,48 @@ impl EditorWindow {
                 changes.push((shape.id, w, h));
             }
         }
-        if changes.is_empty() {
+        // Topics fit their text (wrapped at TOPIC_TEXT_MAX), icon, image
+        // and link badge.
+        let mut topics = Vec::new();
+        for shape in page.layers.iter().flat_map(|l| &l.objects) {
+            let (Some(t), Some(label)) = (&shape.topic, &shape.label) else {
+                continue;
+            };
+            let background = text_background(shape.style.fill.as_deref(), canvas);
+            let color = auto_color(background, shape.style.opacity);
+            // Measured under an id of its own: painting lays the text out
+            // at the topic's width, and one cache entry per id would
+            // otherwise be laid out twice a frame.
+            // Unwrapped first, so a short text gets a snug topic; wrapped
+            // at TOPIC_TEXT_MAX only when longer than that.
+            let measure = Uuid::from_u128(shape.id.as_u128() ^ TOPIC_MEASURE_ID);
+            let (mut tw, mut th) =
+                self.text_layouts
+                    .size(window, measure, &label.text, None, color);
+            if tw > TOPIC_TEXT_MAX {
+                let wrapped = Uuid::from_u128(shape.id.as_u128() ^ TOPIC_MEASURE_ID.rotate_left(1));
+                (tw, th) = self.text_layouts.size(
+                    window,
+                    wrapped,
+                    &label.text,
+                    Some(TOPIC_TEXT_MAX),
+                    color,
+                );
+            }
+            let (w, h) = t.size_for_text((tw, th));
+            if (shape.frame.w, shape.frame.h) != (w, h) {
+                topics.push((shape.id, w, h));
+            }
+        }
+        if changes.is_empty() && topics.is_empty() {
             return;
         }
         let generation = self.session.layout_generation();
         for (id, w, h) in changes {
             self.session.set_text_box_layout(id, w, h);
+        }
+        for (id, w, h) in topics {
+            self.session.set_topic_size(id, w, h);
         }
         // The selection chrome and the sidebar were drawn with the old
         // size. A size the frame cannot hold (past its clamp) changes

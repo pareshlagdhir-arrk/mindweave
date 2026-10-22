@@ -12,10 +12,10 @@ use gpui_kit::*;
 use mindweave_core::geometry::{hit_test, line_endpoints, FillRole, Frame, Primitive, Pt, Rect};
 use mindweave_core::line::target_of;
 use mindweave_core::{
-    drag_create, handle_positions, line_frame, marquee_selects, resize_with_text_boxes, rotate,
-    rotate_handle_position, route_line, selection_bounds, translate, unit_members,
-    whole_units_only, DocumentSession, Handle, LibraryRegistry, LineEnd, Shape, ShapeDef,
-    ShapeSource, CLICK_DRAG_THRESHOLD,
+    bend_through, clamp_topic_picture, drag_create, handle_positions, line_frame, line_midpoint,
+    marquee_selects, resize_with_text_boxes, rotate, rotate_handle_position, route_line,
+    selection_bounds, translate, unit_members, whole_units_only, DocumentSession, Handle,
+    LibraryRegistry, LineEnd, Shape, ShapeDef, ShapeSource, CLICK_DRAG_THRESHOLD,
 };
 use uuid::Uuid;
 
@@ -98,6 +98,12 @@ pub enum Gesture {
         start: Pt,
         original: Box<Shape>,
     },
+    /// Bending the one selected line through the pointer, pressed at
+    /// `start`; `original` is the line before the drag.
+    Bending { start: Pt, original: Box<Shape> },
+    /// Resizing the picture of the one selected topic by its corner handle,
+    /// pressed at `start`; `original` is the topic before the drag.
+    ResizingPicture { start: Pt, original: Box<Shape> },
 }
 
 impl Gesture {
@@ -470,9 +476,16 @@ impl EditorWindow {
     ) {
         // A gesture whose mouse-up was missed ends as it would have.
         self.finish_gesture(None, modifiers, cx);
-        let Tool::Shape { library, shape } = &self.tools.tool else {
-            return;
+        let line = (
+            mindweave_core::LINE_LIBRARY.to_string(),
+            mindweave_core::LINE_SHAPE.to_string(),
+        );
+        let (library, shape) = match &self.tools.tool {
+            Tool::Shape { library, shape } => (library, shape),
+            Tool::Relationship => (&line.0, &line.1),
+            _ => return,
         };
+        self.placing_relationship = self.tools.tool == Tool::Relationship;
         if !self.session.active_layer_selectable() {
             window.push_notification(Notification::warning("Show the layer to draw on it."), cx);
             return;
@@ -534,9 +547,13 @@ impl EditorWindow {
         let Some(mut shape) = placement_shape(&gesture, &cx.global::<Libraries>().0) else {
             return;
         };
-        cx.global::<AppState>()
-            .settings
-            .apply_remembered_style(&mut shape);
+        if std::mem::take(&mut self.placing_relationship) {
+            relationship_style(&mut shape);
+        } else {
+            cx.global::<AppState>()
+                .settings
+                .apply_remembered_style(&mut shape);
+        }
         attach_ends(&mut shape, ends);
         let id = shape.id;
         self.update_session(|s| s.add_shapes(vec![shape]), cx);
@@ -555,7 +572,10 @@ impl EditorWindow {
         if gesture == Gesture::Idle {
             return false;
         }
-        if let Gesture::MovingEnd { original, .. } = &gesture {
+        if let Gesture::MovingEnd { original, .. }
+        | Gesture::Bending { original, .. }
+        | Gesture::ResizingPicture { original, .. } = &gesture
+        {
             let original = (**original).clone();
             self.update_session(
                 |s| s.update_shapes(&[original.id], |l| *l = original.clone()),
@@ -564,6 +584,10 @@ impl EditorWindow {
             self.session_gesture
                 .end(&mut self.session, GestureOwner::Pointer);
             self.update_session(|_| {}, cx);
+        }
+        // A dragged topic goes back to where it was.
+        if let (Some(from), Some(topic)) = (self.topic_drag_from.take(), self.selected_topic()) {
+            self.update_session(|s| s.set_topic_offset(topic, from), cx);
         }
         if let Some(originals) = gesture.originals() {
             let originals = originals.clone();
@@ -631,9 +655,17 @@ impl EditorWindow {
     ) {
         // A gesture whose mouse-up was missed ends as it would have.
         self.finish_gesture(None, modifiers, cx);
+        // A topic's link badge opens its link.
+        if let Some(link) = self.link_badge_at(at) {
+            cx.open_url(&link);
+            return;
+        }
         let zoom = self.session.page().viewport.zoom;
-        // A selected line has end handles instead of the box's.
-        let chrome = self.selection_chrome();
+        // A selected line has end handles instead of the box's; topics,
+        // sized by their text and placed by their map, have none.
+        let chrome = self
+            .selection_chrome()
+            .filter(|_| self.chrome_has_handles());
         if let Some(end) = self.line_end_at(at) {
             let Some(line) = self.selected_line().cloned() else {
                 return;
@@ -653,7 +685,38 @@ impl EditorWindow {
             cx.notify();
             return;
         }
+        // A selected line bends from its middle handle, and an attached one
+        // from anywhere along it, so it keeps its ends where they are.
+        let line = self.selected_line().cloned();
         let shape = self.shape_at(at, cx);
+        if let Some(line) = line {
+            let attached = line
+                .line
+                .as_ref()
+                .is_some_and(|l| l.start.is_some() || l.end.is_some());
+            if self.on_bend_handle(at) || (attached && shape == Some(line.id)) {
+                self.begin_shape_drag(
+                    Gesture::Bending {
+                        start: at,
+                        original: Box::new(line),
+                    },
+                    at,
+                    cx,
+                );
+                return;
+            }
+        }
+        if let Some(topic) = self.picture_handle_at(at) {
+            self.begin_shape_drag(
+                Gesture::ResizingPicture {
+                    start: at,
+                    original: Box::new(topic),
+                },
+                at,
+                cx,
+            );
+            return;
+        }
         let kind = press_target(
             chrome.as_ref(),
             at,
@@ -741,7 +804,9 @@ impl EditorWindow {
                 | Gesture::Moving { start, .. }
                 | Gesture::Resizing { start, .. }
                 | Gesture::Rotating { start, .. }
-                | Gesture::MovingEnd { start, .. } => *start,
+                | Gesture::MovingEnd { start, .. }
+                | Gesture::Bending { start, .. }
+                | Gesture::ResizingPicture { start, .. } => *start,
                 _ => return,
             };
             if !is_drag(start, p, self.session.page().viewport.zoom) {
@@ -755,6 +820,62 @@ impl EditorWindow {
         if let Gesture::MovingEnd { end, original, .. } = &self.gesture {
             let (end, id) = (*end, original.id);
             self.move_line_end(id, end, p, cx);
+            return;
+        }
+        if let Gesture::Bending { original, .. } = &self.gesture {
+            let id = original.id;
+            if let Some(line) = self.session.find_shape(id) {
+                let frame = line.frame;
+                let bend = line.line.as_ref().map(|l| bend_through(&frame, l, p));
+                self.update_session(
+                    |s| {
+                        s.update_shapes(&[id], |l| {
+                            if let Some(props) = l.line.as_mut() {
+                                props.bend = bend;
+                            }
+                        })
+                    },
+                    cx,
+                );
+            }
+            return;
+        }
+        if let Gesture::ResizingPicture { start, original } = &self.gesture {
+            let (start, id) = (*start, original.id);
+            let size = original.topic.as_ref().and_then(|t| t.picture_size);
+            if let Some((w, h)) = size {
+                // The picture is centred, so its corner moves half as far
+                // as it grows: twice the drag, the larger of across or
+                // down, with the proportions kept.
+                let grow = (p.0 - start.0).max((p.1 - start.1) * w / h.max(1.)) * 2.;
+                let k = ((w + grow) / w.max(1.)).max(0.01);
+                let size = clamp_topic_picture((w * k, h * k));
+                self.update_session(
+                    |s| {
+                        s.update_shapes(&[id], |t| {
+                            if let Some(props) = t.topic.as_mut() {
+                                props.picture_size = Some(size);
+                            }
+                        })
+                    },
+                    cx,
+                );
+            }
+            return;
+        }
+        if let Some((topic, start)) = self.dragged_topic() {
+            // A topic follows the pointer with its subtree; dropped on
+            // another topic of its map, it moves under it.
+            let from = *self.topic_drag_from.get_or_insert_with(|| {
+                self.session
+                    .find_shape(topic)
+                    .and_then(|s| s.topic.as_ref()?.offset)
+            });
+            let from = from.unwrap_or((0., 0.));
+            let offset = (from.0 + p.0 - start.0, from.1 + p.1 - start.1);
+            self.update_session(|s| s.set_topic_offset(topic, Some(offset)), cx);
+            self.attach_highlight = self.topic_drop_target(p, topic, cx);
+            cx.notify();
             return;
         }
         if let Gesture::Marquee { current, .. } = &mut self.gesture {
@@ -825,7 +946,33 @@ impl EditorWindow {
             Gesture::Moving { .. }
             | Gesture::Resizing { .. }
             | Gesture::Rotating { .. }
-            | Gesture::MovingEnd { .. } => {
+            | Gesture::MovingEnd { .. }
+            | Gesture::Bending { .. }
+            | Gesture::ResizingPicture { .. } => {
+                if let (Some(from), Some(topic), true) = (
+                    self.topic_drag_from.take(),
+                    self.selection.first().copied(),
+                    press.dragged,
+                ) {
+                    let map = self
+                        .session
+                        .find_shape(topic)
+                        .and_then(|s| s.topic.as_ref())
+                        .map(|t| t.map);
+                    match self.attach_highlight {
+                        Some(parent) => self.update_session(
+                            |s| {
+                                s.move_topic(topic, parent);
+                            },
+                            cx,
+                        ),
+                        // With automatic layout the topic snaps back.
+                        None if map.is_some_and(|m| self.session.auto_layout(m)) => {
+                            self.update_session(|s| s.set_topic_offset(topic, from), cx)
+                        }
+                        None => {}
+                    }
+                }
                 self.attach_highlight = None;
                 self.session_gesture
                     .end(&mut self.session, GestureOwner::Pointer);
@@ -905,6 +1052,74 @@ impl EditorWindow {
     }
 
     /// The selected shapes and their frames, back to front.
+    /// The topic a Pointer move drags (to drop it onto a new parent) and
+    /// where the press started: the one selected topic, unless central.
+    fn dragged_topic(&self) -> Option<(Uuid, Pt)> {
+        let Gesture::Moving { start, .. } = &self.gesture else {
+            return None;
+        };
+        let id = self.selected_topic()?;
+        let shape = self.session.find_shape(id)?;
+        (!shape.topic.as_ref()?.is_central()).then_some((id, *start))
+    }
+
+    /// Starts a drag of one shape (`gesture` holds it as it was, for
+    /// Escape), pressed at `at`, as one undo step.
+    fn begin_shape_drag(&mut self, gesture: Gesture, at: Pt, cx: &mut Context<Self>) {
+        self.press = Press {
+            dragged: false,
+            on_click: None,
+            last: at,
+        };
+        self.gesture = gesture;
+        self.session_gesture
+            .begin(&mut self.session, GestureOwner::Pointer);
+        cx.notify();
+    }
+
+    /// The middle of the one selected line, where it is bent from.
+    pub(super) fn bend_handle(&self) -> Option<Pt> {
+        let line = self.selected_line()?;
+        Some(line_midpoint(&line.frame, line.line.as_ref()?))
+    }
+
+    /// Whether canvas point `at` is on the selected line's bend handle.
+    fn on_bend_handle(&self, at: Pt) -> bool {
+        let grab = HANDLE_GRAB_PX / self.session.page().viewport.zoom;
+        self.bend_handle()
+            .is_some_and(|h| (h.0 - at.0).hypot(h.1 - at.1) <= grab)
+    }
+
+    /// The corner handle of the one selected topic's picture, in canvas
+    /// coordinates.
+    pub(super) fn picture_handle(&self) -> Option<Pt> {
+        let id = self.selected_topic()?;
+        let s = self.session.find_shape(id)?;
+        let r = s.topic.as_ref()?.parts(s.frame.w, s.frame.h).picture?;
+        Some((s.frame.x + r.x + r.w, s.frame.y + r.y + r.h))
+    }
+
+    /// The selected topic, when canvas point `at` is on its picture's
+    /// corner handle.
+    fn picture_handle_at(&self, at: Pt) -> Option<Shape> {
+        let grab = HANDLE_GRAB_PX / self.session.page().viewport.zoom;
+        let h = self.picture_handle()?;
+        if (h.0 - at.0).hypot(h.1 - at.1) > grab {
+            return None;
+        }
+        self.session.find_shape(self.selected_topic()?).cloned()
+    }
+
+    /// Whether the selection chrome has resize and rotate handles: not
+    /// when it is all topics.
+    pub(super) fn chrome_has_handles(&self) -> bool {
+        !self.selection.iter().all(|id| {
+            self.session
+                .find_shape(*id)
+                .is_some_and(|s| s.topic.is_some())
+        })
+    }
+
     /// Whether the selection holds an image (or placed icon), which only
     /// scales with its proportions kept.
     pub(super) fn selection_has_image(&self) -> bool {
@@ -959,6 +1174,22 @@ impl EditorWindow {
         })
     }
 
+    /// The topmost selectable shape at canvas point `at`, leaving out
+    /// `except`.
+    pub(super) fn shape_at_except(
+        &mut self,
+        at: Pt,
+        except: &HashSet<Uuid>,
+        cx: &mut Context<Self>,
+    ) -> Option<Uuid> {
+        let libs = cx.global::<Libraries>().0.clone();
+        let tolerance = HIT_TOLERANCE_PX / self.session.page().viewport.zoom;
+        let cache = &mut self.geometry_cache;
+        hit_shape_with(&self.session, tolerance, |shape, tol| {
+            !except.contains(&shape.id) && outline_hit(cache.outline(shape, &libs), at, tol)
+        })
+    }
+
     /// The cursor for the pointer at canvas point `at` with the Pointer
     /// tool: a resize or rotate cursor over a handle, or during a resize
     /// or rotate.
@@ -999,7 +1230,11 @@ impl EditorWindow {
         remembered: &AppSettings,
     ) -> Option<Shape> {
         let mut shape = preview_shape(&self.gesture, libs)?;
-        remembered.apply_remembered_style(&mut shape);
+        if self.placing_relationship {
+            relationship_style(&mut shape);
+        } else {
+            remembered.apply_remembered_style(&mut shape);
+        }
         attach_ends(&mut shape, self.line_ends);
         if let Some(props) = shape.line.as_mut() {
             let target = |id: Option<Uuid>| {
@@ -1131,6 +1366,19 @@ impl EditorWindow {
             },
             cx,
         );
+    }
+}
+
+/// Gives a new line the look of a mind map relationship: a curved, dashed
+/// arrow in the theme's colour, removed with either topic it joins.
+fn relationship_style(shape: &mut Shape) {
+    shape.style.stroke = Some(mindweave_core::AUTO_COLOR.to_string());
+    shape.style.stroke_width = 1.5;
+    shape.style.dash = mindweave_core::LineDash::Dashed;
+    if let Some(props) = shape.line.as_mut() {
+        props.route = mindweave_core::LineRoute::Curved;
+        props.end_head = mindweave_core::ArrowHead::Arrow;
+        props.relationship = true;
     }
 }
 
