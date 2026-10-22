@@ -118,16 +118,16 @@ const ACCENTS: &[(&str, &[Accent])] = &[
         }],
     ),
     (
-        "note-lines",
+        "sticky-note",
         &[Accent {
-            body: r#"<rect x="1" y="1" width="22" height="22" rx="5" fill-opacity="0.22"/>"#,
+            body: r#"<path d="M15 3.5V8a1 1 0 0 0 1 1h4.5z"/>"#,
             color: AMBER,
         }],
     ),
     (
         "sigma",
         &[Accent {
-            body: r#"<path d="M6.5 4.8H17v14.4H6.5l4.1-5.4a3 3 0 0 0 0-3.6z"/>"#,
+            body: r#"<rect x="6" y="2.5" width="13" height="3.5" rx="1"/><rect x="6" y="18" width="13" height="3.5" rx="1"/>"#,
             color: PURPLE,
         }],
     ),
