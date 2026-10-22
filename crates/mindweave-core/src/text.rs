@@ -17,11 +17,15 @@ pub const MAX_FONT_SIZE: f32 = 1000.0;
 pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 pub const LABEL_FONT_SIZE: f32 = 14.0;
 
+/// The deepest list level (levels are `0..=MAX_LIST_LEVEL`: three levels).
+pub const MAX_LIST_LEVEL: u8 = 2;
+
 /// A line break inside a paragraph (Shift+Return).
 pub const LINE_BREAK: char = '\u{2028}';
 
 /// How a run of text looks. `font: None` is the app default font;
-/// `color: None` is Auto contrast; colours are uppercase `#RRGGBB`.
+/// `color: None` is Auto contrast; colours are uppercase `#RRGGBB`;
+/// `link` is the URL the run points to.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RunStyle {
@@ -32,6 +36,8 @@ pub struct RunStyle {
     pub underline: bool,
     pub strike: bool,
     pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 impl Default for RunStyle {
@@ -44,13 +50,14 @@ impl Default for RunStyle {
             underline: false,
             strike: false,
             color: None,
+            link: None,
         }
     }
 }
 
 impl RunStyle {
     /// Clamps the size (non-finite becomes the default), drops invalid
-    /// colours and empty font names.
+    /// colours, empty font names and blank links.
     fn sanitize(&mut self) {
         self.size = if self.size.is_finite() {
             self.size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
@@ -60,6 +67,9 @@ impl RunStyle {
         self.color = self.color.as_deref().and_then(normalize_hex_color);
         if self.font.as_deref().is_some_and(|f| f.trim().is_empty()) {
             self.font = None;
+        }
+        if self.link.as_deref().is_some_and(|l| l.trim().is_empty()) {
+            self.link = None;
         }
     }
 }
@@ -80,7 +90,23 @@ pub enum HAlign {
     Right,
 }
 
-/// A paragraph: styled runs plus alignment. `style` is what typing uses
+/// The kind of a list item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListKind {
+    Bullet,
+    Numbered,
+}
+
+/// A paragraph's place in a list: its kind and nesting level
+/// (`0..=MAX_LIST_LEVEL`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListItem {
+    pub kind: ListKind,
+    pub level: u8,
+}
+
+/// A paragraph: styled runs plus alignment (and list membership). `style` is what typing uses
 /// while the paragraph is empty; [`RichText::normalize`] keeps it equal to
 /// the first run's style otherwise.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -90,6 +116,8 @@ pub struct Paragraph {
     pub align: HAlign,
     #[serde(default)]
     pub style: RunStyle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<ListItem>,
 }
 
 impl Paragraph {
@@ -98,6 +126,7 @@ impl Paragraph {
             runs: Vec::new(),
             align,
             style,
+            list: None,
         }
     }
 
@@ -139,6 +168,7 @@ pub enum StyleChange {
     Font(Option<String>),
     Size(f32),
     Color(Option<String>),
+    Link(Option<String>),
 }
 
 impl StyleChange {
@@ -153,6 +183,7 @@ impl StyleChange {
             StyleChange::Font(v) => style.font = v.clone(),
             StyleChange::Size(v) => style.size = *v,
             StyleChange::Color(v) => style.color = v.clone(),
+            StyleChange::Link(v) => style.link = v.clone(),
         }
         style.sanitize();
     }
@@ -188,6 +219,7 @@ pub struct StyleSummary {
     pub underline: Mixed<bool>,
     pub strike: Mixed<bool>,
     pub color: Mixed<Option<String>>,
+    pub link: Mixed<Option<String>>,
     pub align: Mixed<HAlign>,
 }
 
@@ -269,7 +301,7 @@ impl RichText {
     /// Inserts `text` in `style` at `at`; returns the caret after it (on a
     /// grapheme boundary, even if the text joins a following combining mark).
     /// `'\n'` (and `"\r\n"`, `'\r'`) starts a new paragraph with the same
-    /// alignment.
+    /// alignment and list item.
     pub fn insert(&mut self, at: usize, text: &str, style: &RunStyle) -> usize {
         let at = self.floor_boundary(at);
         if text.is_empty() {
@@ -280,6 +312,7 @@ impl RichText {
         let (pi, off) = self.locate(at);
         let para = &mut self.paragraphs[pi];
         let align = para.align;
+        let list = para.list;
         let (head, tail) = split_runs(std::mem::take(&mut para.runs), off);
         para.runs = head;
         let mut lines = text.split('\n');
@@ -292,6 +325,7 @@ impl RichText {
         for line in lines {
             last += 1;
             let mut p = Paragraph::empty(style.clone(), align);
+            p.list = list;
             p.runs.push(run(line));
             self.paragraphs.insert(last, p);
         }
@@ -332,6 +366,7 @@ impl RichText {
                 runs,
                 align: p.align,
                 style: p.style.clone(),
+                list: p.list,
             });
         }
         let mut out = RichText { paragraphs };
@@ -406,6 +441,68 @@ impl RichText {
         }
     }
 
+    /// Makes every paragraph `range` touches a list item of `kind` (or a
+    /// plain paragraph for `None`); an existing level is kept.
+    pub fn set_list(&mut self, range: Range<usize>, kind: Option<ListKind>) {
+        let range = self.snap_range(range);
+        for pi in self.touched_paragraphs(&range) {
+            let p = &mut self.paragraphs[pi];
+            p.list = kind.map(|kind| ListItem {
+                kind,
+                level: p.list.map_or(0, |l| l.level),
+            });
+        }
+    }
+
+    /// Indents (`delta > 0`) or outdents the list items `range` touches,
+    /// clamped to `0..=MAX_LIST_LEVEL`; plain paragraphs are left alone.
+    pub fn shift_list_level(&mut self, range: Range<usize>, delta: i8) {
+        let range = self.snap_range(range);
+        for pi in self.touched_paragraphs(&range) {
+            if let Some(item) = &mut self.paragraphs[pi].list {
+                let level = i16::from(item.level) + i16::from(delta);
+                item.level = level.clamp(0, i16::from(MAX_LIST_LEVEL)) as u8;
+            }
+        }
+    }
+
+    /// The 1-based number of numbered list item `paragraph`: the numbered
+    /// items at its level among the consecutive list paragraphs before it
+    /// (deeper items are skipped; a shallower item or a plain paragraph
+    /// starts the count over). `None` for anything else.
+    pub fn list_number(&self, paragraph: usize) -> Option<u32> {
+        let item = self.paragraphs.get(paragraph)?.list?;
+        if item.kind != ListKind::Numbered {
+            return None;
+        }
+        let mut number = 1;
+        for prev in self.paragraphs[..paragraph].iter().rev() {
+            let Some(prev) = prev.list else { break };
+            if prev.level < item.level {
+                break;
+            }
+            if prev.level == item.level && prev.kind == ListKind::Numbered {
+                number += 1;
+            }
+        }
+        Some(number)
+    }
+
+    /// The link of the character at `offset` (the run containing the byte
+    /// `offset` points at), if any.
+    pub fn link_at(&self, offset: usize) -> Option<&str> {
+        let (start, p) = self.spans().find(|(s, p)| offset <= s + p.len())?;
+        let mut run_start = start;
+        for run in &p.runs {
+            let run_end = run_start + run.text.len();
+            if offset >= run_start && offset < run_end {
+                return run.style.link.as_deref();
+            }
+            run_start = run_end;
+        }
+        None
+    }
+
     /// The style typing at `at` uses: the character before the caret's,
     /// else (start of a paragraph) the paragraph's.
     pub fn style_at(&self, at: usize) -> RunStyle {
@@ -453,6 +550,7 @@ impl RichText {
             underline: Mixed::of(styles.iter().map(|s| s.underline)),
             strike: Mixed::of(styles.iter().map(|s| s.strike)),
             color: Mixed::of(styles.iter().map(|s| s.color.clone())),
+            link: Mixed::of(styles.iter().map(|s| s.link.clone())),
             align: Mixed::of(touched.iter().map(|&pi| self.paragraphs[pi].align)),
         }
     }
@@ -779,6 +877,7 @@ mod tests {
                 ],
                 align: HAlign::Left,
                 style: plain_style(),
+                list: None,
             }],
         };
         t.normalize();
@@ -1007,6 +1106,7 @@ mod tests {
                 ],
                 align: HAlign::Left,
                 style: style(-5.0, "nope"),
+                list: None,
             }],
         };
         t.normalize();
@@ -1061,6 +1161,7 @@ mod tests {
                 }],
                 align: HAlign::Left,
                 style: plain_style(),
+                list: None,
             }],
         };
         let mut t = text("ab");
@@ -1078,6 +1179,88 @@ mod tests {
         let mut t = text("\u{301}");
         let caret = t.insert_rich(0, &text("e"));
         assert_eq!(caret, t.len());
+    }
+
+    /// One paragraph per entry: a list item of that kind and level, or
+    /// plain for `None`.
+    fn list_text(items: &[Option<(ListKind, u8)>]) -> RichText {
+        let mut t = RichText::new(plain_style(), HAlign::Left);
+        let body = vec!["x"; items.len()].join("\n");
+        t.insert(0, &body, &plain_style());
+        for (p, item) in t.paragraphs.iter_mut().zip(items) {
+            p.list = item.map(|(kind, level)| ListItem { kind, level });
+        }
+        t
+    }
+
+    #[test]
+    fn list_numbers_count_items_at_their_level() {
+        let n = |level| Some((ListKind::Numbered, level));
+        let t = list_text(&[n(0), n(0), n(1), n(1), n(0), None, n(0)]);
+        let numbers: Vec<_> = (0..7).map(|i| t.list_number(i)).collect();
+        assert_eq!(
+            numbers,
+            [Some(1), Some(2), Some(1), Some(2), Some(3), None, Some(1)]
+        );
+        let b = list_text(&[Some((ListKind::Bullet, 0))]);
+        assert_eq!(b.list_number(0), None);
+        assert_eq!(b.list_number(9), None);
+    }
+
+    #[test]
+    fn set_list_and_shift_level() {
+        let mut t = text("a\nb\nc");
+        t.set_list(0..3, Some(ListKind::Bullet));
+        let item = |i: usize| t.paragraphs[i].list;
+        assert_eq!(item(0).map(|l| l.kind), Some(ListKind::Bullet));
+        assert_eq!(item(1).map(|l| l.kind), Some(ListKind::Bullet));
+        assert_eq!(item(2), None);
+        t.shift_list_level(0..3, 1);
+        t.shift_list_level(0..3, 1);
+        t.shift_list_level(0..3, 1);
+        assert_eq!(t.paragraphs[0].list.unwrap().level, MAX_LIST_LEVEL);
+        assert_eq!(t.paragraphs[2].list, None);
+        t.set_list(0..1, Some(ListKind::Numbered));
+        assert_eq!(t.paragraphs[0].list.unwrap().level, MAX_LIST_LEVEL);
+        t.shift_list_level(0..3, -5);
+        assert_eq!(t.paragraphs[1].list.unwrap().level, 0);
+        t.set_list(0..3, None);
+        assert!(t.paragraphs.iter().all(|p| p.list.is_none()));
+    }
+
+    #[test]
+    fn enter_continues_the_list() {
+        let mut t = text("ab");
+        t.set_list(0..0, Some(ListKind::Bullet));
+        t.shift_list_level(0..0, 1);
+        t.insert(1, "\n", &plain_style());
+        assert_eq!(t.paragraphs.len(), 2);
+        assert_eq!(t.paragraphs[0].list, t.paragraphs[1].list);
+        assert_eq!(t.paragraphs[1].list.unwrap().level, 1);
+    }
+
+    #[test]
+    fn links_are_run_styles() {
+        let mut t = text("abc");
+        t.apply(1..2, &StyleChange::Link(Some("https://a.b".into())));
+        assert_eq!(t.link_at(1), Some("https://a.b"));
+        assert_eq!(t.link_at(0), None);
+        assert_eq!(t.link_at(2), None);
+        assert_eq!(run_texts(&t, 0), ["a", "b", "c"]);
+        assert_eq!(t.summary(0..3).link, Mixed::Mixed);
+        t.apply(1..2, &StyleChange::Link(Some("  ".into())));
+        assert_eq!(t.link_at(1), None);
+        assert_eq!(run_texts(&t, 0), ["abc"]);
+    }
+
+    #[test]
+    fn old_text_without_lists_or_links_deserialises() {
+        let json = r#"{"paragraphs":[{"runs":[{"text":"hi","style":{"size":14.0,"bold":true}}],"align":"left","style":{}}]}"#;
+        let t: RichText = serde_json::from_str(json).unwrap();
+        assert_eq!(t.paragraphs[0].list, None);
+        assert_eq!(t.paragraphs[0].runs[0].style.link, None);
+        let out = serde_json::to_string(&t).unwrap();
+        assert!(!out.contains("list") && !out.contains("link"));
     }
 
     #[test]

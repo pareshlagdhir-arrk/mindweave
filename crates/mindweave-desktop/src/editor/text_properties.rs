@@ -97,6 +97,7 @@ pub(super) fn merge_summaries(a: StyleSummary, b: &StyleSummary) -> StyleSummary
         underline: merge(a.underline, &b.underline),
         strike: merge(a.strike, &b.strike),
         color: merge(a.color, &b.color),
+        link: merge(a.link, &b.link),
         align: merge(a.align, &b.align),
     }
 }
@@ -152,6 +153,7 @@ fn style_summary(style: &RunStyle, align: Mixed<HAlign>) -> StyleSummary {
         underline: Mixed::Same(style.underline),
         strike: Mixed::Same(style.strike),
         color: Mixed::Same(style.color.clone()),
+        link: Mixed::Same(style.link.clone()),
         align,
     }
 }
