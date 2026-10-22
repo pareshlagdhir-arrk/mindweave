@@ -36,21 +36,27 @@ const CARD_GAP: f32 = 12.;
 /// Padding beside the text, inside the 1 px border: the text fills the
 /// card's width at the note's wrap width.
 const CARD_PADDING_X: f32 = (CARD_WIDTH - NOTE_TEXT_WIDTH) / 2. - 1.;
+/// Padding above and below the card's content.
 const CARD_PADDING_Y: f32 = 8.;
+/// Space between the formatting bar, the text and the hint.
 const CARD_SPACING: f32 = 6.;
 /// Space above and below the text, inside its scrolling area.
 const TEXT_PADDING_Y: f32 = 4.;
 /// The least height of the text area, so an empty note is easy to click.
 const MIN_TEXT_HEIGHT: f32 = 48.;
+/// The size of the formatting bar's icons.
 const ICON_SIZE: f32 = 14.;
+/// The text size of the hint.
 const HINT_TEXT_SIZE: f32 = 11.;
 /// The hint at the bottom of the card.
 const HINT: &str = "⌘-click a link to open it";
 /// The most characters of a note its badge's tooltip shows.
 const PREVIEW_CHARS: usize = 80;
-/// The badge tooltip's offset from the pointer, and its widest.
+/// The badge tooltip's offset from the pointer.
 const TOOLTIP_OFFSET: (f32, f32) = (12., 18.);
+/// The badge tooltip's widest.
 const TOOLTIP_WIDTH: f32 = 260.;
+/// The badge tooltip's text size.
 const TOOLTIP_TEXT_SIZE: f32 = 12.;
 
 /// The note card open on a topic.

@@ -1491,31 +1491,9 @@ impl EditorWindow {
             let at = point(origin.x + px(r.x), origin.y + px(r.y));
             window.paint_quad(fill(Bounds::new(at, size(px(r.w), px(r.h))), color));
         };
-        let sel = edit.selection();
-        if !sel.is_empty() {
-            for r in layout.selection_rects(sel.clone()) {
-                paint(window, r, selection_color);
-            }
-        }
-        if let Some(marked) = edit.marked.clone() {
-            for r in layout.selection_rects(marked) {
-                let bar = Rect {
-                    y: r.y + r.h - MARKED_UNDERLINE_PX,
-                    h: MARKED_UNDERLINE_PX,
-                    ..r
-                };
-                paint(window, bar, color);
-            }
-        }
-        if sel.is_empty() && self.text_ui.caret_visible && self.focus_handle.is_focused(window) {
-            let r = layout.caret_rect(edit.caret);
-            let caret = Rect {
-                x: r.x - CARET_PX / 2.,
-                w: CARET_PX,
-                ..r
-            };
-            paint(window, caret, caret_color);
-        }
+        let caret = self.text_ui.caret_visible && self.focus_handle.is_focused(window);
+        let colors = (selection_color, caret_color, color);
+        paint_edit_marks(window, edit, layout, 1., colors, caret, paint);
     }
 
     /// The target's caret position under canvas point `at`.
@@ -1697,33 +1675,9 @@ impl EditorWindow {
                 paint_polygon(window, &corners, color);
             }
         };
-        let sel = edit.selection();
-        if !sel.is_empty() {
-            for r in layout.selection_rects(sel.clone()) {
-                paint(window, r, selection_color);
-            }
-        }
-        if let Some(marked) = edit.marked.clone() {
-            let thickness = MARKED_UNDERLINE_PX / zoom;
-            for r in layout.selection_rects(marked) {
-                let bar = Rect {
-                    y: r.y + r.h - thickness,
-                    h: thickness,
-                    ..r
-                };
-                paint(window, bar, color);
-            }
-        }
-        if sel.is_empty() && self.text_ui.caret_visible && self.focus_handle.is_focused(window) {
-            let r = layout.caret_rect(edit.caret);
-            let w = CARET_PX / zoom;
-            let caret = Rect {
-                x: r.x - w / 2.,
-                w,
-                ..r
-            };
-            paint(window, caret, caret_color);
-        }
+        let caret = self.text_ui.caret_visible && self.focus_handle.is_focused(window);
+        let colors = (selection_color, caret_color, color);
+        paint_edit_marks(window, edit, layout, zoom, colors, caret, paint);
     }
 
     /// The corners (top left, bottom right) in screen pixels relative to the
@@ -1771,6 +1725,48 @@ impl EditorWindow {
     fn bytes_of(&self, range: Range<usize>) -> Option<Range<usize>> {
         let plain = self.edited_plain()?;
         Some(utf16_to_byte(&plain, range.start)..utf16_to_byte(&plain, range.end))
+    }
+}
+
+/// Paints `edit`'s selection, the text being composed (underlined) and,
+/// with nothing selected and `caret` shown, its caret, on `layout`, shown
+/// at `zoom` pixels per unit. `colors` are the selection's, the caret's and
+/// the underline's; `paint` fills a rectangle given in layout units.
+fn paint_edit_marks(
+    window: &mut Window,
+    edit: &TextEditor,
+    layout: &TextLayout,
+    zoom: f32,
+    (selection_color, caret_color, color): (Hsla, Hsla, Hsla),
+    caret: bool,
+    paint: impl Fn(&mut Window, Rect, Hsla),
+) {
+    let sel = edit.selection();
+    if !sel.is_empty() {
+        for r in layout.selection_rects(sel.clone()) {
+            paint(window, r, selection_color);
+        }
+    }
+    if let Some(marked) = edit.marked.clone() {
+        let thickness = MARKED_UNDERLINE_PX / zoom;
+        for r in layout.selection_rects(marked) {
+            let bar = Rect {
+                y: r.y + r.h - thickness,
+                h: thickness,
+                ..r
+            };
+            paint(window, bar, color);
+        }
+    }
+    if sel.is_empty() && caret {
+        let r = layout.caret_rect(edit.caret);
+        let w = CARET_PX / zoom;
+        let caret = Rect {
+            x: r.x - w / 2.,
+            w,
+            ..r
+        };
+        paint(window, caret, caret_color);
     }
 }
 

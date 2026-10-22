@@ -320,6 +320,11 @@ fn register_input(
                     // A double click (with any tool but Hand, which pans)
                     // opens a topic's equation card on its equation, else
                     // edits text: the first click did what it does.
+                    // The later clicks of a double click on a note badge
+                    // add nothing: the first opened or closed its card.
+                    if event.click_count >= 2 && editor.note_badge_at(at).is_some() {
+                        return;
+                    }
                     if event.click_count == 2 {
                         match editor.equation_at(at) {
                             Some(topic) => editor.open_equation_card(topic, window, cx),

@@ -645,8 +645,8 @@ impl EditorWindow {
     }
 
     /// Left mouse-down at canvas point `at` with the Pointer tool: opens a
-    /// topic's note card or link from its badge, or grabs a selection handle, or selects and starts moving a shape, or starts a
-    /// marquee.
+    /// topic's note card or link from its badge, or grabs a selection
+    /// handle, or selects and starts moving a shape, or starts a marquee.
     pub(super) fn begin_pointer_press(
         &mut self,
         at: Pt,
