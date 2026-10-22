@@ -345,7 +345,7 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
                 }),
                 (
                     "mm-note",
-                    "sticky-note",
+                    "note-lines",
                     "Note (⌘⇧N)",
                     |this, window, cx| this.edit_selected_note(window, cx),
                 ),

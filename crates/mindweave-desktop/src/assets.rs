@@ -1,11 +1,24 @@
-//! The app's assets: gpui-kit's full Lucide set, plus the accent layers
-//! painted under the ribbon's own icons to give them a Fluent-style
-//! two-tone look.
+//! The app's assets: gpui-kit's full Lucide set, a few icons of the app's
+//! own in the same style, plus the accent layers painted under the
+//! ribbon's own icons to give them a Fluent-style two-tone look.
 
 use std::borrow::Cow;
 
 use gpui_kit::assets::AllAssets;
 use gpui_kit::{AssetSource, Result, SharedString};
+
+/// Where icons are served, the app's own among Lucide's.
+const ICON_DIR: &str = "icons/";
+
+/// The app's own icons, drawn like Lucide's (24-unit box, 2-unit round
+/// strokes in `currentColor`), by name: SVG elements only.
+const OWN_ICONS: &[(&str, &str)] = &[
+    // XMind's note mark: a paragraph of three lines, the last one short.
+    (
+        "note-lines",
+        r#"<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/>"#,
+    ),
+];
 
 /// Where accent layers are served: `accent/<icon>/<layer>.svg`, where the
 /// layer is an index into [`ACCENTS`].
@@ -105,9 +118,9 @@ const ACCENTS: &[(&str, &[Accent])] = &[
         }],
     ),
     (
-        "sticky-note",
+        "note-lines",
         &[Accent {
-            body: r#"<path d="M15 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9h-5a1 1 0 0 1-1-1z"/>"#,
+            body: r#"<rect x="1" y="1" width="22" height="22" rx="5" fill-opacity="0.22"/>"#,
             color: AMBER,
         }],
     ),
@@ -137,6 +150,15 @@ pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some(body) = own_icon(path) {
+            return Ok(Some(
+                format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{body}</svg>"#
+                )
+                .into_bytes()
+                .into(),
+            ));
+        }
         let Some(rest) = path.strip_prefix(ACCENT_DIR) else {
             return AllAssets.load(path);
         };
@@ -161,8 +183,24 @@ impl AssetSource for Assets {
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        AllAssets.list(path)
+        let mut paths = AllAssets.list(path)?;
+        paths.extend(
+            OWN_ICONS
+                .iter()
+                .map(|(name, _)| SharedString::from(format!("{ICON_DIR}{name}.svg")))
+                .filter(|p| p.starts_with(path)),
+        );
+        Ok(paths)
     }
+}
+
+/// The SVG elements of the app's own icon at asset path `path`, if it is one.
+fn own_icon(path: &str) -> Option<&'static str> {
+    let name = path.strip_prefix(ICON_DIR)?.strip_suffix(".svg")?;
+    OWN_ICONS
+        .iter()
+        .find(|(own, _)| *own == name)
+        .map(|(_, body)| *body)
 }
 
 #[cfg(test)]
@@ -183,6 +221,22 @@ mod tests {
         assert!(load(&accent_path("image", 2)).is_none());
         assert!(load(&accent_path("no-such-icon", 0)).is_none());
         assert!(load("accent/garbage").is_none());
+    }
+
+    #[test]
+    fn own_icons_are_served_and_listed_like_lucide_ones() {
+        let svg = load("icons/note-lines.svg").unwrap();
+        assert!(svg.contains(r#"stroke="currentColor""#) && svg.contains("M4 18h10"));
+        assert!(Assets
+            .list("icons/")
+            .unwrap()
+            .iter()
+            .any(|p| p == "icons/note-lines.svg"));
+        assert!(!Assets
+            .list("accent/")
+            .unwrap()
+            .iter()
+            .any(|p| p.contains("note-lines")));
     }
 
     #[test]

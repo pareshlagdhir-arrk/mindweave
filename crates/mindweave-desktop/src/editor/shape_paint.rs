@@ -593,7 +593,7 @@ fn paint_topic_extras(
     }
     let badge_color =
         style_color(shape.style.stroke.as_deref(), auto.stroke, 1.).unwrap_or(auto.stroke);
-    for (rect, icon) in [(parts.badge, "link"), (parts.note, "sticky-note")] {
+    for (rect, icon) in [(parts.badge, "link"), (parts.note, "note-lines")] {
         let Some(rect) = rect else { continue };
         window
             .paint_svg(
