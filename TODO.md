@@ -16,8 +16,18 @@
 - [x] send to back and bring to front
 - [x] default fill should not be there
 - [x] changing shapes property should be remember for that shape type or may be globally
-- [ ] Manage icon pack (show/hide one or more pack if not reqiure)
+- [x] Manage icon pack (show/hide one or more pack if not reqiure)
 - [ ] Image crope
+- [x] Notes in mind-map
+- [x] Equation in mind-map
+- [ ] Task in mind-map
+  - title, startdate, enddate, progress in %, description
+- [ ] Artboard
+- [ ] MCP
+- [ ] Skill
+- [ ] README.md
+- [ ] Windows and Linux build
+- [ ] Brew package
 - [ ]
 
 ### Next Milestone
