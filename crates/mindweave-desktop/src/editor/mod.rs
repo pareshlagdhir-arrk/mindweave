@@ -1369,7 +1369,7 @@ impl Render for EditorWindow {
         self.sync_window_title(window);
         self.sync_properties(window, cx);
         self.sync_topic_fields(window, cx);
-        self.sync_equation_card(window);
+        self.sync_equation_card(window, cx);
 
         let (show_layers, show_properties, show_icons) = {
             let settings = &cx.global::<AppState>().settings;

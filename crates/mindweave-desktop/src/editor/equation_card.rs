@@ -16,14 +16,15 @@ use mindweave_core::geometry::Rect;
 use mindweave_core::DocumentSession;
 use uuid::Uuid;
 
-use super::cards::card_origin;
+use super::cards::{card_origin, MARGIN};
 use super::{section_label, EditorWindow};
 use crate::actions::{ApplyEquation, EQUATION_CARD_CONTEXT};
 use crate::equation::{rasterise, render_equation, RenderedEquation};
 
-/// The card's size, in pixels.
+/// The card's width, in pixels.
 const CARD_WIDTH: f32 = 340.;
-const CARD_HEIGHT: f32 = 330.;
+/// The card's height until it is first laid out (it fits its content).
+const CARD_HEIGHT_GUESS: f32 = 300.;
 /// Space between the card and its topic.
 const CARD_GAP: f32 = 12.;
 const CARD_PADDING: f32 = 12.;
@@ -44,6 +45,8 @@ pub(super) struct EquationCard {
     pub input: Entity<TextareaState>,
     /// The typed LaTeX rendered.
     preview: Preview,
+    /// The card's height when it was last laid out, in pixels.
+    height: Option<f32>,
     _subscription: Subscription,
 }
 
@@ -51,6 +54,8 @@ pub(super) struct EquationCard {
 struct Preview {
     /// Whether the input is blank (nothing to preview).
     blank: bool,
+    /// The colour it is drawn in: the theme's text colour.
+    color: Hsla,
     render: Result<RenderedEquation, String>,
     /// The render rasterised for the window's scale, and the size it is
     /// shown at, in pixels.
@@ -78,6 +83,16 @@ impl EditorWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Opened again on the same topic, the card keeps what was typed.
+        if let Some(card) = self
+            .equation_card
+            .as_ref()
+            .filter(|card| card_is_open_on(Some(card.topic), topic))
+        {
+            let input = card.input.clone();
+            input.update(cx, |state, cx| state.focus(window, cx));
+            return;
+        }
         self.begin_edit_action(window, cx);
         self.close_equation_card(window);
         let Some(shape) = self.session.find_shape(topic) else {
@@ -105,9 +120,11 @@ impl EditorWindow {
             input,
             preview: Preview {
                 blank: true,
+                color: cx.theme().foreground,
                 render: Err(String::new()),
                 image: None,
             },
+            height: None,
             _subscription,
         });
         self.refresh_equation_preview(window, cx);
@@ -155,14 +172,28 @@ impl EditorWindow {
     }
 
     /// Closes the card once its topic is no longer on the active page's
-    /// active layer (deleted, undone, or another page or layer shown).
-    pub(super) fn sync_equation_card(&mut self, window: &mut Window) {
-        let gone = self
-            .equation_card
-            .as_ref()
-            .is_some_and(|card| !card_topic_present(&self.session, card.topic));
-        if gone {
+    /// active layer (deleted, undone, or another page or layer shown),
+    /// giving the editor back its focus; redraws the preview after a theme
+    /// change.
+    pub(super) fn sync_equation_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card) = self.equation_card.as_ref() else {
+            return;
+        };
+        if !card_topic_present(&self.session, card.topic) {
             self.close_equation_card(window);
+            self.focus_handle.focus(window, cx);
+        } else if card.preview.color != cx.theme().foreground {
+            self.refresh_equation_preview(window, cx);
+        }
+    }
+
+    /// Records the card's laid-out height, which places it next frame.
+    fn set_equation_card_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        if let Some(card) = self.equation_card.as_mut() {
+            if card.height != Some(height) {
+                card.height = Some(height);
+                cx.notify();
+            }
         }
     }
 
@@ -172,7 +203,8 @@ impl EditorWindow {
             return;
         };
         let latex = card.input.read(cx).value().trim().to_string();
-        let render = render_equation(&latex, cx.theme().foreground, PREVIEW_FONT_SIZE);
+        let color = cx.theme().foreground;
+        let render = render_equation(&latex, color, PREVIEW_FONT_SIZE);
         let room = (CARD_WIDTH - 2. * CARD_PADDING, PREVIEW_HEIGHT);
         let image = render.as_ref().ok().and_then(|r| {
             let shown = fitted(r.size, room)?;
@@ -183,6 +215,7 @@ impl EditorWindow {
             &mut card.preview,
             Preview {
                 blank: latex.is_empty(),
+                color,
                 render,
                 image,
             },
@@ -216,7 +249,7 @@ impl EditorWindow {
     pub(super) fn render_equation_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let card = self.equation_card.as_ref()?;
         let frame = self.session.find_shape(card.topic)?.frame;
-        let canvas = self.canvas_bounds?.size;
+        let canvas_size = self.canvas_bounds?.size;
         let viewport = self.session.page().viewport;
         let (x, y) = viewport.canvas_to_screen((frame.x, frame.y));
         let topic = Rect {
@@ -225,12 +258,11 @@ impl EditorWindow {
             w: frame.w * viewport.zoom,
             h: frame.h * viewport.zoom,
         };
-        let (left, top) = card_origin(
-            topic,
-            (CARD_WIDTH, CARD_HEIGHT),
-            (f32::from(canvas.width), f32::from(canvas.height)),
-            CARD_GAP,
-        );
+        let window_size = (f32::from(canvas_size.width), f32::from(canvas_size.height));
+        let max_height = (window_size.1 - 2. * MARGIN).max(0.);
+        let height = card.height.unwrap_or(CARD_HEIGHT_GUESS).min(max_height);
+        let (left, top) = card_origin(topic, (CARD_WIDTH, height), window_size, CARD_GAP);
+        let editor = cx.entity();
         let theme = cx.theme();
         let can_apply =
             equation_to_apply(&card.input.read(cx).value(), &card.preview.render).is_some();
@@ -244,15 +276,18 @@ impl EditorWindow {
                     this.insert_equation_snippet(snippet, window, cx)
                 }))
         });
+        // In a short canvas the preview gives up its height first.
         let preview = div()
             .h(px(PREVIEW_HEIGHT))
-            .flex_none()
+            .min_h(px(0.))
+            .flex_shrink(1.)
             .flex()
             .items_center()
             .justify_center()
             .overflow_hidden()
             .rounded(theme.radius)
-            .bg(theme.muted)
+            .border_1()
+            .border_color(theme.border)
             .map(|area| match (&card.preview.render, &card.preview.image) {
                 _ if card.preview.blank => area
                     .text_color(theme.muted_foreground)
@@ -273,7 +308,7 @@ impl EditorWindow {
             .left(px(left))
             .top(px(top))
             .w(px(CARD_WIDTH))
-            .h(px(CARD_HEIGHT))
+            .max_h(px(max_height))
             .p(px(CARD_PADDING))
             .gap(px(CARD_SPACING))
             .occlude()
@@ -289,17 +324,38 @@ impl EditorWindow {
             .on_action(cx.listener(|this, _: &ApplyEquation, window, cx| {
                 this.apply_equation_card(window, cx)
             }))
-            .child(section_label("Equation", cx))
+            // Measures the card (its border box less the border).
             .child(
-                Textarea::new(&card.input)
-                    .h(px(INPUT_HEIGHT))
-                    .font_family(theme.mono_font_family.clone())
-                    .text_size(px(INPUT_TEXT_SIZE)),
+                canvas(
+                    move |bounds, _, cx| {
+                        let height = f32::from(bounds.size.height) + 2.;
+                        editor.update(cx, |this, cx| this.set_equation_card_height(height, cx));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
             )
-            .child(h_flex().flex_wrap().gap(px(SNIPPET_GAP)).children(snippets))
+            .child(section_label("Equation", cx).flex_none())
+            .child(
+                div().flex_none().child(
+                    Textarea::new(&card.input)
+                        .h(px(INPUT_HEIGHT))
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(px(INPUT_TEXT_SIZE)),
+                ),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .flex_wrap()
+                    .gap(px(SNIPPET_GAP))
+                    .children(snippets),
+            )
             .child(preview)
             .child(
                 h_flex()
+                    .flex_none()
                     .justify_end()
                     .gap(px(CARD_SPACING))
                     .child(
@@ -325,6 +381,12 @@ impl EditorWindow {
             );
         Some(card_element.into_any_element())
     }
+}
+
+/// Whether opening the card on `topic` finds it already open there
+/// (`open` is the topic of the card open, if any), so it keeps its draft.
+fn card_is_open_on(open: Option<Uuid>, topic: Uuid) -> bool {
+    open == Some(topic)
 }
 
 /// Releases `preview`'s texture.
@@ -391,7 +453,9 @@ fn card_topic_present(session: &DocumentSession, topic: Uuid) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{card_topic_present, equation_to_apply, fitted, snippet_caret, SNIPPETS};
+    use super::{
+        card_is_open_on, card_topic_present, equation_to_apply, fitted, snippet_caret, SNIPPETS,
+    };
     use crate::equation::render_equation;
     use gpui_kit::hsla;
     use mindweave_core::DocumentSession;
@@ -446,6 +510,14 @@ mod tests {
         assert_eq!(fitted((600., 40.), (300., 80.)), Some((300., 20.)));
         assert_eq!(fitted((100., 160.), (300., 80.)), Some((50., 80.)));
         assert_eq!(fitted((0., 20.), (300., 80.)), None);
+    }
+
+    #[test]
+    fn opening_the_card_again_on_its_topic_keeps_the_draft() {
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        assert!(card_is_open_on(Some(a), a));
+        assert!(!card_is_open_on(Some(a), b));
+        assert!(!card_is_open_on(None, a));
     }
 
     #[test]

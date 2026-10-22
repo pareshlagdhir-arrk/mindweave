@@ -4,7 +4,7 @@
 use mindweave_core::geometry::Rect;
 
 /// The least space kept between a card and the canvas's edges.
-const MARGIN: f32 = 8.;
+pub(super) const MARGIN: f32 = 8.;
 
 /// Where a card `card` (width, height) big opens beside `topic`, both in
 /// screen coordinates relative to the canvas, which is `window` big: right
