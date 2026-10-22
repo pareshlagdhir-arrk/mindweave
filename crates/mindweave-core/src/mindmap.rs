@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::document::Page;
 use crate::geometry::{flatten, FillRole, Geometry, PathCmd, Pt, Rect, SubPath};
 use crate::image::ImageData;
+use crate::text::RichText;
 
 /// Shape id of a topic in [`crate::shape::TEXT_LIBRARY`].
 pub const TOPIC_SHAPE: &str = "topic";
@@ -86,6 +87,16 @@ impl BranchStyle {
     }
 }
 
+/// A LaTeX equation shown in a topic.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Equation {
+    /// The LaTeX source.
+    pub latex: String,
+    /// The rendered size in canvas units, kept current by the desktop's
+    /// fit pass; `(0, 0)` until measured.
+    pub size: (f32, f32),
+}
+
 /// What makes a shape a topic.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TopicProps {
@@ -118,6 +129,12 @@ pub struct TopicProps {
     /// A web or file link, opened from the topic's link badge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    /// A note attached to the topic, shown in a popover from its note badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<RichText>,
+    /// A LaTeX equation shown below the topic's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equation: Option<Equation>,
     /// On a central topic: the map keeps its topics arranged (a dragged
     /// topic snaps back unless dropped on another topic). Off, topics stay
     /// where they are dropped.
@@ -280,6 +297,8 @@ impl TopicProps {
             picture: None,
             picture_size: None,
             link: None,
+            note: None,
+            equation: None,
             auto_layout: true,
             offset: None,
         }

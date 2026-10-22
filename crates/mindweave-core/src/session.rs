@@ -15,7 +15,9 @@ use crate::geometry::Frame;
 use crate::history::{History, HISTORY_CAP};
 use crate::library::LibraryRegistry;
 use crate::line::reroute_page;
+use crate::mindmap::Equation;
 use crate::shape::{Label, Shape};
+use crate::text::RichText;
 pub use crate::viewport::{ZOOM_MAX, ZOOM_MIN};
 
 pub const GRID_MIN: f32 = 4.0;
@@ -139,7 +141,7 @@ fn corner_offset(f: &Frame) -> (f32, f32) {
 /// `x`/`y` unrotated; rotated, the same top-left corner (which layout
 /// keeps fixed) up to float rounding.
 /// Topic (or boundary) equality ignoring what the layout derives: every
-/// topic's size, a placed topic's position, a boundary's frame. A central
+/// topic's size and equation size, a placed topic's position, a boundary's frame. A central
 /// topic's centre is content.
 fn topic_content_eq(a: &Shape, b: &Shape) -> bool {
     let central = a
@@ -157,6 +159,9 @@ fn topic_content_eq(a: &Shape, b: &Shape) -> bool {
     let (mut a, mut b) = (a.clone(), b.clone());
     for s in [&mut a, &mut b] {
         s.frame = Frame::default();
+        if let Some(eq) = s.topic.as_mut().and_then(|t| t.equation.as_mut()) {
+            eq.size = (0.0, 0.0);
+        }
         if let Some(bound) = s.boundary.as_mut() {
             bound.outline.clear();
         }
@@ -817,6 +822,60 @@ impl DocumentSession {
             shape.normalize();
             self.layout_generation += 1;
             self.reroute_lines();
+        }
+    }
+
+    /// Sets (or, with `None` or text that is only whitespace, removes)
+    /// topic `id`'s note, as one undo step.
+    pub fn set_topic_note(&mut self, id: Uuid, note: Option<RichText>) {
+        let note = note.filter(|n| !n.plain().trim().is_empty());
+        self.update_shapes(&[id], |s| {
+            if let Some(t) = s.topic.as_mut() {
+                t.note = note.clone();
+            }
+        });
+    }
+
+    /// Sets (or, with `None` or an empty source, removes) topic `id`'s
+    /// equation, as one undo step. A changed source resets the measured
+    /// size until the fit pass measures it again.
+    pub fn set_topic_equation(&mut self, id: Uuid, latex: Option<String>) {
+        let latex = latex
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty());
+        self.update_shapes(&[id], |s| {
+            let Some(t) = s.topic.as_mut() else { return };
+            t.equation = match (latex.as_ref(), t.equation.take()) {
+                (None, _) => None,
+                (Some(l), Some(old)) if old.latex == *l => Some(old),
+                (Some(l), _) => Some(Equation {
+                    latex: l.clone(),
+                    size: (0.0, 0.0),
+                }),
+            };
+        });
+    }
+
+    /// Records the measured size of topic `id`'s equation. Like
+    /// [`set_topic_size`](Self::set_topic_size) it is derived from the
+    /// layout, so it is not an undo step.
+    pub fn set_topic_equation_size(&mut self, id: Uuid, size: (f32, f32)) {
+        if !(size.0.is_finite() && size.1.is_finite()) {
+            return;
+        }
+        let shape = self
+            .page_mut()
+            .layers
+            .iter_mut()
+            .flat_map(|l| l.objects.iter_mut())
+            .find(|s| s.id == id && s.topic.is_some());
+        if let Some(eq) = shape
+            .and_then(|s| s.topic.as_mut())
+            .and_then(|t| t.equation.as_mut())
+            .filter(|eq| eq.size != size)
+        {
+            eq.size = size;
+            self.layout_generation += 1;
         }
     }
 
@@ -2468,5 +2527,61 @@ mod tests {
         });
         assert!(!s.is_dirty());
         assert!(!s.title().ends_with('•'));
+    }
+
+    /// The topic properties of shape `id`.
+    fn topic(s: &DocumentSession, id: Uuid) -> crate::mindmap::TopicProps {
+        s.find_shape(id).unwrap().topic.clone().unwrap()
+    }
+
+    /// A rich text holding `text` in the default style.
+    fn note_text(text: &str) -> crate::text::RichText {
+        use crate::text::{HAlign, RichText, RunStyle};
+        let mut t = RichText::new(RunStyle::default(), HAlign::Left);
+        t.insert(0, text, &RunStyle::default());
+        t
+    }
+
+    #[test]
+    fn emptied_note_becomes_none() {
+        let (_d, mut s) = new_session("n.mindweave");
+        let c = s.add_central_topic((0.0, 0.0));
+        s.set_topic_note(c, Some(note_text("Remember")));
+        assert_eq!(topic(&s, c).note.as_ref().unwrap().plain(), "Remember");
+        s.set_topic_note(c, Some(note_text("  ")));
+        assert_eq!(topic(&s, c).note, None);
+        assert!(s.undo());
+        assert!(topic(&s, c).note.is_some());
+    }
+
+    #[test]
+    fn equation_source_change_resets_size() {
+        let (_d, mut s) = new_session("e.mindweave");
+        let c = s.add_central_topic((0.0, 0.0));
+        s.set_topic_equation(c, Some("  x^2 ".into()));
+        assert_eq!(topic(&s, c).equation.as_ref().unwrap().latex, "x^2");
+        assert_eq!(topic(&s, c).equation.as_ref().unwrap().size, (0.0, 0.0));
+        s.save().unwrap();
+        let (rev, generation) = (s.revision(), s.layout_generation());
+        s.set_topic_equation_size(c, (30.0, 12.0));
+        assert_eq!(topic(&s, c).equation.as_ref().unwrap().size, (30.0, 12.0));
+        assert!(s.layout_generation() > generation);
+        assert_eq!(s.revision(), rev);
+        s.set_topic_equation(c, Some("x^2".into()));
+        assert_eq!(topic(&s, c).equation.as_ref().unwrap().size, (30.0, 12.0));
+        s.set_topic_equation(c, Some("y".into()));
+        assert_eq!(topic(&s, c).equation.as_ref().unwrap().size, (0.0, 0.0));
+    }
+
+    #[test]
+    fn clearing_equation_removes_it() {
+        let (_d, mut s) = new_session("e.mindweave");
+        let c = s.add_central_topic((0.0, 0.0));
+        s.set_topic_equation(c, Some("x".into()));
+        s.set_topic_equation(c, Some("  ".into()));
+        assert_eq!(topic(&s, c).equation, None);
+        s.set_topic_equation(c, Some("x".into()));
+        s.set_topic_equation(c, None);
+        assert_eq!(topic(&s, c).equation, None);
     }
 }

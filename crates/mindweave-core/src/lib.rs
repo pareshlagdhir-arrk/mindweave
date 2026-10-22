@@ -56,7 +56,7 @@ pub use line::{
 };
 pub use mindmap::{
     branch_style, clamp_topic_picture, fit_topic_picture, map_decor, rounded_polygon,
-    BoundaryProps, BranchStyle, Direction, MapDecor, Structure, TopicParts, TopicProps,
+    BoundaryProps, BranchStyle, Direction, Equation, MapDecor, Structure, TopicParts, TopicProps,
     BOUNDARY_SHAPE, BRANCH_COLORS, TOPIC_ICON_SIZE, TOPIC_IMAGE_SIZE, TOPIC_PADDING, TOPIC_SHAPE,
     TOPIC_TEXT_MAX,
 };

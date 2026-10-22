@@ -1,6 +1,7 @@
 //! `.mindweave` file format: pretty-printed JSON with a top-level
 //! `version`. Version 4 adds `images`: each picture the document shows,
-//! stored once by id (see [`crate::image`]).
+//! stored once by id (see [`crate::image`]). Version 5 adds topic notes,
+//! equations, list items and links.
 
 use std::path::Path;
 
@@ -9,7 +10,7 @@ use thiserror::Error;
 use crate::document::Document;
 use crate::image::{collect_images, resolve_images, ImageStore};
 
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 /// Top-level key of the stored pictures.
 const IMAGES_KEY: &str = "images";
 
@@ -92,7 +93,7 @@ mod tests {
     #[test]
     fn new_document_has_one_page_one_layer() {
         let d = Document::new();
-        assert_eq!(d.version, 4);
+        assert_eq!(d.version, 5);
         assert_eq!(d.pages.len(), 1);
         assert_eq!(d.pages[0].name, "Page 1");
         assert_eq!(d.pages[0].layers[0].name, "Layer 1");
@@ -155,17 +156,17 @@ mod tests {
         let s = fs::read_to_string(&path).unwrap();
         assert!(s.contains("\n  "));
         assert!(s.contains("\"pattern\": \"dots\""));
-        assert!(s.contains("\"version\": 4"));
+        assert!(s.contains("\"version\": 5"));
     }
 
     #[test]
     fn load_rejects_newer_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.mindweave");
-        fs::write(&path, r#"{"version":5,"pages":[],"active_page":0}"#).unwrap();
+        fs::write(&path, r#"{"version":6,"pages":[],"active_page":0}"#).unwrap();
         assert!(matches!(
             load(&path),
-            Err(FormatError::UnsupportedVersion(5))
+            Err(FormatError::UnsupportedVersion(6))
         ));
     }
 
@@ -327,9 +328,9 @@ mod tests {
         v["pages"][0]["layers"][0]["objects"] = serde_json::json!([]);
         fs::write(&a, v.to_string()).unwrap();
         let d = load(&a).unwrap();
-        assert_eq!(d.version, 4);
+        assert_eq!(d.version, 5);
         save(&d, &b).unwrap();
-        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 4"));
+        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 5"));
     }
 
     #[test]
@@ -344,7 +345,7 @@ mod tests {
         // A version 2 file (no labels or text boxes) loads unchanged.
         fs::write(&a, SHAPE_DOC).unwrap();
         let mut d = load(&a).unwrap();
-        assert_eq!(d.version, 4);
+        assert_eq!(d.version, 5);
         let objects = &mut d.pages[0].layers[0].objects;
         assert_eq!(objects[0].label, None);
         assert_eq!(objects[0].text_box, None);
@@ -370,7 +371,7 @@ mod tests {
 
         save(&d, &b).unwrap();
         let saved = fs::read_to_string(&b).unwrap();
-        assert!(saved.contains("\"version\": 4"));
+        assert!(saved.contains("\"version\": 5"));
         let back = load(&b).unwrap();
         assert_eq!(back, d);
         let shapes = &back.pages[0].layers[0].objects;
@@ -380,5 +381,63 @@ mod tests {
             shapes[0].label.as_ref().unwrap().text.plain(),
             "Hello!\nworld"
         );
+    }
+
+    /// A document with one central topic, as the notes tests start from.
+    fn doc_with_topic() -> Document {
+        use crate::mindmap::TopicProps;
+        use crate::shape::Shape;
+        let mut d = Document::new();
+        let mut shape = Shape::new_topic(crate::geometry::Frame {
+            x: 0.0,
+            y: 0.0,
+            w: 140.0,
+            h: 48.0,
+            rotation: 0.0,
+            ..Default::default()
+        });
+        let id = shape.id;
+        shape.topic = Some(TopicProps::central(id));
+        d.pages[0].layers[0].objects.push(shape);
+        d
+    }
+
+    #[test]
+    fn notes_and_equations_round_trip() {
+        use crate::mindmap::Equation;
+        use crate::text::{HAlign, RichText, RunStyle};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mindweave");
+        let mut d = doc_with_topic();
+        let mut note = RichText::new(RunStyle::default(), HAlign::Left);
+        note.insert(0, "Remember", &RunStyle::default());
+        let topic = d.pages[0].layers[0].objects[0].topic.as_mut().unwrap();
+        topic.note = Some(note);
+        topic.equation = Some(Equation {
+            latex: r"\ce{H2O}".into(),
+            size: (40.0, 18.0),
+        });
+        save(&d, &path).unwrap();
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("\"version\": 5"));
+        assert_eq!(load(&path).unwrap(), d);
+    }
+
+    #[test]
+    fn version_4_files_load_without_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (
+            dir.path().join("a.mindweave"),
+            dir.path().join("b.mindweave"),
+        );
+        let mut v = serde_json::to_value(doc_with_topic()).unwrap();
+        v["version"] = 4.into();
+        fs::write(&a, v.to_string()).unwrap();
+        let d = load(&a).unwrap();
+        let topic = d.pages[0].layers[0].objects[0].topic.as_ref().unwrap();
+        assert_eq!((topic.note.as_ref(), topic.equation.as_ref()), (None, None));
+        save(&d, &b).unwrap();
+        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 5"));
     }
 }
