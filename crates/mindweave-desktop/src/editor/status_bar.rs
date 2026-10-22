@@ -1,4 +1,4 @@
-//! The editor status bar. Left: the Layers sidebar button, page and
+//! The editor status bar. Left: the left sidebar button, page and
 //! layer. Right: pointer position, zoom (resets it), theme name (opens the
 //! theme picker) and the Properties sidebar button.
 
@@ -7,7 +7,7 @@ use gpui_kit::component::{h_flex, ActiveTheme as _, Icon, Selectable as _, Sizab
 use gpui_kit::*;
 
 use super::{EditorWindow, SMALL_TEXT_SIZE};
-use crate::actions::{ToggleLayers, ToggleProperties, ToggleThemePicker, ZoomReset};
+use crate::actions::{ToggleLeftSidebar, ToggleProperties, ToggleThemePicker, ZoomReset};
 use crate::app_state::AppState;
 use crate::libraries::lucide_icon_path;
 
@@ -27,12 +27,12 @@ pub(super) fn render(editor: &EditorWindow, cx: &App) -> impl IntoElement {
 
     let settings = &cx.global::<AppState>().settings;
     let layers = sidebar_button(
-        "toggle-layers",
+        "toggle-left-sidebar",
         "panel-left",
-        settings.show_layers,
-        "Layers",
+        settings.left_sidebar_shown(),
+        "Sidebar",
         "⌘B",
-        || Box::new(ToggleLayers),
+        || Box::new(ToggleLeftSidebar),
         cx,
     );
     let properties = sidebar_button(

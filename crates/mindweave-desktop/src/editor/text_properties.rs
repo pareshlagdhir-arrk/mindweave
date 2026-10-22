@@ -43,7 +43,12 @@ pub(super) const SIZE_PRESETS: [f32; 9] = [8., 10., 12., 14., 18., 24., 32., 48.
 /// Wheel travel, in pixels, for one size step: a mouse wheel notch (one
 /// line) is one step, and trackpad pixels add up to steps.
 pub(super) const WHEEL_STEP_PX: f32 = 20.;
-const SIZE_INPUT_WIDTH: f32 = 52.;
+/// The size box, stepper and presets included.
+const SIZE_BOX_WIDTH: f32 = 100.;
+/// Each half of the ▴▾ stepper, and its chevrons.
+const STEPPER_WIDTH: f32 = 14.;
+const STEPPER_HEIGHT: f32 = 10.;
+const STEPPER_ICON_SIZE: f32 = 10.;
 /// The side of the style toggles and alignment buttons.
 const TOGGLE_SIZE: f32 = 24.;
 const ICON_SIZE: f32 = 14.;
@@ -932,48 +937,68 @@ fn toggle_button(
         }))
 }
 
-/// The size field (Enter or leaving it applies; the wheel over it steps),
-/// ↑ and ↓ buttons, and the ▾ preset sizes.
+/// The size box: the size field (Enter or leaving it applies; the wheel
+/// over it steps), a small ▴▾ stepper, and the ▾ preset sizes, in one
+/// border.
 fn size_control(fields: &TextFields, cx: &mut Context<EditorWindow>) -> impl IntoElement {
-    let step = |id: &'static str, icon_name: IconName, tooltip: &'static str, steps: i32| {
-        Button::new(id)
-            .ghost()
-            .xsmall()
-            .icon(icon_name)
-            .tooltip(tooltip)
+    let theme = cx.theme();
+    let (hover, muted, border) = (theme.list_hover, theme.muted_foreground, theme.border);
+    let step = |id: &'static str, name: &str, tooltip: &'static str, steps: i32| {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(STEPPER_WIDTH))
+            .h(px(STEPPER_HEIGHT))
+            .rounded(px(2.))
+            .hover(move |s| s.bg(hover))
+            .child(
+                svg()
+                    .path(lucide_icon_path(name, cx))
+                    .size(px(STEPPER_ICON_SIZE))
+                    .text_color(muted),
+            )
+            .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
             .on_click(
                 cx.listener(move |this, _, window, cx| this.step_text_size(steps, window, cx)),
             )
     };
-    let increase = step("text-size-up", IconName::ChevronUp, "Larger", 1);
-    let decrease = step("text-size-down", IconName::ChevronDown, "Smaller", -1);
-    h_flex()
-        .gap(px(2.))
+    let stepper = v_flex()
+        .flex_none()
+        .child(step("text-size-up", "chevron-up", "Larger", 1))
+        .child(step("text-size-down", "chevron-down", "Smaller", -1));
+    let presets = h_flex()
+        .flex_none()
+        .h_full()
+        .pl(px(2.))
+        .border_l_1()
+        .border_color(border)
+        .child(size_presets(cx));
+    div()
+        .id("text-size")
+        .w(px(SIZE_BOX_WIDTH))
+        // Leaving the field ends a run of wheel steps.
+        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            if !*hovered {
+                this.finish_size_steps(cx);
+            }
+        }))
+        .on_scroll_wheel(cx.listener(EditorWindow::on_size_wheel))
+        // Arrow keys in the field step too.
+        .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
+            cx.stop_propagation();
+            this.step_text_size(1, window, cx);
+        }))
+        .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
+            cx.stop_propagation();
+            this.step_text_size(-1, window, cx);
+        }))
         .child(
-            div()
-                .id("text-size")
-                .w(px(SIZE_INPUT_WIDTH))
-                // Leaving the field ends a run of wheel steps.
-                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                    if !*hovered {
-                        this.finish_size_steps(cx);
-                    }
-                }))
-                .on_scroll_wheel(cx.listener(EditorWindow::on_size_wheel))
-                // Arrow keys in the field step too.
-                .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
-                    cx.stop_propagation();
-                    this.step_text_size(1, window, cx);
-                }))
-                .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
-                    cx.stop_propagation();
-                    this.step_text_size(-1, window, cx);
-                }))
-                .child(Input::new(&fields.size).small()),
+            Input::new(&fields.size)
+                .small()
+                .suffix(h_flex().h_full().gap(px(2.)).child(stepper).child(presets)),
         )
-        .child(increase)
-        .child(decrease)
-        .child(size_presets(cx))
 }
 
 /// The ▾ menu of preset sizes.

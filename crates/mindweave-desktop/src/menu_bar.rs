@@ -11,8 +11,8 @@ use gpui_kit::*;
 use crate::actions::{
     self, BringForward, BringToFront, CloseWindow, Cut, Delete, Duplicate, Group, NewFile,
     NotImplemented, OpenFile, Paste, Quit, Redo, Save, SelectAll, SendBackward, SendToBack,
-    ShowDashboard, ToggleIcons, ToggleLayers, ToggleProperties, ToggleThemePicker, Undo, Ungroup,
-    ZoomIn, ZoomOut, ZoomReset,
+    ShowDashboard, ToggleIcons, ToggleLayers, ToggleLeftSidebar, ToggleProperties,
+    ToggleThemePicker, Undo, Ungroup, ZoomIn, ZoomOut, ZoomReset,
 };
 use crate::app_state::AppState;
 
@@ -51,6 +51,7 @@ pub(crate) struct MenuSpec {
 /// The sidebar state shown as check marks in the View menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PanelState {
+    pub show_left_sidebar: bool,
     pub show_layers: bool,
     pub show_properties: bool,
     pub show_icons: bool,
@@ -60,11 +61,13 @@ impl PanelState {
     fn current(cx: &App) -> Self {
         match cx.try_global::<AppState>() {
             Some(state) => Self {
-                show_layers: state.settings.show_layers,
+                show_left_sidebar: state.settings.left_sidebar_shown(),
+                show_layers: state.settings.layers_shown(),
                 show_properties: state.settings.show_properties,
-                show_icons: state.settings.show_icons,
+                show_icons: state.settings.icons_shown(),
             },
             None => Self {
+                show_left_sidebar: true,
                 show_layers: true,
                 show_properties: true,
                 show_icons: false,
@@ -147,6 +150,12 @@ pub(crate) fn menus(kind: WindowKind, panels: PanelState, include_quit: bool) ->
                 item("Zoom Out", ZoomOut, editor),
                 item("Actual Size", ZoomReset, editor),
                 Separator,
+                toggle(
+                    "Left Sidebar",
+                    ToggleLeftSidebar,
+                    editor,
+                    panels.show_left_sidebar,
+                ),
                 toggle("Layers", ToggleLayers, editor, panels.show_layers),
                 toggle("Icons", ToggleIcons, editor, panels.show_icons),
                 toggle(
@@ -296,6 +305,7 @@ mod tests {
     use gpui_kit::MenuItem;
 
     const PANELS: PanelState = PanelState {
+        show_left_sidebar: true,
         show_layers: true,
         show_properties: false,
         show_icons: false,

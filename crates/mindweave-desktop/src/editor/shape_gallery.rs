@@ -33,7 +33,7 @@ const CELL_LABEL_SIZE: f32 = 11.;
 /// Objective-C bindings are among this crate's dependencies.
 pub(super) const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
-/// The More button and its gallery of `library`'s shapes. A click on a
+/// The gallery strip's expander and its gallery of `library`'s shapes. A click on a
 /// shape selects its tool, a double click also locks it; either closes the
 /// gallery, as does Escape. The button shows as selected when
 /// `active_hidden`: the active tool is one the row has no room for.
@@ -66,10 +66,10 @@ pub(super) fn more_button(
             Button::new("ribbon-more")
                 .ghost()
                 .xsmall()
-                .label("More")
-                .dropdown_caret(true)
+                .icon(IconName::ChevronDown)
                 .selected(active_hidden)
                 .w(px(MORE_BUTTON_WIDTH))
+                .h_full()
                 .flex_none()
                 .tooltip("All Shapes"),
         )

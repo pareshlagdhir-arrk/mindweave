@@ -12,6 +12,7 @@ use mindweave_core::{
 };
 use uuid::Uuid;
 
+use super::dot_tile::DotTile;
 use super::interaction::{
     marquee_rect, visible_handles, Gesture, HANDLE_GRAB_PX, PREVIEW_OPACITY,
     ROTATE_HANDLE_OFFSET_PX,
@@ -61,8 +62,17 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
             window.insert_hitbox(bounds, HitboxBehavior::Normal)
         },
         move |bounds, hitbox, window, cx| {
-            paint_background(bounds, &settings, &viewport, window, cx);
-            editor.update(cx, |editor, cx| editor.paint_content(bounds, window, cx));
+            editor.update(cx, |editor, cx| {
+                paint_background(
+                    bounds,
+                    &settings,
+                    &viewport,
+                    &mut editor.dot_tile,
+                    window,
+                    cx,
+                );
+                editor.paint_content(bounds, window, cx)
+            });
             let (dragging, hand, ibeam, crosshair, text_tool, pointer) = {
                 let editor = editor.read(cx);
                 let ibeam = editor
@@ -117,6 +127,7 @@ fn paint_background(
     bounds: Bounds<Pixels>,
     settings: &CanvasSettings,
     viewport: &Viewport,
+    dots: &mut DotTile,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -163,21 +174,15 @@ fn paint_background(
         }
         BackgroundPattern::Dots => {
             let color = color(&settings.dot_color, theme.border).opacity(grid.alpha);
-            let dot_size = settings.dot_size;
             let stride = dot_stride(grid.xs.len(), grid.ys.len(), MAX_DOTS);
-            let half = dot_size / 2.;
             // Anchor the thinning to canvas grid indices so the kept dots
             // stay on the same canvas points while panning.
-            let skip_x = stride_offset(grid.first_ix.0, stride);
-            let skip_y = stride_offset(grid.first_ix.1, stride);
-            for &y in grid.ys.iter().skip(skip_y).step_by(stride) {
-                for &x in grid.xs.iter().skip(skip_x).step_by(stride) {
-                    let dot = Bounds::new(
-                        point(origin.x + px(x - half), origin.y + px(y - half)),
-                        size(px(dot_size), px(dot_size)),
-                    );
-                    window.paint_quad(fill(dot, color));
-                }
+            let first_x = grid.xs.get(stride_offset(grid.first_ix.0, stride));
+            let first_y = grid.ys.get(stride_offset(grid.first_ix.1, stride));
+            if let (Some(&x), Some(&y)) = (first_x, first_y) {
+                let first = point(origin.x + px(x), origin.y + px(y));
+                let period = grid.spacing_px * stride as f32;
+                dots.paint(bounds, first, period, settings.dot_size, color, window);
             }
         }
         BackgroundPattern::None => {}

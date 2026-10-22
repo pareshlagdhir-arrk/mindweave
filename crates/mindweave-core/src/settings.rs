@@ -35,6 +35,9 @@ pub struct AppSettings {
     pub recent: Vec<RecentFile>,
     pub dashboard_window: Option<WindowSize>,
     pub editor_window: Option<WindowSize>,
+    /// The left sidebar, holding the Layers and Icons panes; hiding it
+    /// keeps which panes it holds.
+    pub show_left_sidebar: bool,
     pub show_layers: bool,
     pub show_properties: bool,
     /// The Icons pane, below Layers.
@@ -60,6 +63,7 @@ impl Default for AppSettings {
             recent: Vec::new(),
             dashboard_window: None,
             editor_window: None,
+            show_left_sidebar: true,
             show_layers: true,
             show_properties: true,
             show_icons: false,
@@ -77,6 +81,46 @@ fn normalized(path: &Path) -> PathBuf {
 }
 
 impl AppSettings {
+    /// Whether the left sidebar is on screen: shown, and holding a pane.
+    pub fn left_sidebar_shown(&self) -> bool {
+        self.show_left_sidebar && (self.show_layers || self.show_icons)
+    }
+
+    /// Whether the Layers pane is on screen.
+    pub fn layers_shown(&self) -> bool {
+        self.show_left_sidebar && self.show_layers
+    }
+
+    /// Whether the Icons pane is on screen.
+    pub fn icons_shown(&self) -> bool {
+        self.show_left_sidebar && self.show_icons
+    }
+
+    /// Hides the left sidebar with both its panes, or shows it again;
+    /// shown empty, it shows Layers.
+    pub fn toggle_left_sidebar(&mut self) {
+        if self.left_sidebar_shown() {
+            self.show_left_sidebar = false;
+        } else {
+            self.show_left_sidebar = true;
+            if !self.show_icons {
+                self.show_layers = true;
+            }
+        }
+    }
+
+    /// Hides the Layers pane, or shows it with the left sidebar.
+    pub fn toggle_layers(&mut self) {
+        self.show_layers = !self.layers_shown();
+        self.show_left_sidebar |= self.show_layers;
+    }
+
+    /// Hides the Icons pane, or shows it with the left sidebar.
+    pub fn toggle_icons(&mut self) {
+        self.show_icons = !self.icons_shown();
+        self.show_left_sidebar |= self.show_icons;
+    }
+
     /// Gives a new `shape` the style last set on its kind: lines take the
     /// remembered line style and properties, other library shapes the
     /// remembered shape style. Text boxes and images keep their own.
@@ -458,6 +502,45 @@ mod tests {
         let s = AppSettings::default();
         assert_eq!(s.theme, "Mindweave One Dark");
         assert!(s.show_layers && s.show_properties);
+    }
+
+    #[test]
+    fn left_sidebar_hides_and_shows_both_panes() {
+        let mut s = AppSettings {
+            show_icons: true,
+            ..AppSettings::default()
+        };
+        assert!(s.left_sidebar_shown());
+        s.toggle_left_sidebar();
+        assert!(!s.left_sidebar_shown() && !s.layers_shown() && !s.icons_shown());
+        // Shown again, it holds the same panes.
+        s.toggle_left_sidebar();
+        assert!(s.layers_shown() && s.icons_shown());
+    }
+
+    #[test]
+    fn showing_an_empty_left_sidebar_shows_layers() {
+        let mut s = AppSettings {
+            show_layers: false,
+            ..AppSettings::default()
+        };
+        assert!(!s.left_sidebar_shown());
+        s.toggle_left_sidebar();
+        assert!(s.layers_shown() && !s.icons_shown());
+    }
+
+    #[test]
+    fn showing_a_pane_shows_the_left_sidebar() {
+        let mut s = AppSettings::default();
+        s.toggle_left_sidebar();
+        // Layers is still on but hidden with the sidebar: one toggle shows it.
+        s.toggle_layers();
+        assert!(s.layers_shown());
+        s.toggle_left_sidebar();
+        s.toggle_icons();
+        assert!(s.icons_shown() && s.layers_shown());
+        s.toggle_layers();
+        assert!(!s.layers_shown() && s.icons_shown());
     }
 
     #[test]

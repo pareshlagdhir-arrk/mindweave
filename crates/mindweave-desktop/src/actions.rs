@@ -12,6 +12,8 @@ actions!(
         Quit,
         ToggleThemePicker,
         ToggleLayers,
+        /// Shows or hides the left sidebar, Layers and Icons together.
+        ToggleLeftSidebar,
         ToggleProperties,
         /// Shows or hides the Icons pane.
         ToggleIcons,
@@ -160,7 +162,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-k cmd-t", ToggleThemePicker, None),
         // Cmd+B is bold while editing text.
-        KeyBinding::new("cmd-b", ToggleLayers, Some(NOT_EDITING_TEXT)),
+        KeyBinding::new("cmd-b", ToggleLeftSidebar, Some(NOT_EDITING_TEXT)),
         KeyBinding::new("cmd-alt-b", ToggleProperties, None),
         KeyBinding::new("cmd-shift-i", ToggleIcons, None),
         KeyBinding::new("ctrl-shift-i", ToggleIcons, None),
@@ -278,7 +280,7 @@ mod tests {
             ("cmd-w", "mindweave::CloseWindow"),
             ("cmd-q", "mindweave::Quit"),
             ("cmd-k cmd-t", "mindweave::ToggleThemePicker"),
-            ("cmd-b", "mindweave::ToggleLayers"),
+            ("cmd-b", "mindweave::ToggleLeftSidebar"),
             // `unparse` writes modifiers in gpui order.
             ("alt-cmd-b", "mindweave::ToggleProperties"),
             ("cmd-shift-i", "mindweave::ToggleIcons"),
@@ -418,7 +420,10 @@ mod tests {
         };
         assert_eq!(first("cmd-z", &shapes), Some("mindweave::Undo"));
         assert_eq!(first("left", &shapes), Some("mindweave::NudgeLeft"));
-        assert_eq!(first("cmd-b", &shapes), Some("mindweave::ToggleLayers"));
+        assert_eq!(
+            first("cmd-b", &shapes),
+            Some("mindweave::ToggleLeftSidebar")
+        );
         // Return edits the selected text; while editing it starts a
         // paragraph.
         assert_eq!(first("enter", &shapes), Some("mindweave::EditText"));
@@ -431,13 +436,13 @@ mod tests {
         assert_eq!(first("left", &field), None);
         // Cmd+B is bold while editing, with no other binding competing
         // (not even in a field focused meanwhile); elsewhere it toggles the
-        // Layers panel, in every window.
+        // left sidebar, in every window.
         let (found, _) = keymap.bindings_for_input(&key("cmd-b"), &editing);
         assert_eq!(names(&found), ["mindweave::TextBold"]);
         assert_eq!(first("cmd-b", &field), None);
         assert_eq!(
             first("cmd-b", &stack(&["Root"])),
-            Some("mindweave::ToggleLayers")
+            Some("mindweave::ToggleLeftSidebar")
         );
         // No binding without a context shares a key with a text key.
         let text_keys: Vec<String> = text

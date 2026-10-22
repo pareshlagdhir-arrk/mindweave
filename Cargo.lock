@@ -3754,6 +3754,7 @@ name = "mindweave-desktop"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
+ "image",
  "mindweave-core",
  "rfd",
  "serde_json",

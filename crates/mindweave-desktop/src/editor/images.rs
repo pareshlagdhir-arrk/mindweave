@@ -107,8 +107,20 @@ impl ImageCache {
         self.get_scaled(data, scale, cx)
     }
 
-    /// Starts a frame; pictures not used before [`Self::end_frame`] are
-    /// released.
+    /// Keeps the pictures of `data` for another frame without painting
+    /// them, so one scrolled out of sight is not decoded again, with a
+    /// stall, when it comes back.
+    pub fn keep(&mut self, data: &ImageData) {
+        let (key, frame) = (data.key(), self.frame);
+        for ((entry_key, _), (_, used)) in &mut self.entries {
+            if *entry_key == key {
+                *used = frame;
+            }
+        }
+    }
+
+    /// Starts a frame; pictures not used (or kept) before
+    /// [`Self::end_frame`] are released.
     pub fn begin_frame(&mut self) {
         self.frame = self.frame.wrapping_add(1);
     }

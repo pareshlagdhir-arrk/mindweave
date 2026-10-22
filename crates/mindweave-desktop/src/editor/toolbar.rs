@@ -1,6 +1,7 @@
 //! The ribbon under the title bar: a row of tabs (Home and one per
-//! library), and under it the tools of the shown tab. Tools that do not fit
-//! give way to a More button that opens the shape gallery.
+//! library), and under it a card with the tools of the shown tab, in groups
+//! split by dividers. A library's shapes sit in a gallery strip whose
+//! expander opens the shape gallery; shapes that do not fit wait there.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -18,15 +19,27 @@ use mindweave_core::geometry::{Geometry, PathCmd};
 use mindweave_core::{Icon, ShapeDef};
 
 use super::mindmap_edit::NewTopic;
-use super::tool::{shape_key, Tool, HOME_TAB, MINDMAP_TAB};
+use super::tool::{shape_key, Tool, BASIC_SHAPES, HOME_TAB, MINDMAP_TAB};
 use super::{shape_gallery, EditorWindow, SMALL_TEXT_SIZE};
+use crate::assets;
 use crate::libraries::{lucide_icon_path, Libraries};
 
-const TAB_ROW_HEIGHT: f32 = 26.;
-const TOOL_ROW_HEIGHT: f32 = 34.;
+const TAB_ROW_HEIGHT: f32 = 28.;
+const TAB_PADDING: f32 = 10.;
+/// The active tab's underline.
+const TAB_INDICATOR_HEIGHT: f32 = 3.;
+const TAB_INDICATOR_INSET: f32 = 2.;
+/// The card holding the tools, and its margin to the ribbon's edges.
+const CARD_HEIGHT: f32 = 38.;
+const CARD_MARGIN: f32 = 6.;
 const ROW_PADDING: f32 = 8.;
 const BUTTON_SIZE: f32 = 28.;
 const ICON_SIZE: f32 = 16.;
+const DIVIDER_HEIGHT: f32 = 20.;
+const DIVIDER_MARGIN: f32 = 6.;
+/// The gallery strip's border and inner padding, on each side.
+const STRIP_BORDER: f32 = 1.;
+const STRIP_PADDING: f32 = 1.;
 /// Stroke width of an outline icon.
 const OUTLINE_STROKE: f32 = 1.25;
 /// Space between an outline icon's unit box and the 16px icon box, like
@@ -37,8 +50,8 @@ const LOCK_DOT_INSET: f32 = 3.;
 /// Widest tab; longer library names are cut with an ellipsis.
 const TAB_MAX_WIDTH: f32 = 160.;
 const TOOL_GAP: f32 = 2.;
-/// Width of the More button, which the row keeps free when tools overflow.
-pub(super) const MORE_BUTTON_WIDTH: f32 = 60.;
+/// Width of the gallery strip's expander, which opens the shape gallery.
+pub(super) const MORE_BUTTON_WIDTH: f32 = 20.;
 const TAB_MENU_MAX_WIDTH: f32 = 280.;
 const TAB_MENU_MAX_HEIGHT: f32 = 400.;
 
@@ -54,9 +67,39 @@ pub(super) struct ToolButton {
 
 #[derive(Clone)]
 pub(super) enum ButtonIcon {
-    Svg(SharedString),
+    /// A Lucide icon over its accent layers, each in its own colour.
+    Svg {
+        path: SharedString,
+        accents: Rc<[(SharedString, Hsla)]>,
+    },
     /// Built at the origin of the 16px icon box.
     Outline(Option<Rc<Path<Pixels>>>),
+}
+
+impl ButtonIcon {
+    /// Bundled Lucide icon `name` over its accent layers, if it has any.
+    fn lucide(name: &str) -> Self {
+        let accents = assets::accents(name)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .map(|(ix, accent)| (assets::accent_path(name, ix), rgb(accent.color).into()))
+            .collect();
+        ButtonIcon::Svg {
+            path: format!("icons/{name}.svg").into(),
+            accents,
+        }
+    }
+
+    /// Lucide icon `name`, or the fallback icon when it is not bundled.
+    fn lucide_or_fallback(name: &str, cx: &App) -> Self {
+        let path = lucide_icon_path(name, cx);
+        let bundled = path
+            .strip_prefix("icons/")
+            .and_then(|p| p.strip_suffix(".svg"))
+            .unwrap_or(name);
+        Self::lucide(bundled)
+    }
 }
 
 /// Outline icons built once, by library and shape id; the libraries do not
@@ -120,6 +163,29 @@ pub(super) fn render(
         .child(tool_row(editor, cx))
 }
 
+/// A thin upright line between two groups of tools.
+fn divider(cx: &App) -> AnyElement {
+    div()
+        .flex_none()
+        .w(px(1.))
+        .h(px(DIVIDER_HEIGHT))
+        .mx(px(DIVIDER_MARGIN))
+        .bg(cx.theme().border)
+        .into_any_element()
+}
+
+/// `groups` side by side, split by dividers; empty groups are left out.
+fn with_dividers(groups: Vec<Vec<AnyElement>>, cx: &App) -> Vec<AnyElement> {
+    let mut row = Vec::new();
+    for group in groups.into_iter().filter(|g| !g.is_empty()) {
+        if !row.is_empty() {
+            row.push(divider(cx));
+        }
+        row.extend(group);
+    }
+    row
+}
+
 impl EditorWindow {
     /// Shows tab `id` without changing the tool.
     fn show_tab(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -134,14 +200,7 @@ impl EditorWindow {
 /// every tab at the right end.
 fn tab_row(editor: &mut EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoElement {
     let libraries = &cx.global::<Libraries>().0;
-    let mut tabs = vec![
-        (SharedString::from(HOME_TAB), SharedString::from("Home")),
-        (
-            SharedString::from(MINDMAP_TAB),
-            SharedString::from("Mind Map"),
-        ),
-    ];
-    tabs.extend(
+    let tabs = tab_order(
         libraries
             .libraries()
             .iter()
@@ -168,9 +227,9 @@ fn tab_row(editor: &mut EditorWindow, cx: &mut Context<EditorWindow>) -> impl In
 
     h_flex()
         .h(px(TAB_ROW_HEIGHT))
-        .pl(px(ROW_PADDING))
+        .pl(px(ROW_PADDING - TAB_PADDING / 2.))
         .pr(px(4.))
-        .gap(px(4.))
+        .gap(px(2.))
         .child(
             // A vertical wheel scrolls it sideways too.
             h_flex()
@@ -207,164 +266,260 @@ fn tab_row(editor: &mut EditorWindow, cx: &mut Context<EditorWindow>) -> impl In
         )
 }
 
-/// Row 2: the tools of the shown tab, as many as fit, then More.
+/// The tabs, as `(id, name)`: Home first, then Basic Shapes, Mind Map and
+/// the other libraries in `libraries`' order.
+fn tab_order(
+    libraries: impl IntoIterator<Item = (SharedString, SharedString)>,
+) -> Vec<(SharedString, SharedString)> {
+    let (basic, rest): (Vec<_>, Vec<_>) = libraries
+        .into_iter()
+        .partition(|(id, _)| id == BASIC_SHAPES);
+    std::iter::once((HOME_TAB.into(), "Home".into()))
+        .chain(basic)
+        .chain([(MINDMAP_TAB.into(), "Mind Map".into())])
+        .chain(rest)
+        .collect()
+}
+
+/// Row 2: a card with the tools of the shown tab. A library's shapes fill
+/// a gallery strip, as many as fit, ending in the gallery's expander.
 fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoElement {
     let libraries = cx.global::<Libraries>().0.clone();
     let library = libraries
         .libraries()
         .iter()
         .find(|l| l.id == editor.tools.tab);
-    let buttons = match library {
-        Some(library) => library
-            .shapes
-            .iter()
-            .enumerate()
-            .map(|(ix, shape)| shape_button(&library.id, ("tool-shape", ix), shape, cx))
-            .collect(),
-        None if editor.tools.tab == MINDMAP_TAB => vec![ToolButton {
-            id: "tool-relationship".into(),
-            tool: Tool::Relationship,
-            icon: ButtonIcon::Svg(lucide_icon_path("spline", cx)),
-            name: "Relationship".into(),
-            tooltip: "Relationship: drag from one topic to another".into(),
-        }],
-        None => home_buttons(),
+    let content: Vec<AnyElement> = match library {
+        Some(library) => {
+            let buttons: Vec<ToolButton> = library
+                .shapes
+                .iter()
+                .enumerate()
+                .map(|(ix, shape)| shape_button(&library.id, ("tool-shape", ix), shape, cx))
+                .collect();
+            let shown = match editor.ribbon.tool_row_width {
+                Some(width) => visible_count(
+                    f32::from(width) - MORE_BUTTON_WIDTH - 2. * (STRIP_BORDER + STRIP_PADDING),
+                    BUTTON_SIZE,
+                    TOOL_GAP,
+                    0.,
+                    buttons.len(),
+                ),
+                // Not measured yet: show them all, cut off by the row.
+                None => buttons.len(),
+            };
+            let active_hidden = active_tool_hidden(&buttons, shown, &editor.tools.tool);
+            let more = shape_gallery::more_button(editor, library, active_hidden, cx);
+            let tiles: Vec<AnyElement> = buttons
+                .into_iter()
+                .take(shown)
+                .map(|b| tool_button(editor, b, cx).into_any_element())
+                .collect();
+            vec![gallery_strip(tiles, more, cx).into_any_element()]
+        }
+        None if editor.tools.tab == MINDMAP_TAB => {
+            type Run = fn(&mut EditorWindow, &mut Window, &mut Context<EditorWindow>);
+            let topics: [(&'static str, &str, &'static str, Run); 3] = [
+                (
+                    "mm-central",
+                    "network",
+                    "New Mind Map",
+                    |this, window, cx| this.add_central_topic(window, cx),
+                ),
+                (
+                    "mm-sub",
+                    "corner-down-right",
+                    "Subtopic (Tab)",
+                    |this, window, cx| this.add_topic(NewTopic::Sub, window, cx),
+                ),
+                (
+                    "mm-sibling",
+                    "list-plus",
+                    "Topic (Enter; Shift+Enter before)",
+                    |this, window, cx| this.add_topic(NewTopic::After, window, cx),
+                ),
+            ];
+            let marks: [(&'static str, &str, &'static str, Run); 2] = [
+                (
+                    "mm-summary",
+                    "braces",
+                    "Summary of the Selected Topics",
+                    |this, window, cx| this.add_summary(window, cx),
+                ),
+                (
+                    "mm-boundary",
+                    "square-dashed",
+                    "Boundary round the Selected Topics",
+                    |this, window, cx| this.toggle_boundary(window, cx),
+                ),
+            ];
+            let mut actions = |commands: &[(&'static str, &str, &'static str, Run)]| {
+                commands
+                    .iter()
+                    .map(|&(id, icon, tip, run)| {
+                        action_button(id, icon, tip, run, cx).into_any_element()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (topics, marks) = (actions(&topics), actions(&marks));
+            let relationship = ToolButton {
+                id: "tool-relationship".into(),
+                tool: Tool::Relationship,
+                icon: ButtonIcon::lucide("spline"),
+                name: "Relationship".into(),
+                tooltip: "Relationship: drag from one topic to another".into(),
+            };
+            let links = vec![tool_button(editor, relationship, cx).into_any_element()];
+            with_dividers(vec![topics, marks, links], cx)
+        }
+        None => {
+            let tools = home_buttons()
+                .into_iter()
+                .map(|b| tool_button(editor, b, cx).into_any_element())
+                .collect();
+            let insert = vec![image_button(cx).into_any_element()];
+            with_dividers(vec![tools, insert], cx)
+        }
     };
-    let shown = match editor.ribbon.tool_row_width {
-        Some(width) => visible_count(
-            width.into(),
-            BUTTON_SIZE,
-            TOOL_GAP,
-            MORE_BUTTON_WIDTH,
-            buttons.len(),
-        ),
-        // Not measured yet: show them all, cut off by the row.
-        None => buttons.len(),
-    };
-    let active_hidden = active_tool_hidden(&buttons, shown, &editor.tools.tool);
-    let more = library
-        .filter(|_| shown < buttons.len())
-        .map(|library| shape_gallery::more_button(editor, library, active_hidden, cx));
-    let mut button_elements: Vec<AnyElement> = buttons
-        .into_iter()
-        .take(shown)
-        .map(|b| tool_button(editor, b, cx).into_any_element())
-        .collect();
-    if library.is_none() && editor.tools.tab == MINDMAP_TAB {
-        // Mind map commands, before the Relationship tool.
-        type Run = fn(&mut EditorWindow, &mut Window, &mut Context<EditorWindow>);
-        let commands: [(&'static str, &str, &'static str, Run); 5] = [
-            (
-                "mm-central",
-                "network",
-                "New Mind Map",
-                |this, window, cx| this.add_central_topic(window, cx),
-            ),
-            (
-                "mm-sub",
-                "corner-down-right",
-                "Subtopic (Tab)",
-                |this, window, cx| this.add_topic(NewTopic::Sub, window, cx),
-            ),
-            (
-                "mm-sibling",
-                "list-plus",
-                "Topic (Enter; Shift+Enter before)",
-                |this, window, cx| this.add_topic(NewTopic::After, window, cx),
-            ),
-            (
-                "mm-summary",
-                "braces",
-                "Summary of the Selected Topics",
-                |this, window, cx| this.add_summary(window, cx),
-            ),
-            (
-                "mm-boundary",
-                "square-dashed",
-                "Boundary round the Selected Topics",
-                |this, window, cx| this.toggle_boundary(window, cx),
-            ),
-        ];
-        let commands: Vec<AnyElement> = commands
-            .into_iter()
-            .map(|(id, icon, tip, run)| action_button(id, icon, tip, run, cx).into_any_element())
-            .collect();
-        let tools = std::mem::take(&mut button_elements);
-        button_elements = commands
-            .into_iter()
-            .map(IntoElement::into_any_element)
-            .collect();
-        button_elements.extend(tools);
-    } else if library.is_none() {
-        button_elements.push(image_button(cx).into_any_element());
-    }
     let this = cx.entity().downgrade();
+    let theme = cx.theme();
 
-    h_flex().h(px(TOOL_ROW_HEIGHT)).px(px(ROW_PADDING)).child(
-        div()
-            .relative()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .child(
-                // Measures the row; a new width fits the buttons again.
-                canvas(
-                    move |bounds, window, cx| {
-                        let width = bounds.size.width;
-                        let changed = this
-                            .update(cx, |this, _| {
-                                let changed = this.ribbon.tool_row_width != Some(width);
-                                this.ribbon.tool_row_width = Some(width);
-                                changed
-                            })
-                            .unwrap_or(false);
-                        // A notify while drawing is dropped; ask for another
-                        // frame, which renders with the new width.
-                        if changed {
-                            window.request_animation_frame();
-                        }
-                    },
-                    |_, _, _, _| {},
+    h_flex()
+        .h(px(CARD_HEIGHT))
+        .mx(px(CARD_MARGIN))
+        .mb(px(CARD_MARGIN))
+        .px(px(ROW_PADDING - CARD_MARGIN / 2.))
+        .rounded(theme.radius_lg)
+        .bg(theme.background)
+        .border_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .child(
+                    // Measures the row; a new width fits the shapes again.
+                    canvas(
+                        move |bounds, window, cx| {
+                            let width = bounds.size.width;
+                            let changed = this
+                                .update(cx, |this, _| {
+                                    let changed = this.ribbon.tool_row_width != Some(width);
+                                    this.ribbon.tool_row_width = Some(width);
+                                    changed
+                                })
+                                .unwrap_or(false);
+                            // A notify while drawing is dropped; ask for
+                            // another frame, which renders with the new width.
+                            if changed {
+                                window.request_animation_frame();
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
                 )
-                .absolute()
-                .size_full(),
-            )
-            .child(
-                h_flex()
-                    .size_full()
-                    .gap(px(TOOL_GAP))
-                    .overflow_hidden()
-                    .children(button_elements)
-                    .children(more),
-            ),
-    )
+                .child(
+                    h_flex()
+                        .size_full()
+                        .gap(px(TOOL_GAP))
+                        .overflow_hidden()
+                        .children(content),
+                ),
+        )
 }
 
-/// Home's buttons: Pointer, Hand and Text.
+/// A library's shapes in a bordered strip, ending in `more`, the expander
+/// that opens the whole gallery.
+fn gallery_strip(tiles: Vec<AnyElement>, more: impl IntoElement, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    h_flex()
+        .flex_none()
+        .max_w_full()
+        .h(px(BUTTON_SIZE + 2. * (STRIP_BORDER + STRIP_PADDING)))
+        .p(px(STRIP_PADDING))
+        .gap(px(TOOL_GAP))
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.title_bar)
+        .child(
+            h_flex()
+                .min_w_0()
+                .gap(px(TOOL_GAP))
+                .overflow_hidden()
+                .children(tiles),
+        )
+        .child(
+            div()
+                .flex_none()
+                .h_full()
+                .flex()
+                .items_center()
+                .border_l_1()
+                .border_color(theme.border)
+                .child(more),
+        )
+}
+
+/// Home's tools: Pointer, Hand and Text.
 fn home_buttons() -> Vec<ToolButton> {
     vec![
         ToolButton {
             id: "tool-pointer".into(),
             tool: Tool::Pointer,
-            icon: ButtonIcon::Svg("icons/mouse-pointer-2.svg".into()),
+            icon: ButtonIcon::lucide("mouse-pointer-2"),
             name: "Pointer".into(),
             tooltip: "Pointer (V)".into(),
         },
         ToolButton {
             id: "tool-hand".into(),
             tool: Tool::Hand,
-            icon: ButtonIcon::Svg("icons/hand.svg".into()),
+            icon: ButtonIcon::lucide("move"),
             name: "Hand".into(),
             tooltip: "Hand (H)".into(),
         },
         ToolButton {
             id: "tool-text".into(),
             tool: Tool::Text,
-            icon: ButtonIcon::Svg("icons/type.svg".into()),
+            icon: ButtonIcon::lucide("type"),
             name: "Text".into(),
             tooltip: "Text (T)".into(),
         },
     ]
+}
+
+/// A 28px ribbon button with `icon`; the caller adds what a click does.
+fn ribbon_button(
+    id: impl Into<ElementId>,
+    icon: ButtonIcon,
+    selected: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    let hover_bg = theme.list_hover;
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(BUTTON_SIZE))
+        .rounded(theme.radius)
+        .border_1()
+        .when(selected, |b| {
+            b.bg(theme.list_active)
+                .border_color(theme.list_active_border)
+        })
+        .when(!selected, |b| {
+            b.border_color(transparent_black())
+                .hover(move |style| style.bg(hover_bg))
+        })
+        .child(button_icon(icon, theme.foreground))
 }
 
 /// A ribbon button that runs `run` (an action, not a tool).
@@ -375,21 +530,7 @@ fn action_button(
     run: impl Fn(&mut EditorWindow, &mut Window, &mut Context<EditorWindow>) + 'static,
     cx: &mut Context<EditorWindow>,
 ) -> impl IntoElement {
-    let theme = cx.theme();
-    let hover_bg = theme.list_hover;
-    div()
-        .id(id)
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .size(px(BUTTON_SIZE))
-        .rounded(theme.radius)
-        .hover(move |style| style.bg(hover_bg))
-        .child(button_icon(
-            ButtonIcon::Svg(lucide_icon_path(icon, cx)),
-            theme.muted_foreground,
-        ))
+    ribbon_button(id, ButtonIcon::lucide_or_fallback(icon, cx), false, cx)
         .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
         .on_click(cx.listener(move |this, _, window, cx| {
             this.focus_handle.focus(window, cx);
@@ -399,28 +540,19 @@ fn action_button(
 
 /// Home's Image button: imports picture files. An action, not a tool.
 fn image_button(cx: &mut Context<EditorWindow>) -> impl IntoElement {
-    let theme = cx.theme();
-    let hover_bg = theme.list_hover;
-    div()
-        .id("import-image")
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .size(px(BUTTON_SIZE))
-        .rounded(theme.radius)
-        .hover(move |style| style.bg(hover_bg))
-        .child(button_icon(
-            ButtonIcon::Svg(lucide_icon_path("image", cx)),
-            theme.muted_foreground,
-        ))
-        .tooltip(|window, cx| {
-            Tooltip::new("Import Image (PNG, JPEG, GIF, WebP, SVG…)").build(window, cx)
-        })
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.import_images(window, cx);
-            this.focus_handle.focus(window, cx);
-        }))
+    ribbon_button(
+        "import-image",
+        ButtonIcon::lucide_or_fallback("image", cx),
+        false,
+        cx,
+    )
+    .tooltip(|window, cx| {
+        Tooltip::new("Import Image (PNG, JPEG, GIF, WebP, SVG…)").build(window, cx)
+    })
+    .on_click(cx.listener(|this, _, window, cx| {
+        this.import_images(window, cx);
+        this.focus_handle.focus(window, cx);
+    }))
 }
 
 /// The button placing `shape` of library `library`.
@@ -434,7 +566,7 @@ pub(super) fn shape_button(
         id: id.into(),
         tool: Tool::shape(library, &shape.id),
         icon: match &shape.icon {
-            Icon::Lucide(name) => ButtonIcon::Svg(lucide_icon_path(name, cx)),
+            Icon::Lucide(name) => ButtonIcon::lucide_or_fallback(name, cx),
             Icon::Outline(geometry) => ButtonIcon::Outline(
                 cx.default_global::<OutlineIcons>()
                     .0
@@ -451,6 +583,7 @@ pub(super) fn shape_button(
     }
 }
 
+/// A tab: its name, and an underline in the accent colour while shown.
 fn tab(
     ix: usize,
     id: SharedString,
@@ -463,19 +596,27 @@ fn tab(
     let tooltip = name.clone();
     div()
         .id(("ribbon-tab", ix))
+        .relative()
         .h_full()
         .flex()
         .items_center()
         .flex_none()
         .max_w(px(TAB_MAX_WIDTH))
-        .px(px(8.))
-        .border_b_2()
+        .px(px(TAB_PADDING))
         .when(active, |tab| {
-            tab.text_color(foreground).border_color(theme.primary)
+            tab.text_color(foreground).child(
+                div()
+                    .absolute()
+                    .bottom(px(TAB_INDICATOR_INSET))
+                    .left(px(TAB_PADDING))
+                    .right(px(TAB_PADDING))
+                    .h(px(TAB_INDICATOR_HEIGHT))
+                    .rounded_full()
+                    .bg(theme.primary),
+            )
         })
         .when(!active, |tab| {
             tab.text_color(theme.muted_foreground)
-                .border_color(transparent_black())
                 .hover(move |style| style.text_color(foreground))
         })
         .child(div().min_w_0().truncate().child(name))
@@ -492,30 +633,12 @@ fn tool_button(
 ) -> impl IntoElement {
     let selected = editor.tools.tool == button.tool;
     let locked = selected && editor.tools.locked;
-    let theme = cx.theme();
-    let icon_color = if selected {
-        theme.foreground
-    } else {
-        theme.muted_foreground
-    };
-    let hover_bg = theme.list_hover;
-    let icon = button_icon(button.icon, icon_color);
+    let primary = cx.theme().primary;
     let tooltip = button.tooltip;
     let tool = button.tool;
 
-    div()
-        .id(button.id)
-        .relative()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .size(px(BUTTON_SIZE))
-        .rounded(theme.radius)
-        .when(selected, |b| b.bg(theme.list_active))
-        .when(!selected, |b| b.hover(move |style| style.bg(hover_bg)))
-        .child(icon)
-        .when(locked, |b| b.child(lock_dot(theme.primary)))
+    ribbon_button(button.id, button.icon, selected, cx)
+        .when(locked, |b| b.child(lock_dot(primary)))
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
             this.choose_tool(tool.clone(), event.click_count() >= 2, window, cx);
@@ -525,14 +648,27 @@ fn tool_button(
         }))
 }
 
-/// A tool's 16px icon in `color`.
+/// A tool's 16px icon: its outline in `color` over its accent colours.
 pub(super) fn button_icon(icon: ButtonIcon, color: Hsla) -> AnyElement {
     match icon {
-        ButtonIcon::Svg(path) => svg()
-            .path(path)
+        ButtonIcon::Svg { path, accents } => div()
+            .relative()
             .size(px(ICON_SIZE))
             .flex_none()
-            .text_color(color)
+            .children(accents.iter().map(|(layer, accent)| {
+                svg()
+                    .path(layer.clone())
+                    .absolute()
+                    .size(px(ICON_SIZE))
+                    .text_color(*accent)
+            }))
+            .child(
+                svg()
+                    .path(path)
+                    .absolute()
+                    .size(px(ICON_SIZE))
+                    .text_color(color),
+            )
             .into_any_element(),
         ButtonIcon::Outline(path) => outline_icon(path, color).into_any_element(),
     }
@@ -615,9 +751,11 @@ fn active_tool_hidden(buttons: &[ToolButton], shown: usize, active: &Tool) -> bo
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
-    use super::{active_tool_hidden, home_buttons, outline_icon_path, visible_count, ICON_SIZE};
+    use super::{
+        active_tool_hidden, home_buttons, outline_icon_path, tab_order, visible_count, ICON_SIZE,
+    };
     use crate::editor::tool::Tool;
-    use gpui_kit::px;
+    use gpui_kit::{px, SharedString};
     use mindweave_core::geometry::Geometry;
     use mindweave_core::{builtin_libraries, ShapeSource};
 
@@ -633,6 +771,23 @@ mod tests {
         assert!(b.origin.x + b.size.width <= px(ICON_SIZE));
         assert!(b.origin.y + b.size.height <= px(ICON_SIZE));
         assert!(outline_icon_path(&Geometry { paths: vec![] }).is_none());
+    }
+
+    #[test]
+    fn home_then_basic_shapes_lead_the_tabs() {
+        let lib = |id: &str| (SharedString::from(id), SharedString::from(id));
+        let ids = |tabs: Vec<(SharedString, SharedString)>| {
+            tabs.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(tab_order([
+                lib("flowchart"),
+                lib("basic-shapes"),
+                lib("aws")
+            ])),
+            ["home", "basic-shapes", "mindmap", "flowchart", "aws"]
+        );
+        assert_eq!(ids(tab_order([lib("aws")])), ["home", "mindmap", "aws"]);
     }
 
     #[test]

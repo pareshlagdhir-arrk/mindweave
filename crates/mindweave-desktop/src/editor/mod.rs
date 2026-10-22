@@ -3,6 +3,7 @@
 
 mod canvas;
 mod color_palette;
+mod dot_tile;
 mod icons_panel;
 mod images;
 mod interaction;
@@ -36,8 +37,8 @@ use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
 use mindweave_core::{
     duplicate, format_hex_color, from_clipboard, is_mindweave_payload, is_newer_payload,
-    parse_hex_color, plain_text_box, prepare_paste, to_clipboard, unit_members, Arrange,
-    DocumentSession, Shape, Viewport, MAX_CLIPBOARD_SHAPES,
+    parse_hex_color, plain_text_box, prepare_paste, to_clipboard, unit_members, AppSettings,
+    Arrange, DocumentSession, Shape, Viewport, MAX_CLIPBOARD_SHAPES,
 };
 
 // `Copy` is used by path: importing it would hide the derivable trait.
@@ -46,8 +47,8 @@ use crate::actions::{
     Cancel, CloseWindow, Cut, Delete, Duplicate, EditLabel, EditText, Group, NudgeDown,
     NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp, NudgeUpFar, Paste,
     Redo, Save, SelectAll, SendBackward, SendToBack, ToggleBoundary, ToggleIcons, ToggleLayers,
-    ToggleProperties, ToolEllipse, ToolHand, ToolLine, ToolPointer, ToolRectangle,
-    ToolRelationship, ToolText, Undo, Ungroup, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
+    ToggleLeftSidebar, ToggleProperties, ToolEllipse, ToolHand, ToolLine, ToolPointer,
+    ToolRectangle, ToolRelationship, ToolText, Undo, Ungroup, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
 };
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
@@ -227,6 +228,8 @@ pub struct EditorWindow {
     geometry_cache: GeometryCache,
     /// Pictures decoded for painting.
     image_cache: images::ImageCache,
+    /// The background's dot pattern tile.
+    dot_tile: dot_tile::DotTile,
     /// The Icons pane's search and set filter.
     icons: icons_panel::IconsPane,
     /// The Topic section's link field.
@@ -298,6 +301,7 @@ impl EditorWindow {
             attach_highlight: None,
             geometry_cache: GeometryCache::default(),
             image_cache: images::ImageCache::default(),
+            dot_tile: dot_tile::DotTile::default(),
             icons,
             topic_fields,
             text_layouts: TextLayoutCache::default(),
@@ -686,8 +690,8 @@ impl EditorWindow {
 
     /// Shows or hides the Icons pane; shown, its search box has focus.
     fn on_toggle_icons(&mut self, _: &ToggleIcons, window: &mut Window, cx: &mut Context<Self>) {
-        AppState::update_settings(cx, |s| s.show_icons = !s.show_icons);
-        if cx.global::<AppState>().settings.show_icons {
+        AppState::update_settings(cx, AppSettings::toggle_icons);
+        if cx.global::<AppState>().settings.icons_shown() {
             let search = self.icons.search.clone();
             search.update(cx, |input, cx| input.focus(window, cx));
         } else {
@@ -696,7 +700,16 @@ impl EditorWindow {
     }
 
     fn on_toggle_layers(&mut self, _: &ToggleLayers, _: &mut Window, cx: &mut Context<Self>) {
-        AppState::update_settings(cx, |s| s.show_layers = !s.show_layers);
+        AppState::update_settings(cx, AppSettings::toggle_layers);
+    }
+
+    fn on_toggle_left_sidebar(
+        &mut self,
+        _: &ToggleLeftSidebar,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        AppState::update_settings(cx, AppSettings::toggle_left_sidebar);
     }
 
     fn on_toggle_properties(
@@ -1338,9 +1351,9 @@ impl Render for EditorWindow {
         let (show_layers, show_properties, show_icons) = {
             let settings = &cx.global::<AppState>().settings;
             (
-                settings.show_layers,
+                settings.layers_shown(),
                 settings.show_properties,
-                settings.show_icons,
+                settings.icons_shown(),
             )
         };
         let show_left = show_layers || show_icons;
@@ -1417,6 +1430,7 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_send_to_back))
             .on_action(cx.listener(Self::on_toggle_icons))
             .on_action(cx.listener(Self::on_toggle_layers))
+            .on_action(cx.listener(Self::on_toggle_left_sidebar))
             .on_action(cx.listener(Self::on_toggle_properties))
             .on_action(cx.listener(Self::on_zoom_in))
             .on_action(cx.listener(Self::on_zoom_out))

@@ -422,6 +422,13 @@ pub fn paint_shapes(
                     if entry.outline.placeholder {
                         painter.paint_label(shape, &entry.outline, window, cx);
                     }
+                } else {
+                    // Out of sight: its pictures stay decoded for when it
+                    // comes back.
+                    let topic_picture = shape.topic.as_ref().and_then(|t| t.picture.as_ref());
+                    for data in shape.image.iter().chain(topic_picture) {
+                        images.keep(data);
+                    }
                 }
                 paint_shape_text(window, cx, bounds, vp, shape, visible, text);
             }
