@@ -1978,6 +1978,14 @@ mod tests {
         LibraryRegistry::new(vec![crate::libraries::template_test_library()], None).0
     }
 
+    /// The built-in libraries plus the test library of line templates
+    /// (association, reply and so on), which draw like the Line tool.
+    fn line_registry() -> LibraryRegistry {
+        let mut libs = builtin_libraries();
+        libs.push(crate::libraries::line_template_test_library());
+        LibraryRegistry::new(libs, None).0
+    }
+
     /// The frames of `shapes`, as `(x, y, w, h)`.
     fn boxes(shapes: &[Shape]) -> Vec<(f32, f32, f32, f32)> {
         shapes
@@ -2029,12 +2037,12 @@ mod tests {
         );
     }
 
-    /// Placing UML template `template` from `(100, 100)` to `current`.
+    /// Placing template `template` from `(100, 100)` to `current`.
     fn placing_uml(template: &str, current: (f32, f32), constrain: bool, dragged: bool) -> Gesture {
         Gesture::Placing {
             start: (100., 100.),
             current,
-            library: "uml".into(),
+            library: "lines-test".into(),
             shape: template.into(),
             template: true,
             constrain,
@@ -2045,7 +2053,7 @@ mod tests {
 
     /// The ends of the one line `gesture` places, start first.
     fn placed_line_ends(gesture: &Gesture) -> ((f32, f32), (f32, f32)) {
-        let parts = placement_shapes(gesture, &registry());
+        let parts = placement_shapes(gesture, &line_registry());
         assert_eq!(parts.len(), 1);
         assert!(parts[0].is_line());
         line_endpoints(&parts[0].frame)
@@ -2068,7 +2076,7 @@ mod tests {
         let (a, b) = placed_line_ends(&g);
         assert!(near(a, (100., 100.)) && near(b, (0., 100.)), "{a:?} {b:?}");
         // The preview shows the same line.
-        let preview = preview_shapes(&g, &registry());
+        let preview = preview_shapes(&g, &line_registry());
         assert_eq!(line_endpoints(&preview[0].frame), (a, b));
         // A click places its default length rightwards from the click.
         let (a, b) = placed_line_ends(&placing_uml("generalization", (100., 100.), false, false));
@@ -2108,12 +2116,22 @@ mod tests {
 
     #[test]
     fn a_line_template_attaches_to_the_shapes_at_its_ends() {
-        let libs = registry();
+        let libs = line_registry();
         // Single-line templates attach like the Line tool; others do not.
-        assert!(places_attached_line(&libs, "uml", "association", true));
-        assert!(places_attached_line(&libs, "uml", "reply-message", true));
-        assert!(!places_attached_line(&libs, "uml", "class", true));
-        assert!(!places_attached_line(&libs, "uml", "lifeline", true));
+        assert!(places_attached_line(
+            &libs,
+            "lines-test",
+            "association",
+            true
+        ));
+        assert!(places_attached_line(
+            &libs,
+            "lines-test",
+            "reply-message",
+            true
+        ));
+        assert!(!places_attached_line(&libs, "lines-test", "class", true));
+        assert!(!places_attached_line(&libs, "lines-test", "lifeline", true));
         assert!(places_attached_line(
             &libs,
             mindweave_core::LINE_LIBRARY,

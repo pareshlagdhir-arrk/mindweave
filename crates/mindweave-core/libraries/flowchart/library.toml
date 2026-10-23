@@ -1,7 +1,0 @@
-format = 1
-id = "flowchart"
-name = "Flowchart"
-version = "1.0.0"
-author = "Mindweave"
-description = "Standard flowchart symbols: process, decision, data, documents, storage and connectors."
-icon = "workflow"
