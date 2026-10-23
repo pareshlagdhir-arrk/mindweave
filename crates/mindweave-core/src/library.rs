@@ -1432,6 +1432,10 @@ const UML_FILES: &[(&str, &str)] = &[
         include_str!("../libraries/uml/shapes/icons/actor-lifeline.svg"),
     ),
     (
+        "shapes/icons/accept-event.svg",
+        include_str!("../libraries/uml/shapes/icons/accept-event.svg"),
+    ),
+    (
         "shapes/icons/aggregation.svg",
         include_str!("../libraries/uml/shapes/icons/aggregation.svg"),
     ),
@@ -1486,6 +1490,10 @@ const UML_FILES: &[(&str, &str)] = &[
     (
         "shapes/icons/reply-message.svg",
         include_str!("../libraries/uml/shapes/icons/reply-message.svg"),
+    ),
+    (
+        "shapes/icons/send-signal.svg",
+        include_str!("../libraries/uml/shapes/icons/send-signal.svg"),
     ),
     (
         "shapes/icons/synchronous-message.svg",
@@ -1830,6 +1838,26 @@ version = "1.0.0"
             .filter(|l| l.trim() == "[[template.part]]")
             .count();
         assert_eq!(parts, written);
+    }
+
+    #[test]
+    fn uml_signal_shapes_have_their_own_icons() {
+        let libs = builtin_libraries();
+        let uml = libs.iter().find(|l| l.id == "uml").unwrap();
+        let mut icons = Vec::new();
+        for id in ["send-signal", "accept-event"] {
+            let def = uml.shape(id).unwrap();
+            let Icon::Outline(icon) = &def.icon else {
+                panic!("{id}: {:?}", def.icon);
+            };
+            // Not the shape's own outline: a ribbon-sized icon of its own.
+            let ShapeSource::Outline(outline) = &def.source else {
+                panic!("{id}");
+            };
+            assert_ne!(icon, outline, "{id}");
+            icons.push(icon.clone());
+        }
+        assert_ne!(icons[0], icons[1]);
     }
 
     #[test]

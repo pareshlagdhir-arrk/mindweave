@@ -271,9 +271,17 @@ and move as one; ungrouping separates them. The placed shapes are
 ordinary shapes: their labels can be edited, and the ends of their lines
 attached to other shapes.
 
+A template made only of lines (such as a UML relationship or message) is
+drawn like the Line tool instead: its lines run from where the drag
+starts to where it ends, at any angle, and Shift snaps them to 45°
+steps. A line written from right to left (`from` to the right of `to`)
+so runs back towards the start of the drag. A click places the lines at
+their own length, rightwards from the click. When the template is a
+single line, its ends attach to the shapes they are dropped on.
+
 | Field          | Type             | Required | Default     | Meaning |
 |----------------|------------------|----------|-------------|---------|
-| `id`           | string           | yes      | none        | Unique among the library's shapes and templates. Same rules as a shape `id`. |
+| `id`           | string           | yes      | none        | Unique among the library's shapes and templates. Same rules as a shape `id`, but at most 61 characters, so that part ids (`<id>.<part number>`) stay within 64. |
 | `name`         | string           | yes      | none        | Shown in tooltips (at most 100 characters). |
 | `icon`         | string           | yes      | none        | The ribbon icon. See [Icons](#icons). An invalid icon gives a warning and `"shapes"` is used. |
 | `default_size` | `[width, height]`| no       | `[120, 80]` | The template's own units: part frames and line ends are given within this box. Each value is from 1 to 10000. |
@@ -293,8 +301,11 @@ Each `[[template.part]]` is either a shape or a line:
 
 A part has exactly one of `primitive`, `svg` and `line`. Arrowheads are
 `"none"`, `"arrow"`, `"triangle"`, `"diamond"`, `"circle"`,
-`"hollow-triangle"` and `"hollow-diamond"`; the hollow heads are outlined
-in the line's colour and filled with the canvas colour.
+`"hollow-triangle"` and `"hollow-diamond"`. The hollow heads are outlined
+in the line's colour and filled with the canvas colour (not left
+transparent), so they hide whatever lies beneath them, such as the line
+itself or the edge of a shape the head overlaps. On a coloured shape
+the inside of the head shows the canvas colour, not the shape's fill.
 
 Documents store each placed shape part as the library's shape
 `<template id>.<part number>` (parts are numbered from 1 in the order
@@ -302,8 +313,9 @@ they are written), so do not reorder the parts of a published template;
 add new parts at the end. If the library is not installed, these shapes
 are drawn as placeholders; lines are drawn as usual.
 
-A template with more than 20 parts, no usable parts, or a missing `id`,
-`name` or `icon` is skipped with a warning. A part with a problem (no
+A template with more than 20 parts, no usable parts, an `id` longer than
+61 characters, or a missing `id`, `name` or `icon` is skipped with a
+warning. A part with a problem (no
 `frame`, an unknown primitive, both a shape and a line) is skipped on its
 own; smaller problems in a label or a parameter give a warning and use a
 default.

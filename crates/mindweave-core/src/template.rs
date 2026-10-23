@@ -19,7 +19,7 @@ use crate::geometry::{Frame, Pt};
 use crate::library::{
     load_default_size, load_icon, load_style, optional_number, optional_str, quote, required_str,
     valid_id, valid_name, warn_unknown, Icon, Library, LoadReport, Reader, ShapeDef, ShapeSource,
-    StyleDefaults, DEFAULT_ICON, DEFAULT_SIZE, FORMAT_2, MAX_DEFAULT_SIZE,
+    StyleDefaults, DEFAULT_ICON, DEFAULT_SIZE, FORMAT_2, MAX_DEFAULT_SIZE, MAX_ID_LEN,
 };
 use crate::line::{line_frame, ArrowHead, LineProps, LINE_LIBRARY, LINE_SHAPE};
 use crate::shape::{Label, Shape, VAlign};
@@ -27,6 +27,10 @@ use crate::text::{HAlign, RichText, RunStyle, LABEL_FONT_SIZE, MAX_FONT_SIZE, MI
 
 /// Most parts one template may have.
 pub const MAX_TEMPLATE_PARTS: usize = 20;
+
+/// Longest template id: room is left for a part number (`.20`) so part
+/// shape ids stay within [`MAX_ID_LEN`].
+const MAX_TEMPLATE_ID_LEN: usize = MAX_ID_LEN - 3;
 
 /// Longest part label, in characters.
 const MAX_LABEL_CHARS: usize = 1000;
@@ -67,6 +71,61 @@ pub struct TemplateDef {
     pub default_size: (f32, f32),
     /// Back to front; at least one, at most [`MAX_TEMPLATE_PARTS`].
     pub parts: Vec<TemplatePart>,
+}
+
+impl TemplateDef {
+    /// Whether every part is a line: such a template is drawn end to end
+    /// like the Line tool (see [`instantiate_line_template`]).
+    pub fn is_line_only(&self) -> bool {
+        self.parts
+            .iter()
+            .all(|p| matches!(p.kind, PartKind::Line { .. }))
+    }
+
+    /// How long a line-only template is placed with a click: its lines'
+    /// x extent, in template units.
+    pub fn line_length(&self) -> f32 {
+        let (x0, x1) = self.line_span();
+        x1 - x0
+    }
+
+    /// The x extent of the line parts' ends, or `0` to the default width
+    /// when they have none across.
+    fn line_span(&self) -> (f32, f32) {
+        let (x0, x1) = self
+            .line_ends()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), (x, _)| {
+                (lo.min(x), hi.max(x))
+            });
+        if x1 - x0 > 1e-3 {
+            (x0, x1)
+        } else {
+            (0.0, self.default_size.0.max(1.0))
+        }
+    }
+
+    /// Halfway between the highest and lowest line part end, in template
+    /// units.
+    fn line_middle(&self) -> f32 {
+        let (y0, y1) = self
+            .line_ends()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), (_, y)| {
+                (lo.min(y), hi.max(y))
+            });
+        if y0 <= y1 {
+            (y0 + y1) / 2.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Both ends of every line part.
+    fn line_ends(&self) -> impl Iterator<Item = Pt> + '_ {
+        self.parts.iter().flat_map(|p| match p.kind {
+            PartKind::Line { from, to, .. } => vec![from, to],
+            PartKind::Shape { .. } => Vec::new(),
+        })
+    }
 }
 
 /// What a template part is.
@@ -153,6 +212,49 @@ pub fn instantiate_template(lib: &Library, template: &TemplateDef, frame: Frame)
     let (w, h) = template.default_size;
     let (sx, sy) = (frame.w / w.max(1.0), frame.h / h.max(1.0));
     let at = |(x, y): Pt| (frame.x + x * sx, frame.y + y * sy);
+    place_parts(lib, template, at, (sx, sy))
+}
+
+/// The lines of the line-only `template` (from `lib`) drawn from `start`
+/// to `end`, like the Line tool: the template's x axis, through the
+/// middle of its lines, is turned and scaled (the same both ways) so its
+/// lines' x extent runs from `start` to `end`. A line written right to
+/// left (a reply) so runs back against the drag. Two or more lines share
+/// one new group.
+pub fn instantiate_line_template(
+    lib: &Library,
+    template: &TemplateDef,
+    start: Pt,
+    end: Pt,
+) -> Vec<Shape> {
+    let ((x0, x1), y0) = (template.line_span(), template.line_middle());
+    let (dx, dy) = (end.0 - start.0, end.1 - start.1);
+    let len = dx.hypot(dy);
+    let (u, scale) = if len > 1e-6 {
+        ((dx / len, dy / len), len / (x1 - x0))
+    } else {
+        ((1.0, 0.0), 0.0)
+    };
+    // Template y runs to the right of the direction of travel.
+    let v = (-u.1, u.0);
+    let at = |(x, y): Pt| {
+        let (along, across) = ((x - x0) * scale, (y - y0) * scale);
+        (
+            start.0 + u.0 * along + v.0 * across,
+            start.1 + u.1 * along + v.1 * across,
+        )
+    };
+    place_parts(lib, template, at, (scale, scale))
+}
+
+/// The parts of `template` placed by `at` (template units to canvas),
+/// shape parts scaled by `(sx, sy)`; see [`instantiate_template`].
+fn place_parts(
+    lib: &Library,
+    template: &TemplateDef,
+    at: impl Fn(Pt) -> Pt,
+    (sx, sy): (f32, f32),
+) -> Vec<Shape> {
     let group = (template.parts.len() > 1).then(Uuid::new_v4);
     let mut shapes = Vec::with_capacity(template.parts.len());
     for part in &template.parts {
@@ -236,6 +338,13 @@ pub(crate) fn load_template(
     let skip = |e: String| format!("{context}: {e}; skipped");
 
     let id = valid_id(required_str(table, "id").map_err(skip)?).map_err(skip)?;
+    if id.len() > MAX_TEMPLATE_ID_LEN {
+        // Part shape ids `<id>.<n>` must stay valid ids too.
+        return Err(skip(format!(
+            "id `{}` is too long; a template id may be at most {MAX_TEMPLATE_ID_LEN} characters",
+            quote(id)
+        )));
+    }
     if taken_ids.contains(id) {
         return Err(skip("duplicate id".into()));
     }
@@ -1047,6 +1156,131 @@ style = { fill = "#ABCDEF" }
         let placed = instantiate_template(&lib, lib.template("assoc").unwrap(), frame);
         assert_eq!(placed.len(), 1);
         assert!(placed[0].groups.is_empty());
+    }
+
+    const LINES: &str = r##"
+[[template]]
+id = "assoc"
+name = "Association"
+icon = "minus"
+default_size = [120, 1]
+[[template.part]]
+line = { from = [0, 0], to = [120, 0], end_head = "arrow" }
+
+[[template]]
+id = "reply"
+name = "Reply"
+icon = "minus"
+default_size = [120, 1]
+[[template.part]]
+line = { from = [120, 0], to = [0, 0], end_head = "arrow" }
+
+[[template]]
+id = "rails"
+name = "Rails"
+icon = "minus"
+default_size = [100, 10]
+[[template.part]]
+line = { from = [0, 0], to = [100, 0] }
+[[template.part]]
+line = { from = [0, 10], to = [100, 10] }
+"##;
+
+    /// The ends of `shape` (a line), start first.
+    fn ends(shape: &Shape) -> (Pt, Pt) {
+        crate::geometry::line_endpoints(&shape.frame)
+    }
+
+    fn near(a: Pt, b: Pt) -> bool {
+        (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3
+    }
+
+    #[test]
+    fn line_only_templates_are_known_with_their_length() {
+        let (lib, warnings) = load_lib(2, LINES, &[]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let assoc = lib.template("assoc").unwrap();
+        assert!(assoc.is_line_only());
+        assert_eq!(assoc.line_length(), 120.0);
+        assert_eq!(lib.template("rails").unwrap().line_length(), 100.0);
+        assert!(!class_library().template("class").unwrap().is_line_only());
+    }
+
+    #[test]
+    fn line_templates_run_from_press_to_release() {
+        let (lib, _) = load_lib(2, LINES, &[]);
+        let assoc = lib.template("assoc").unwrap();
+        // Diagonal: from the press to the release, whatever the length.
+        let placed = instantiate_line_template(&lib, assoc, (10.0, 10.0), (110.0, 110.0));
+        assert_eq!(placed.len(), 1);
+        assert!(placed[0].is_line() && placed[0].groups.is_empty());
+        let (a, b) = ends(&placed[0]);
+        assert!(
+            near(a, (10.0, 10.0)) && near(b, (110.0, 110.0)),
+            "{a:?} {b:?}"
+        );
+        assert_eq!(placed[0].line.as_ref().unwrap().end_head, ArrowHead::Arrow);
+        // Leftwards: it points left.
+        let placed = instantiate_line_template(&lib, assoc, (200.0, 50.0), (100.0, 50.0));
+        let (a, b) = ends(&placed[0]);
+        assert!(
+            near(a, (200.0, 50.0)) && near(b, (100.0, 50.0)),
+            "{a:?} {b:?}"
+        );
+        assert!(placed[0].frame.flip_x);
+        // A reply runs back against the drag.
+        let reply = lib.template("reply").unwrap();
+        let placed = instantiate_line_template(&lib, reply, (0.0, 0.0), (100.0, 0.0));
+        let (a, b) = ends(&placed[0]);
+        assert!(near(a, (100.0, 0.0)) && near(b, (0.0, 0.0)), "{a:?} {b:?}");
+        let placed = instantiate_line_template(&lib, reply, (100.0, 0.0), (0.0, 0.0));
+        let (a, b) = ends(&placed[0]);
+        assert!(near(a, (0.0, 0.0)) && near(b, (100.0, 0.0)), "{a:?} {b:?}");
+    }
+
+    #[test]
+    fn several_lines_turn_and_scale_together() {
+        let (lib, _) = load_lib(2, LINES, &[]);
+        let rails = lib.template("rails").unwrap();
+        // Drawn downwards at twice the length: the rails turn a quarter
+        // and keep their spacing in proportion, around the drag.
+        let placed = instantiate_line_template(&lib, rails, (50.0, 0.0), (50.0, 200.0));
+        assert_eq!(placed.len(), 2);
+        assert_eq!(placed[0].groups.len(), 1);
+        assert_eq!(placed[0].groups, placed[1].groups);
+        let (a, b) = ends(&placed[0]);
+        assert!(
+            near(a, (60.0, 0.0)) && near(b, (60.0, 200.0)),
+            "{a:?} {b:?}"
+        );
+        let (a, b) = ends(&placed[1]);
+        assert!(
+            near(a, (40.0, 0.0)) && near(b, (40.0, 200.0)),
+            "{a:?} {b:?}"
+        );
+    }
+
+    #[test]
+    fn template_ids_leave_room_for_part_numbers() {
+        let template = |id: &str| {
+            format!(
+                "[[template]]\nid = \"{id}\"\nname = \"T\"\nicon = \"box\"\n\
+                 [[template.part]]\nframe = [0, 0, 10, 10]\nprimitive = \"rect\"\n"
+            )
+        };
+        let longest = "t".repeat(crate::library::MAX_ID_LEN - 3);
+        let too_long = "u".repeat(crate::library::MAX_ID_LEN - 2);
+        let shapes = format!("{}{}", template(&longest), template(&too_long));
+        let (lib, warnings) = load_lib(2, &shapes, &[]);
+        assert!(lib.template(&longest).is_some());
+        assert!(lib.shape(&format!("{longest}.1")).is_some());
+        assert!(lib.template(&too_long).is_none());
+        assert!(lib.shape(&format!("{too_long}.1")).is_none());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("uuuu") && warnings[0].contains("at most 61"),
+            "{warnings:?}"
+        );
     }
 
     #[test]

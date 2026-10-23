@@ -10,9 +10,9 @@ use mindweave_core::geometry::{
     bounds, primitive_geometry, to_canvas, FillRole, Frame, Geometry, PathCmd, Primitive, Pt, Rect,
 };
 use mindweave_core::{
-    double_outline, frame_aabb, handle_positions, is_auto_color, is_ink_color, line_geometry,
-    line_jumps, map_decor, rotate_handle_position, rounded_polygon, Handle, LibraryRegistry,
-    LineDash, LineProps, Page, Shape, Style, Viewport,
+    double_outline, frame_aabb, handle_positions, is_auto_color, is_ink_color,
+    line_geometry_min_ring, line_jumps, map_decor, rotate_handle_position, rounded_polygon,
+    ArrowHead, Handle, LibraryRegistry, LineDash, LineProps, Page, Shape, Style, Viewport,
 };
 use uuid::Uuid;
 
@@ -57,12 +57,25 @@ pub struct CanvasGeometry {
 /// shape, or its frame's box when that is not installed. Lines are drawn
 /// without jumps (see [`shape_geometry_with`]).
 pub fn shape_geometry(shape: &Shape, libs: &LibraryRegistry) -> CanvasGeometry {
-    shape_geometry_with(shape, libs, &[])
+    shape_geometry_with(shape, libs, &[], 0.)
 }
 
-/// [`shape_geometry`], a line jumping at `jumps` (lengths along it). A
+/// How thick a hollow arrowhead's ring is at least, in canvas units, at
+/// `zoom`: as thin as the thinnest stroke painted ([`MIN_STROKE_PX`]), so
+/// the head fades no sooner than its line.
+pub fn ring_floor(zoom: f32) -> f32 {
+    MIN_STROKE_PX / zoom.max(f32::EPSILON)
+}
+
+/// [`shape_geometry`], a line jumping at `jumps` (lengths along it), its
+/// hollow heads' rings at least `min_ring` thick (see [`ring_floor`]). A
 /// double outline is stroked twice; a placeholder ignores the style.
-pub fn shape_geometry_with(shape: &Shape, libs: &LibraryRegistry, jumps: &[f32]) -> CanvasGeometry {
+pub fn shape_geometry_with(
+    shape: &Shape,
+    libs: &LibraryRegistry,
+    jumps: &[f32],
+    min_ring: f32,
+) -> CanvasGeometry {
     let f = &shape.frame;
     let style = &shape.style;
     let line = shape.line.as_ref().filter(|_| shape.is_line());
@@ -89,7 +102,7 @@ pub fn shape_geometry_with(shape: &Shape, libs: &LibraryRegistry, jumps: &[f32])
         (g, false)
     } else if let Some(props) = line {
         (
-            line_geometry(f, props, style.stroke_width, style.double, jumps),
+            line_geometry_min_ring(f, props, style.stroke_width, style.double, jumps, min_ring),
             false,
         )
     } else {
@@ -168,7 +181,8 @@ impl CacheEntry {
 
 /// Besides the frame and library shape, an outline depends on a line's
 /// properties and jumps, the stroke width (heads, double outlines, dash
-/// lengths), whether the outline is double and its dash pattern.
+/// lengths), whether the outline is double and its dash pattern, and for
+/// a line with a hollow head, the zoom's ring floor.
 #[derive(Clone, Debug, PartialEq)]
 struct GeomKey {
     line: Option<LineProps>,
@@ -178,9 +192,17 @@ struct GeomKey {
     double: bool,
     dash: LineDash,
     jumps: Vec<f32>,
+    /// See [`ring_floor`]; `0` unless the shape is a line with a hollow
+    /// head, so zooming rebuilds no other outline.
+    min_ring: f32,
 }
 
-fn geom_key(s: &Shape, jumps: &[f32]) -> GeomKey {
+fn geom_key(s: &Shape, jumps: &[f32], ring_floor: f32) -> GeomKey {
+    let hollow = s.line.as_ref().is_some_and(|l| {
+        [l.start_head, l.end_head]
+            .iter()
+            .any(|h| matches!(h, ArrowHead::HollowTriangle | ArrowHead::HollowDiamond))
+    });
     GeomKey {
         line: s.line.clone(),
         outline: s.boundary.as_ref().map(|b| b.outline.clone()),
@@ -188,6 +210,7 @@ fn geom_key(s: &Shape, jumps: &[f32]) -> GeomKey {
         double: s.style.double,
         dash: s.style.dash,
         jumps: jumps.to_vec(),
+        min_ring: if hollow { ring_floor } else { 0. },
     }
 }
 
@@ -201,12 +224,21 @@ pub struct GeometryCache {
     /// worked out from.
     jumps: HashMap<Uuid, Vec<f32>>,
     jumps_of: u64,
+    /// The [`ring_floor`] at the zoom last painted at.
+    ring_floor: f32,
 }
 
 impl GeometryCache {
     /// Starts a frame; entries not used by [`Self::end_frame`] are dropped.
     pub fn begin_frame(&mut self) {
         self.frame = self.frame.wrapping_add(1);
+    }
+
+    /// Sets the zoom outlines are built for: hollow arrowheads' rings
+    /// keep to its [`ring_floor`]. Hit tests between frames use the zoom
+    /// last painted at.
+    pub fn set_zoom(&mut self, zoom: f32) {
+        self.ring_floor = ring_floor(zoom);
     }
 
     /// Works out where `page`'s lines jump, unless its lines are as they
@@ -234,15 +266,16 @@ impl GeometryCache {
     fn entry(&mut self, shape: &Shape, libs: &LibraryRegistry) -> &mut CacheEntry {
         let frame = self.frame;
         let jumps = self.jumps.get(&shape.id).map_or(&[][..], Vec::as_slice);
+        let key = geom_key(shape, jumps, self.ring_floor);
         let entry = self
             .entries
             .entry(shape.id)
             .and_modify(|e| {
-                if !e.matches(shape) || e.key != geom_key(shape, jumps) {
-                    *e = new_entry(shape, libs, jumps, frame);
+                if !e.matches(shape) || e.key != key {
+                    *e = new_entry(shape, libs, jumps, key.clone(), frame);
                 }
             })
-            .or_insert_with(|| new_entry(shape, libs, jumps, frame));
+            .or_insert_with(|| new_entry(shape, libs, jumps, key, frame));
         entry.used = frame;
         entry
     }
@@ -274,14 +307,21 @@ fn lines_fingerprint(page: &Page) -> u64 {
     h.finish()
 }
 
-fn new_entry(shape: &Shape, libs: &LibraryRegistry, jumps: &[f32], used: u64) -> CacheEntry {
+fn new_entry(
+    shape: &Shape,
+    libs: &LibraryRegistry,
+    jumps: &[f32],
+    key: GeomKey,
+    used: u64,
+) -> CacheEntry {
+    let min_ring = key.min_ring;
     CacheEntry {
         library: shape.library.clone(),
         shape: shape.shape.clone(),
         frame: shape.frame,
         params: shape.params.clone(),
-        key: geom_key(shape, jumps),
-        outline: shape_geometry_with(shape, libs, jumps),
+        key,
+        outline: shape_geometry_with(shape, libs, jumps, min_ring),
         tessellation: None,
         used,
     }
@@ -417,6 +457,7 @@ pub fn paint_shapes(
     let auto = AutoColors::new(page.canvas.background.as_deref(), cx);
     let painter = ShapePainter::new(bounds, vp, 1., auto, cx);
     cache.begin_frame();
+    cache.set_zoom(vp.zoom);
     cache.update_jumps(page);
     images.begin_frame();
     // Computed once; each layer paints the decor of its own topics.
@@ -798,7 +839,7 @@ pub fn paint_preview(
     opacity: f32,
     auto: AutoColors,
 ) {
-    let outline = shape_geometry(shape, libs);
+    let outline = shape_geometry_with(shape, libs, &[], ring_floor(vp.zoom));
     let painter = ShapePainter::new(bounds, vp, opacity, auto, cx);
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
         let paths = painter.tessellate(&shape.style, &outline);
@@ -1180,8 +1221,9 @@ fn push_built(builder: PathBuilder, color: Hsla, paths: &mut Vec<(Path<Pixels>, 
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        artboard_clips, layer_decor, name_label_rect, overlaps_canvas, placeholder_label,
-        screen_rect, screen_stroke_width, shape_geometry, GeometryCache,
+        artboard_clips, geom_key, layer_decor, name_label_rect, overlaps_canvas, placeholder_label,
+        ring_floor, screen_rect, screen_stroke_width, shape_geometry, shape_geometry_with,
+        GeometryCache,
     };
     use mindweave_core::geometry::{Frame, Geometry, Rect};
     use mindweave_core::{builtin_libraries, LibraryRegistry, LineDash, Shape, Viewport};
@@ -1382,6 +1424,37 @@ mod tests {
             cache.end_frame();
         }
         assert_eq!(cache.outline(&a, &libs).dash, LineDash::Dashed.pattern(3.));
+    }
+
+    #[test]
+    fn hollow_heads_keep_the_ring_floor_of_the_zoom() {
+        use mindweave_core::{line_frame, ArrowHead, LineProps};
+        let libs = registry();
+        let def = libs.shape("basic-shapes", "line").unwrap();
+        let mut line = Shape::new(def, "basic-shapes", line_frame((0., 0.), (100., 0.)));
+        line.style.stroke_width = 2.;
+        line.line = Some(LineProps {
+            end_head: ArrowHead::HollowTriangle,
+            ..LineProps::default()
+        });
+        let rect = rectangle(&libs, frame(0., 0., 10., 10.));
+        // The painter's floor: half a pixel, in canvas units.
+        assert_eq!(ring_floor(1.), 0.5);
+        assert_eq!(ring_floor(0.05), 10.);
+        let mut cache = GeometryCache::default();
+        cache.begin_frame();
+        cache.set_zoom(1.);
+        // Close up the ring is the line's width, as without a floor.
+        assert_eq!(cache.outline(&line, &libs), &shape_geometry(&line, &libs));
+        let near = cache.outline(&line, &libs).clone();
+        let rect_near = geom_key(&rect, &[], cache.ring_floor);
+        // Far out it is rebuilt at the floor: thicker than the line.
+        cache.set_zoom(0.05);
+        let far = cache.outline(&line, &libs).clone();
+        assert_ne!(far, near);
+        assert_eq!(far, shape_geometry_with(&line, &libs, &[], 10.));
+        // Other shapes are not rebuilt for the zoom.
+        assert_eq!(geom_key(&rect, &[], cache.ring_floor), rect_near);
     }
 
     #[test]

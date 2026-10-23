@@ -56,9 +56,9 @@ pub use library::{
     MAX_SHAPES, MAX_USER_LIBRARIES,
 };
 pub use line::{
-    bend_through, double_outline, edge_point, line_frame, line_geometry, line_jumps, line_midpoint,
-    route_line, ArrowHead, LineDash, LineEnd, LineJump, LineProps, LineRoute, Target, JUMP_SIZES,
-    LINE_LIBRARY, LINE_SHAPE,
+    bend_through, double_outline, edge_point, line_frame, line_geometry, line_geometry_min_ring,
+    line_jumps, line_midpoint, route_line, ArrowHead, LineDash, LineEnd, LineJump, LineProps,
+    LineRoute, Target, JUMP_SIZES, LINE_LIBRARY, LINE_SHAPE,
 };
 pub use mindmap::{
     branch_style, clamp_topic_picture, fit_topic_picture, map_decor, rounded_polygon,
@@ -73,7 +73,8 @@ pub use settings::{
 };
 pub use shape::{Label, Shape, Style, TextBoxProps, VAlign, TEXT_LIBRARY, TEXT_SHAPE};
 pub use template::{
-    instantiate_template, PartKind, PartLabel, TemplateDef, TemplatePart, MAX_TEMPLATE_PARTS,
+    instantiate_line_template, instantiate_template, PartKind, PartLabel, TemplateDef,
+    TemplatePart, MAX_TEMPLATE_PARTS,
 };
 pub use text::{
     HAlign, Mixed, Paragraph, RichText, Run, RunStyle, StyleChange, StyleSummary,

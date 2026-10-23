@@ -12,9 +12,9 @@ use gpui_kit::*;
 use mindweave_core::geometry::{hit_test, line_endpoints, FillRole, Frame, Primitive, Pt, Rect};
 use mindweave_core::line::target_of;
 use mindweave_core::{
-    bend_through, clamp_topic_picture, drag_create, handle_positions, instantiate_template,
-    line_frame, line_midpoint, marquee_selects, resize_with_text_boxes, rotate,
-    rotate_handle_position, route_line, selection_bounds, translate, unit_members,
+    bend_through, clamp_topic_picture, drag_create, handle_positions, instantiate_line_template,
+    instantiate_template, line_frame, line_midpoint, marquee_selects, resize_with_text_boxes,
+    rotate, rotate_handle_position, route_line, selection_bounds, translate, unit_members,
     whole_units_only, with_members, DocumentSession, Handle, LibraryRegistry, LineEnd, Shape,
     ShapeDef, ShapeSource, ARTBOARD_SHAPE, CLICK_DRAG_THRESHOLD, TEXT_LIBRARY,
 };
@@ -602,7 +602,8 @@ impl EditorWindow {
         }
         let (library, shape) = (library.clone(), shape.clone());
         self.line_ends = [None; 2];
-        if !template && is_line_tool(&library, &shape) {
+        let libs = cx.global::<Libraries>().0.clone();
+        if places_attached_line(&libs, &library, &shape, template) {
             self.line_ends[0] = self.attach_target_at(at, None, cx);
             self.attach_highlight = self.line_ends[0];
         }
@@ -634,12 +635,13 @@ impl EditorWindow {
                 Gesture::Placing {
                     library,
                     shape,
-                    template: false,
+                    template,
                     ..
                 },
             ) = (at, &self.gesture)
             {
-                if is_line_tool(library, shape) {
+                let libs = cx.global::<Libraries>().0.clone();
+                if places_attached_line(&libs, library, shape, *template) {
                     let end = self
                         .attach_target_at(at, None, cx)
                         .filter(|&id| Some(id) != self.line_ends[0]);
@@ -664,12 +666,18 @@ impl EditorWindow {
         let gesture = std::mem::take(&mut self.gesture);
         let ends = std::mem::take(&mut self.line_ends);
         self.attach_highlight = None;
-        if let Gesture::Placing { template: true, .. } = gesture {
+        if let Gesture::Placing {
+            template: true,
+            start,
+            ..
+        } = gesture
+        {
             // Parts keep the template's styles, not the remembered one.
-            let parts = placement_shapes(&gesture, &cx.global::<Libraries>().0);
+            let mut parts = placement_shapes(&gesture, &cx.global::<Libraries>().0);
             if parts.is_empty() {
                 return;
             }
+            attach_template_line(&mut parts, start, ends);
             let ids = parts.iter().map(|p| p.id).collect();
             // Parts placed inside an artboard join it, in the same step.
             self.update_session(|s| add_with_membership(s, parts), cx);
@@ -1392,8 +1400,18 @@ impl EditorWindow {
         libs: &LibraryRegistry,
         remembered: &AppSettings,
     ) -> Vec<Shape> {
-        if let Gesture::Placing { template: true, .. } = self.gesture {
-            return preview_shapes(&self.gesture, libs);
+        if let Gesture::Placing {
+            template: true,
+            start,
+            ..
+        } = self.gesture
+        {
+            let mut shapes = preview_shapes(&self.gesture, libs);
+            attach_template_line(&mut shapes, start, self.line_ends);
+            for shape in &mut shapes {
+                self.route_preview_line(shape, libs);
+            }
+            return shapes;
         }
         let Some(mut shape) = preview_shape(&self.gesture, libs) else {
             return Vec::new();
@@ -1404,6 +1422,12 @@ impl EditorWindow {
             remembered.apply_remembered_style(&mut shape);
         }
         attach_ends(&mut shape, self.line_ends);
+        self.route_preview_line(&mut shape, libs);
+        vec![shape]
+    }
+
+    /// Routes a previewed line to meet the shapes its ends attach to.
+    fn route_preview_line(&self, shape: &mut Shape, libs: &LibraryRegistry) {
         if let Some(props) = shape.line.as_mut() {
             let target = |id: Option<Uuid>| {
                 let s = self.session.find_shape(id?)?;
@@ -1412,7 +1436,6 @@ impl EditorWindow {
             let (start, end) = (target(props.start), target(props.end));
             route_line(&mut shape.frame, props, start.as_ref(), end.as_ref());
         }
-        vec![shape]
     }
 
     /// The one selected line, if the selection is exactly one unlocked
@@ -1458,10 +1481,8 @@ impl EditorWindow {
         let libs = cx.global::<Libraries>().0.clone();
         let band = ATTACH_EDGE_PX / self.session.page().viewport.zoom;
         let cache = &mut self.geometry_cache;
-        hit_shape_with(&self.session, at, band, |shape, band| {
-            !shape.is_line()
-                && Some(shape.id) != except
-                && attaches_at(cache.outline(shape, &libs), at, band)
+        attach_target(&self.session, at, band, except, |shape, band| {
+            attaches_at(cache.outline(shape, &libs), at, band)
         })
     }
 
@@ -1567,6 +1588,58 @@ fn attach_ends(shape: &mut Shape, [start, end]: [Option<Uuid>; 2]) {
         props.start = start;
         props.end = end.filter(|&e| Some(e) != start);
     }
+}
+
+/// The topmost shape at canvas point `at` a line end can attach to:
+/// unlocked, not a line, not `except`, and one `attaches` says the end
+/// meets within `band` canvas units (see [`attaches_at`]).
+fn attach_target(
+    session: &DocumentSession,
+    at: Pt,
+    band: f32,
+    except: Option<Uuid>,
+    mut attaches: impl FnMut(&Shape, f32) -> bool,
+) -> Option<Uuid> {
+    hit_shape_with(session, at, band, |shape, band| {
+        !shape.is_line() && Some(shape.id) != except && attaches(shape, band)
+    })
+}
+
+/// Whether placing `shape` of `library` (a template when `template`)
+/// draws one line whose ends attach like the Line tool's: the Line tool,
+/// or an installed template of a single line.
+fn places_attached_line(
+    libs: &LibraryRegistry,
+    library: &str,
+    shape: &str,
+    template: bool,
+) -> bool {
+    if !template {
+        return is_line_tool(library, shape);
+    }
+    libs.template(library, shape)
+        .is_some_and(|(_, t)| t.parts.len() == 1 && t.is_line_only())
+}
+
+/// Attaches the line of a single-line template placed from `press`: its
+/// end nearer the press to `ends[0]` (the shape under the press), the
+/// other to `ends[1]`, so a reply, which starts at the release, swaps
+/// them. Other placements are left alone.
+fn attach_template_line(parts: &mut [Shape], press: Pt, [at_press, at_release]: [Option<Uuid>; 2]) {
+    let [line] = parts else {
+        return;
+    };
+    if !line.is_line() {
+        return;
+    }
+    let (a, b) = line_endpoints(&line.frame);
+    let d = |p: Pt| (p.0 - press.0).hypot(p.1 - press.1);
+    let ends = if d(b) < d(a) {
+        [at_release, at_press]
+    } else {
+        [at_press, at_release]
+    };
+    attach_ends(line, ends);
 }
 
 /// Whether a line end at `p` attaches to the shape with `outline`: within
@@ -1676,8 +1749,37 @@ fn placement_shapes(gesture: &Gesture, libs: &LibraryRegistry) -> Vec<Shape> {
         return Vec::new();
     };
     let end = dragged.then_some(*current);
+    if template.is_line_only() {
+        let length = template.line_length();
+        let (a, b) = line_template_ends(length, *start, end, *constrain, *from_center);
+        return instantiate_line_template(lib, template, a, b);
+    }
     let frame = template_frame(template.default_size, *start, end, *constrain, *from_center);
     instantiate_template(lib, template, frame)
+}
+
+/// Where a line-only template `length` long drawn from `start` to `end`
+/// runs, start first, like the Line tool: `constrain` snaps it to 45°
+/// steps and `from_center` makes `start` its middle. A click (`end` is
+/// `None`) runs `length` rightwards from `start`.
+fn line_template_ends(
+    length: f32,
+    start: Pt,
+    end: Option<Pt>,
+    constrain: bool,
+    from_center: bool,
+) -> (Pt, Pt) {
+    let Some(end) = end else {
+        return (start, (start.0 + length, start.1));
+    };
+    line_endpoints(&drag_create(
+        start,
+        Some(end),
+        (length, 0.),
+        true,
+        constrain,
+        from_center,
+    ))
 }
 
 /// The frame of a template of `default_size` drawn from `start` to `end`,
@@ -1742,17 +1844,17 @@ fn placement_shape(gesture: &Gesture, libs: &LibraryRegistry) -> Option<Shape> {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        artboard_press, attaches_at, chrome_frame, dropped_shapes, handle_at, hit_shape, is_drag,
-        is_line_like, lines_to_detach, marquee_rect, marquee_selection, move_placement,
-        moved_frames_of, nudge_shapes, placement_frame, placement_shape, placement_shapes,
-        press_kind, press_selection, press_target, preview_shape, preview_shapes, resize_cursor,
-        shape_geometry, text_box_widths_off, transformed, visible_handles, Gesture, HandleHit,
-        PressKind,
+        artboard_press, attach_target, attach_template_line, attaches_at, chrome_frame,
+        dropped_shapes, handle_at, hit_shape, is_drag, is_line_like, lines_to_detach, marquee_rect,
+        marquee_selection, move_placement, moved_frames_of, nudge_shapes, placement_frame,
+        placement_shape, placement_shapes, places_attached_line, press_kind, press_selection,
+        press_target, preview_shape, preview_shapes, resize_cursor, shape_geometry,
+        text_box_widths_off, transformed, visible_handles, Gesture, HandleHit, PressKind,
     };
     use crate::editor::artboard_edit::add_with_membership;
     use gpui_kit::CursorStyle;
     use mindweave_core::geometry::Rect;
-    use mindweave_core::geometry::{Frame, Pt};
+    use mindweave_core::geometry::{line_endpoints, Frame, Pt};
     use mindweave_core::Handle;
     use mindweave_core::{
         builtin_libraries, DocumentSession, LibraryRegistry, Shape, ARTBOARD_SHAPE, TEXT_LIBRARY,
@@ -1925,6 +2027,144 @@ mod tests {
         assert!(
             placement_shapes(&placing_class((300., 200.), false, true), &registry()).is_empty()
         );
+    }
+
+    /// Placing UML template `template` from `(100, 100)` to `current`.
+    fn placing_uml(template: &str, current: (f32, f32), constrain: bool, dragged: bool) -> Gesture {
+        Gesture::Placing {
+            start: (100., 100.),
+            current,
+            library: "uml".into(),
+            shape: template.into(),
+            template: true,
+            constrain,
+            from_center: false,
+            dragged,
+        }
+    }
+
+    /// The ends of the one line `gesture` places, start first.
+    fn placed_line_ends(gesture: &Gesture) -> ((f32, f32), (f32, f32)) {
+        let parts = placement_shapes(gesture, &registry());
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].is_line());
+        line_endpoints(&parts[0].frame)
+    }
+
+    fn near(a: (f32, f32), b: (f32, f32)) -> bool {
+        (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3
+    }
+
+    #[test]
+    fn a_line_template_runs_from_press_to_release() {
+        // Diagonal.
+        let (a, b) = placed_line_ends(&placing_uml("association", (200., 200.), false, true));
+        assert!(
+            near(a, (100., 100.)) && near(b, (200., 200.)),
+            "{a:?} {b:?}"
+        );
+        // Leftwards: a directed association points left.
+        let g = placing_uml("directed-association", (0., 100.), false, true);
+        let (a, b) = placed_line_ends(&g);
+        assert!(near(a, (100., 100.)) && near(b, (0., 100.)), "{a:?} {b:?}");
+        // The preview shows the same line.
+        let preview = preview_shapes(&g, &registry());
+        assert_eq!(line_endpoints(&preview[0].frame), (a, b));
+        // A click places its default length rightwards from the click.
+        let (a, b) = placed_line_ends(&placing_uml("generalization", (100., 100.), false, false));
+        assert!(
+            near(a, (100., 100.)) && near(b, (260., 100.)),
+            "{a:?} {b:?}"
+        );
+    }
+
+    #[test]
+    fn shift_snaps_a_line_template_to_45_degrees() {
+        let (a, b) = placed_line_ends(&placing_uml("association", (200., 190.), true, true));
+        assert!(near(a, (100., 100.)), "{a:?}");
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        assert!((dx - dy).abs() < 1e-3 && dx > 0., "{dx} {dy}");
+        // The drag's length is kept: nothing explodes.
+        assert!((dx.hypot(dy) - 100_f32.hypot(90.)).abs() < 1e-2);
+        // Straight down stays straight.
+        let (a, b) = placed_line_ends(&placing_uml("association", (104., 300.), true, true));
+        assert!((a.0 - b.0).abs() < 1e-3 && b.1 > a.1, "{a:?} {b:?}");
+    }
+
+    #[test]
+    fn a_reply_runs_back_against_the_drag() {
+        let (a, b) = placed_line_ends(&placing_uml("reply-message", (300., 100.), false, true));
+        // It starts at the release and its arrow points at the press.
+        assert!(
+            near(a, (300., 100.)) && near(b, (100., 100.)),
+            "{a:?} {b:?}"
+        );
+        let (a, b) = placed_line_ends(&placing_uml("reply-message", (-100., 100.), false, true));
+        assert!(
+            near(a, (-100., 100.)) && near(b, (100., 100.)),
+            "{a:?} {b:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_template_attaches_to_the_shapes_at_its_ends() {
+        let libs = registry();
+        // Single-line templates attach like the Line tool; others do not.
+        assert!(places_attached_line(&libs, "uml", "association", true));
+        assert!(places_attached_line(&libs, "uml", "reply-message", true));
+        assert!(!places_attached_line(&libs, "uml", "class", true));
+        assert!(!places_attached_line(&libs, "uml", "lifeline", true));
+        assert!(places_attached_line(
+            &libs,
+            mindweave_core::LINE_LIBRARY,
+            mindweave_core::LINE_SHAPE,
+            false
+        ));
+        assert!(!places_attached_line(
+            &libs,
+            "basic-shapes",
+            "rectangle",
+            false
+        ));
+
+        // A class under the release point: the end there attaches to it.
+        let (_d, mut s) = session();
+        let class = add(
+            &mut s,
+            &libs,
+            "basic-shapes",
+            "rectangle",
+            (300., 50., 100., 100.),
+        );
+        let release = (301., 100.);
+        let target_at = |at: Pt, except: Option<Uuid>| {
+            attach_target(&s, at, 4., except, |shape, band| {
+                attaches_at(&shape_geometry(shape, &libs), at, band)
+            })
+        };
+        let target = target_at(release, None);
+        assert_eq!(target, Some(class));
+        // Away from it, or with it excepted, there is none.
+        assert_eq!(target_at((200., 100.), None), None);
+        assert_eq!(target_at(release, Some(class)), None);
+
+        let mut parts =
+            placement_shapes(&placing_uml("generalization", release, false, true), &libs);
+        attach_template_line(&mut parts, (100., 100.), [None, target]);
+        let props = parts[0].line.as_ref().unwrap();
+        assert_eq!((props.start, props.end), (None, Some(class)));
+        // A reply starts at the release: its start attaches there.
+        let mut parts =
+            placement_shapes(&placing_uml("reply-message", release, false, true), &libs);
+        attach_template_line(&mut parts, (100., 100.), [None, target]);
+        let props = parts[0].line.as_ref().unwrap();
+        assert_eq!((props.start, props.end), (Some(class), None));
+        // Templates of several parts are left alone.
+        let mut class_parts = placement_shapes(&placing_uml("class", release, false, true), &libs);
+        attach_template_line(&mut class_parts, (100., 100.), [None, target]);
+        assert!(class_parts
+            .iter()
+            .all(|p| p.line.as_ref().is_none_or(|l| l.end.is_none())));
     }
 
     #[test]

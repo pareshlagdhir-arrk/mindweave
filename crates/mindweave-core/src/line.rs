@@ -586,8 +586,16 @@ fn head_inset(head: ArrowHead, len: f32, width: f32) -> f32 {
 /// The filled sub-paths of `head` with its tip at `tip`, pointing along
 /// unit direction `dir`, `len` long, for a stroke `width` wide. A hollow
 /// head is its filled form's outline filled with the canvas colour, then
-/// a ring `width` thick inside that outline in the stroke colour.
-fn head_paths(head: ArrowHead, tip: Pt, dir: Pt, len: f32, width: f32) -> Vec<SubPath> {
+/// a ring `width` thick (at least `min_ring`) inside that outline in the
+/// stroke colour, or the whole outline when the ring would fill it.
+fn head_paths(
+    head: ArrowHead,
+    tip: Pt,
+    dir: Pt,
+    len: f32,
+    width: f32,
+    min_ring: f32,
+) -> Vec<SubPath> {
     let n = (-dir.1, dir.0);
     let at = |along: f32, side: f32| {
         (
@@ -612,9 +620,13 @@ fn head_paths(head: ArrowHead, tip: Pt, dir: Pt, len: f32, width: f32) -> Vec<Su
     let hollow = |pts: Vec<Pt>| {
         let outline = polygon_cmds(&pts);
         let mut ring = outline.clone();
-        // Thick strokes keep a hole: at most most of the way to the middle.
-        let thickness = width.max(1.0).min(0.7 * inradius(&pts));
-        ring.extend(polygon_cmds(&inset_polygon(&pts, thickness)));
+        // Thick strokes keep a hole: at most most of the way to the middle,
+        // unless the floor is thicker still.
+        let inner = inradius(&pts);
+        let thickness = width.max(1.0).min(0.7 * inner).max(min_ring);
+        if thickness < inner {
+            ring.extend(polygon_cmds(&inset_polygon(&pts, thickness)));
+        }
         vec![
             SubPath {
                 cmds: outline,
@@ -924,6 +936,20 @@ pub fn line_geometry(
     double: bool,
     jumps: &[f32],
 ) -> Geometry {
+    line_geometry_min_ring(frame, props, width, double, jumps, 0.0)
+}
+
+/// [`line_geometry`] with hollow heads' rings at least `min_ring` thick
+/// (canvas units), so they stay as visible as the line when zoomed far
+/// out; a ring too thick for its head fills it.
+pub fn line_geometry_min_ring(
+    frame: &Frame,
+    props: &LineProps,
+    width: f32,
+    double: bool,
+    jumps: &[f32],
+    min_ring: f32,
+) -> Geometry {
     let mut pts = route_points(frame.w, frame.h, props, local_bend(frame, props));
     // A double line is about three strokes wide; its heads match.
     let head_width = if double { 3.0 * width } else { width };
@@ -981,10 +1007,18 @@ pub fn line_geometry(
             dir,
             len,
             head_width,
+            min_ring,
         ));
     }
     if let Some(dir) = end_dir {
-        paths.extend(head_paths(props.end_head, end_tip, dir, len, head_width));
+        paths.extend(head_paths(
+            props.end_head,
+            end_tip,
+            dir,
+            len,
+            head_width,
+            min_ring,
+        ));
     }
     Geometry { paths }
 }
@@ -1348,6 +1382,51 @@ mod tests {
                 .iter()
                 .fold((0.0, 0.0), |m, p| (m.0 + p.0 / k, m.1 + p.1 / k));
             assert!(!crate::geometry::hit_test(&ring, middle, 0.0), "{hollow:?}");
+        }
+    }
+
+    #[test]
+    fn hollow_head_rings_are_never_thinner_than_the_floor() {
+        let frame = box_frame(100.0, 0.0);
+        // The contours of a ring: the head's outline, then its hole if any.
+        let contours = |ring: &SubPath| -> Vec<Vec<Pt>> {
+            let mut out: Vec<Vec<Pt>> = Vec::new();
+            for c in &ring.cmds {
+                match c {
+                    PathCmd::MoveTo(p) => out.push(vec![*p]),
+                    PathCmd::LineTo(p) => out.last_mut().unwrap().push(*p),
+                    _ => {}
+                }
+            }
+            out
+        };
+        for hollow in [ArrowHead::HollowTriangle, ArrowHead::HollowDiamond] {
+            let props = LineProps {
+                end_head: hollow,
+                ..LineProps::default()
+            };
+            // No floor: the same as before.
+            assert_eq!(
+                line_geometry_min_ring(&frame, &props, 2.0, false, &[], 0.0),
+                line_geometry(&frame, &props, 2.0, false, &[])
+            );
+            for floor in [0.5, 2.5, 4.0, 1000.0] {
+                let g = line_geometry_min_ring(&frame, &props, 2.0, false, &[], floor);
+                let ring = g.paths.last().unwrap();
+                assert_eq!(ring.fill, FillRole::StrokeColor);
+                match &contours(ring)[..] {
+                    [outer, inner] => {
+                        let thickness = inradius(outer) - inradius(inner);
+                        assert!(thickness >= floor - 1e-3, "{hollow:?} {floor}: {thickness}");
+                    }
+                    // Thicker than the head allows: drawn solid.
+                    [_] => assert!(floor > 2.0, "{hollow:?} {floor}"),
+                    other => panic!("{hollow:?} {floor}: {} contours", other.len()),
+                }
+            }
+            // Far out the head is solid, never thinner than the line.
+            let g = line_geometry_min_ring(&frame, &props, 2.0, false, &[], 1000.0);
+            assert_eq!(contours(g.paths.last().unwrap()).len(), 1, "{hollow:?}");
         }
     }
 

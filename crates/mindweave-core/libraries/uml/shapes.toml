@@ -280,6 +280,7 @@ style = { fill = "ink", stroke = "none", opacity = 1.0 }
 [[shape]]
 id = "send-signal"
 name = "Send Signal"
+icon = "shapes/icons/send-signal.svg"
 default_size = [140, 60]
 svg = "shapes/send-signal.svg"
 style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
@@ -287,6 +288,7 @@ style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 [[shape]]
 id = "accept-event"
 name = "Accept Event"
+icon = "shapes/icons/accept-event.svg"
 default_size = [140, 60]
 svg = "shapes/accept-event.svg"
 style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
