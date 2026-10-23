@@ -43,8 +43,8 @@ use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
 use mindweave_core::{
     duplicate, format_hex_color, from_clipboard, is_mindweave_payload, is_newer_payload,
-    parse_hex_color, plain_text_box, prepare_paste, to_clipboard, unit_members, AppSettings,
-    Arrange, DocumentSession, Shape, Viewport, MAX_CLIPBOARD_SHAPES,
+    parse_hex_color, plain_text_box, prepare_paste, to_clipboard, unit_members, with_members,
+    AppSettings, Arrange, DocumentSession, Shape, Viewport, MAX_CLIPBOARD_SHAPES,
 };
 
 // `Copy` is used by path: importing it would hide the derivable trait.
@@ -921,12 +921,11 @@ impl EditorWindow {
         self.step_history(false, window, cx);
     }
 
-    /// The selected shapes, back to front.
+    /// The selected shapes with the members of selected artboards, back to
+    /// front: what Copy and Duplicate take.
     fn selected_shapes(&self) -> Vec<Shape> {
-        self.shapes_among(&self.selection)
-            .into_iter()
-            .cloned()
-            .collect()
+        let ids = with_members(self.session.shapes_on_active_layer(), &self.selection);
+        self.shapes_among(&ids).into_iter().cloned().collect()
     }
 
     /// Puts the selected shapes on the clipboard; returns whether it did.
@@ -1723,10 +1722,10 @@ mod tests {
         };
         let payload = mindweave_core::to_clipboard(&[Shape::new_text_box((10., 10.))]);
         assert!(matches!(paste_plan(&payload, &view), PastePlan::Shapes(s) if s.len() == 1));
-        let newer = payload.replace("\"version\":4", "\"version\":99");
+        let newer = payload.replace("\"version\":5", "\"version\":99");
         assert_eq!(paste_plan(&newer, &view), PastePlan::Newer);
         let big = format!(
-            "{{\"mindweave\":\"shapes\",\"version\":4,\"pad\":\"{}\"}}",
+            "{{\"mindweave\":\"shapes\",\"version\":5,\"pad\":\"{}\"}}",
             "x".repeat(MAX_CLIPBOARD_BYTES)
         );
         assert_eq!(paste_plan(&big, &view), PastePlan::Nothing);

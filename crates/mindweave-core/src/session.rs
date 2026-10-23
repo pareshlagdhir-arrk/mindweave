@@ -211,6 +211,8 @@ fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
         groups,
         topic,
         boundary,
+        artboard_props,
+        artboard,
         extra,
     } = a;
     let auto = a.auto_width();
@@ -237,6 +239,8 @@ fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
         && *groups == b.groups
         && *topic == b.topic
         && *boundary == b.boundary
+        && *artboard_props == b.artboard_props
+        && *artboard == b.artboard
         && *extra == b.extra
 }
 
@@ -661,21 +665,34 @@ impl DocumentSession {
         self.active_layer().visible
     }
 
-    /// Appends `shapes`, normalised, to the top of the active layer.
+    /// Appends `shapes`, normalised, to the top of the active layer. A
+    /// shape that names an artboard neither on that layer nor among
+    /// `shapes` (pasted elsewhere) belongs to none.
     pub fn add_shapes(&mut self, mut shapes: Vec<Shape>) {
         if shapes.is_empty() {
             return;
         }
         shapes.iter_mut().for_each(Shape::normalize);
+        let boards: HashSet<Uuid> = self
+            .shapes_on_active_layer()
+            .iter()
+            .chain(&shapes)
+            .filter(|s| s.is_artboard())
+            .map(|s| s.id)
+            .collect();
+        for s in &mut shapes {
+            s.artboard = s.artboard.filter(|a| boards.contains(a));
+        }
         self.checkpoint();
         self.active_layer_mut().objects.extend(shapes);
         self.reroute_lines();
     }
 
-    /// Removes the shapes with `ids` from every layer of the active page
-    /// and returns them, back to front.
+    /// Removes the shapes with `ids`, and the members of artboards among
+    /// them, from every layer of the active page and returns them, back to
+    /// front.
     pub fn remove_shapes(&mut self, ids: &[Uuid]) -> Vec<Shape> {
-        let ids: HashSet<Uuid> = ids.iter().copied().collect();
+        let ids: HashSet<Uuid> = self.with_members(ids).into_iter().collect();
         let found = self
             .page()
             .layers
@@ -723,6 +740,57 @@ impl DocumentSession {
             objects[i] = shape;
         }
         self.reroute_lines();
+    }
+
+    /// `ids` with the members of the artboards among them, from every
+    /// layer of the active page.
+    fn with_members(&self, ids: &[Uuid]) -> Vec<Uuid> {
+        let all: Vec<Shape> = self
+            .page()
+            .layers
+            .iter()
+            .flat_map(|l| &l.objects)
+            .filter(|s| s.is_artboard() || s.artboard.is_some() || ids.contains(&s.id))
+            .cloned()
+            .collect();
+        crate::artboard::with_members(&all, ids)
+    }
+
+    /// Moves the shapes with `ids` on the active layer by `(dx, dy)`, with
+    /// the members of the artboards among them, each once, as one undo
+    /// step. Membership is left as it is (see [`Self::assign_membership`]).
+    pub fn move_shapes(&mut self, ids: &[Uuid], dx: f32, dy: f32) {
+        let ids = crate::artboard::with_members(self.shapes_on_active_layer(), ids);
+        self.update_shapes(&ids, |s| {
+            s.frame.x += dx;
+            s.frame.y += dy;
+        });
+    }
+
+    /// Gives the shapes with `ids` on the active layer (with their groups
+    /// and mind maps) the membership of [`crate::artboard::membership`].
+    /// Called after the edit that placed or moved them, it joins that
+    /// edit's undo step (or the open gesture) rather than making one of its
+    /// own; artboards among `ids` are skipped.
+    pub fn assign_membership(&mut self, ids: &[Uuid]) {
+        let objects = self.shapes_on_active_layer();
+        let changes: std::collections::HashMap<Uuid, Option<Uuid>> =
+            crate::artboard::membership(objects, ids)
+                .into_iter()
+                .filter(|(id, board)| objects.iter().any(|s| s.id == *id && s.artboard != *board))
+                .collect();
+        if changes.is_empty() {
+            return;
+        }
+        // A new revision, but no history entry: the step before the edit
+        // that caused this restores the old membership too.
+        self.last_revision += 1;
+        self.revision = self.last_revision;
+        for s in &mut self.active_layer_mut().objects {
+            if let Some(board) = changes.get(&s.id) {
+                s.artboard = *board;
+            }
+        }
     }
 
     /// Groups the shapes with `ids` on the active layer (at least two) as
@@ -1001,9 +1069,11 @@ impl DocumentSession {
 
     /// Removes topics `ids` with their subtrees, the summaries of what is
     /// removed, and relationship lines to any of them, as one undo step.
-    /// Other shapes among `ids` are removed too.
+    /// Other shapes among `ids` are removed too, artboards with their
+    /// members.
     pub fn delete_with_branches(&mut self, ids: &[Uuid]) -> Vec<Shape> {
-        let mut gone = crate::mindmap::with_descendants(self.page(), ids);
+        let ids = self.with_members(ids);
+        let mut gone = crate::mindmap::with_descendants(self.page(), &ids);
         for s in self.page().layers.iter().flat_map(|l| &l.objects) {
             if let Some(l) = s.line.as_ref().filter(|l| l.relationship) {
                 if [l.start, l.end]
@@ -2583,5 +2653,150 @@ mod tests {
         s.set_topic_equation(c, Some("x".into()));
         s.set_topic_equation(c, None);
         assert_eq!(topic(&s, c).equation, None);
+    }
+
+    /// A new artboard at `(x, y)`, `w × h`.
+    fn board(x: f32, y: f32, w: f32, h: f32) -> Shape {
+        Shape::new_artboard(
+            Frame {
+                x,
+                y,
+                w,
+                h,
+                ..Frame::default()
+            },
+            "Board",
+        )
+    }
+
+    /// A session holding artboard `a` (0, 0, 100 × 100), its members `m1`
+    /// (one outside its frame) and `m2`, and a non-member `n` over it.
+    fn artboard_session() -> (tempfile::TempDir, DocumentSession, [Uuid; 4]) {
+        let (d, mut s) = new_session("a.mindweave");
+        let a = board(0.0, 0.0, 100.0, 100.0);
+        let (mut m1, mut m2, n) = (rect(150.0), rect(20.0), rect(40.0));
+        m1.artboard = Some(a.id);
+        m2.artboard = Some(a.id);
+        let ids = [a.id, m1.id, m2.id, n.id];
+        s.add_shapes(vec![a, m1, m2, n]);
+        (d, s, ids)
+    }
+
+    fn pos(s: &DocumentSession, id: Uuid) -> (f32, f32) {
+        let f = s.find_shape(id).unwrap().frame;
+        (f.x, f.y)
+    }
+
+    #[test]
+    fn artboard_move_carries_members_once() {
+        let (_d, mut s, [a, m1, m2, n]) = artboard_session();
+        // The artboard and one of its members selected: each moves once.
+        s.move_shapes(&[a, m2], 10.0, 5.0);
+        assert_eq!(pos(&s, a), (10.0, 5.0));
+        assert_eq!(pos(&s, m1), (160.0, 5.0));
+        assert_eq!(pos(&s, m2), (30.0, 5.0));
+        assert_eq!(pos(&s, n), (40.0, 0.0));
+        // Membership is unchanged, even for the member outside the frame.
+        assert_eq!(s.find_shape(m1).unwrap().artboard, Some(a));
+        assert_eq!(s.find_shape(n).unwrap().artboard, None);
+        // A member moved alone leaves its artboard where it is.
+        s.move_shapes(&[m2], 1.0, 0.0);
+        assert_eq!((pos(&s, a), pos(&s, m2)), ((10.0, 5.0), (31.0, 5.0)));
+    }
+
+    #[test]
+    fn undo_restores_artboard_and_members() {
+        let (_d, mut s, [a, m1, m2, n]) = artboard_session();
+        s.move_shapes(&[a], 10.0, 5.0);
+        assert!(s.undo());
+        assert_eq!(pos(&s, a), (0.0, 0.0));
+        assert_eq!(pos(&s, m1), (150.0, 0.0));
+        assert_eq!(pos(&s, m2), (20.0, 0.0));
+        assert_eq!(pos(&s, n), (40.0, 0.0));
+        assert!(s.redo());
+        assert_eq!((pos(&s, a), pos(&s, m1)), ((10.0, 5.0), (160.0, 5.0)));
+    }
+
+    #[test]
+    fn deleting_artboard_spares_non_members() {
+        let (_d, mut s, [a, m1, m2, n]) = artboard_session();
+        // A member mind map goes too.
+        let c = s.add_central_topic((50.0, 50.0));
+        let sub = s.add_subtopic(c).unwrap();
+        s.update_shapes(&[c, sub], |sh| sh.artboard = Some(a));
+        let removed = s.delete_with_branches(&[a]);
+        assert_eq!(removed.len(), 5);
+        let left: Vec<Uuid> = s.shapes_on_active_layer().iter().map(|x| x.id).collect();
+        assert_eq!(left, vec![n]);
+        // One undo step brings them all back.
+        s.undo();
+        for id in [a, m1, m2, c, sub] {
+            assert!(s.find_shape(id).is_some());
+        }
+        // Plain removal takes the members too.
+        assert_eq!(s.remove_shapes(&[a]).len(), 5);
+        assert!(s.find_shape(n).is_some());
+    }
+
+    #[test]
+    fn creating_artboard_captures_nothing() {
+        let (_d, mut s) = new_session("c.mindweave");
+        let r = rect(20.0);
+        let rid = r.id;
+        s.add_shapes(vec![r]);
+        let a = board(0.0, 0.0, 100.0, 100.0);
+        let aid = a.id;
+        s.add_shapes(vec![a]);
+        s.assign_membership(&[aid]);
+        s.move_shapes(&[aid], 5.0, 5.0);
+        s.assign_membership(&[aid]);
+        assert_eq!(s.find_shape(rid).unwrap().artboard, None);
+        assert_eq!(s.find_shape(aid).unwrap().artboard, None);
+        // Moving the shape itself lets it join.
+        s.move_shapes(&[rid], 1.0, 20.0);
+        s.assign_membership(&[rid]);
+        assert_eq!(s.find_shape(rid).unwrap().artboard, Some(aid));
+    }
+
+    #[test]
+    fn membership_rides_in_the_step_of_the_move() {
+        let (_d, mut s) = new_session("m.mindweave");
+        let a = board(0.0, 0.0, 100.0, 100.0);
+        let r = rect(500.0);
+        let (aid, rid) = (a.id, r.id);
+        s.add_shapes(vec![a, r]);
+        s.move_shapes(&[rid], -450.0, 10.0);
+        s.assign_membership(&[rid]);
+        assert_eq!(s.find_shape(rid).unwrap().artboard, Some(aid));
+        assert!(s.is_dirty());
+        // One undo puts back both the position and the membership.
+        s.undo();
+        assert_eq!(pos(&s, rid), (500.0, 0.0));
+        assert_eq!(s.find_shape(rid).unwrap().artboard, None);
+        // Inside a gesture it joins the gesture's step.
+        s.begin_gesture();
+        s.move_shapes(&[rid], -450.0, 10.0);
+        s.assign_membership(&[rid]);
+        s.end_gesture();
+        s.undo();
+        assert_eq!(s.find_shape(rid).unwrap().artboard, None);
+        assert_eq!(pos(&s, rid), (500.0, 0.0));
+    }
+
+    #[test]
+    fn pasted_member_of_a_missing_artboard_is_released() {
+        let (_d, mut s, [a, m1, _, _]) = artboard_session();
+        let member = s.find_shape(m1).unwrap().clone();
+        // Duplicated beside its artboard, the copy stays a member.
+        let copy = crate::clipboard::duplicate(std::slice::from_ref(&member));
+        let copy_id = copy[0].id;
+        s.add_shapes(copy);
+        assert_eq!(s.find_shape(copy_id).unwrap().artboard, Some(a));
+        // On a layer without that artboard it belongs to none.
+        s.add_layer();
+        let copy = crate::clipboard::duplicate(&[member]);
+        let copy_id = copy[0].id;
+        s.add_shapes(copy);
+        assert_eq!(s.find_shape(copy_id).unwrap().artboard, None);
     }
 }

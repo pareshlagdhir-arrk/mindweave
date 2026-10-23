@@ -14,8 +14,8 @@ use mindweave_core::line::target_of;
 use mindweave_core::{
     bend_through, clamp_topic_picture, drag_create, handle_positions, line_frame, line_midpoint,
     marquee_selects, resize_with_text_boxes, rotate, rotate_handle_position, route_line,
-    selection_bounds, translate, unit_members, whole_units_only, DocumentSession, Handle,
-    LibraryRegistry, LineEnd, Shape, ShapeDef, ShapeSource, CLICK_DRAG_THRESHOLD,
+    selection_bounds, translate, unit_members, whole_units_only, with_members, DocumentSession,
+    Handle, LibraryRegistry, LineEnd, Shape, ShapeDef, ShapeSource, CLICK_DRAG_THRESHOLD,
 };
 use uuid::Uuid;
 
@@ -756,7 +756,7 @@ impl EditorWindow {
                 self.press.on_click = on_click;
                 Gesture::Moving {
                     start: at,
-                    originals: self.selected_frames(),
+                    originals: self.moved_frames(),
                 }
             }
             PressKind::Resize(handle) => {
@@ -1003,7 +1003,7 @@ impl EditorWindow {
         self.detach_moved_lines(cx);
         let moved = Gesture::Moving {
             start: (0., 0.),
-            originals: self.selected_frames(),
+            originals: self.moved_frames(),
         };
         if let Some(frames) = transformed(&moved, (dx, dy), false, false) {
             self.apply_frames(frames, cx);
@@ -1142,6 +1142,18 @@ impl EditorWindow {
         let ids: HashSet<Uuid> = self.selection.iter().copied().collect();
         self.session
             .shapes_on_active_layer()
+            .iter()
+            .filter(|s| ids.contains(&s.id))
+            .map(|s| (s.id, s.frame))
+            .collect()
+    }
+
+    /// What moving the selection moves, with its frames: the selected
+    /// shapes and the members of selected artboards, each once.
+    pub(super) fn moved_frames(&self) -> Originals {
+        let shapes = self.session.shapes_on_active_layer();
+        let ids: HashSet<Uuid> = with_members(shapes, &self.selection).into_iter().collect();
+        shapes
             .iter()
             .filter(|s| ids.contains(&s.id))
             .map(|s| (s.id, s.frame))

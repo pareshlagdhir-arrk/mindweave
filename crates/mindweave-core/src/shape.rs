@@ -7,12 +7,16 @@
 //! [`TEXT_LIBRARY`] and shape [`TEXT_SHAPE`]: their text is the `label`
 //! and their `frame.h` (and `frame.w` while `auto_width`) is derived from
 //! the text layout.
+//!
+//! Artboards are shapes of [`TEXT_LIBRARY`] too (see [`crate::artboard`]);
+//! every other shape records the artboard it belongs to.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::artboard::{ArtboardProps, ARTBOARD_FILL, ARTBOARD_SHAPE};
 use crate::color::normalize_style_color;
 use crate::color::AUTO_COLOR;
 use crate::geometry::{Frame, Pt};
@@ -163,6 +167,13 @@ pub struct Shape {
     /// Set on mind map boundaries only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boundary: Option<BoundaryProps>,
+    /// Set on artboards only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artboard_props: Option<ArtboardProps>,
+    /// The artboard the shape belongs to; `None` on the open canvas, and
+    /// always on artboards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artboard: Option<Uuid>,
     /// Fields this version does not know, written back unchanged.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -198,6 +209,8 @@ impl Shape {
             groups: Vec::new(),
             topic: None,
             boundary: None,
+            artboard_props: None,
+            artboard: None,
             extra: serde_json::Map::new(),
         }
         .normalized()
@@ -243,6 +256,8 @@ impl Shape {
             groups: Vec::new(),
             topic: None,
             boundary: None,
+            artboard_props: None,
+            artboard: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -309,6 +324,28 @@ impl Shape {
     /// Whether this is a mind map boundary.
     pub fn is_boundary(&self) -> bool {
         self.library == TEXT_LIBRARY && self.shape == BOUNDARY_SHAPE
+    }
+
+    /// A new artboard named `name` in `frame` (unrotated): white, with no
+    /// outline, clipping its members.
+    pub fn new_artboard(frame: Frame, name: &str) -> Shape {
+        let mut s = Shape::new_text_box((frame.x, frame.y));
+        s.shape = ARTBOARD_SHAPE.to_string();
+        s.frame = frame;
+        s.label = None;
+        s.text_box = None;
+        s.name = Some(name.to_string());
+        s.style = Style {
+            fill: Some(ARTBOARD_FILL.to_string()),
+            ..Style::default()
+        };
+        s.artboard_props = Some(ArtboardProps::default());
+        s.normalized()
+    }
+
+    /// Whether this is an artboard.
+    pub fn is_artboard(&self) -> bool {
+        self.library == TEXT_LIBRARY && self.shape == ARTBOARD_SHAPE
     }
 
     /// The pictures the shape shows: an image's, a topic's.
@@ -446,6 +483,16 @@ impl Shape {
             self.label = None;
         } else {
             self.boundary = None;
+        }
+        if self.is_artboard() {
+            self.artboard_props
+                .get_or_insert_with(ArtboardProps::default);
+            // Artboards are upright, unmirrored and never nested.
+            let f = &mut self.frame;
+            (f.rotation, f.flip_x, f.flip_y) = (0.0, false, false);
+            self.artboard = None;
+        } else {
+            self.artboard_props = None;
         }
         if self.is_image() {
             // Pictures are drawn upright and unmirrored.

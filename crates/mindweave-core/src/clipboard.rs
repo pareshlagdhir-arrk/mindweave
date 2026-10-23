@@ -1,12 +1,12 @@
 //! Clipboard payloads for shapes, plain-text paste, and duplicating shapes.
 //!
 //! Shapes (with their labels, and text boxes) are copied as JSON text:
-//! `{"mindweave":"shapes","version":4,"shapes":[...],"images":{...}}`,
+//! `{"mindweave":"shapes","version":5,"shapes":[...],"images":{...}}`,
 //! each picture stored once in `images` (see [`crate::image`]). Version 1
-//! payloads (shapes without text), 2 (without images) and 3 (without
-//! notes, equations, lists and links) are still read. Clipboard text comes
-//! from any application, so reading it never panics and rejects anything
-//! that is not such a payload.
+//! payloads (shapes without text), 2 (without images), 3 (without
+//! notes, equations, lists and links) and 4 (without artboards) are still
+//! read. Clipboard text comes from any application, so reading it never
+//! panics and rejects anything that is not such a payload.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -23,8 +23,9 @@ use crate::transform::{selection_bounds, DUPLICATE_OFFSET};
 pub const CLIPBOARD_MARKER: &str = "shapes";
 /// Payload version this build writes; it reads this and every older one.
 /// Version 4 added topic notes and equations, and lists and links in
-/// text, which older builds would silently drop.
-pub const CLIPBOARD_VERSION: u64 = 4;
+/// text, which older builds would silently drop; version 5 added
+/// artboards and membership.
+pub const CLIPBOARD_VERSION: u64 = 5;
 /// Oldest payload version this build reads.
 const OLDEST_CLIPBOARD_VERSION: u64 = 1;
 /// Most characters (graphemes) of plain text pasted into a new text box.
@@ -177,13 +178,16 @@ pub fn prepare_paste(mut shapes: Vec<Shape>, view: &Rect) -> Vec<Shape> {
 
 /// Gives `shapes` fresh ids, and their groups too, so copies form groups
 /// of their own. Line ends attached to one of `shapes` follow it to its
-/// new id; ends attached to anything else are let go.
+/// new id; ends attached to anything else are let go. Members of a copied
+/// artboard belong to its copy; others keep their artboard (see
+/// [`crate::session::DocumentSession::add_shapes`] for one that is missing).
 fn renew_ids(shapes: &mut [Shape]) {
     let ids: std::collections::HashMap<Uuid, Uuid> =
         shapes.iter().map(|s| (s.id, Uuid::new_v4())).collect();
     let mut groups: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
     for s in shapes.iter_mut() {
         s.id = ids[&s.id];
+        s.artboard = s.artboard.map(|a| ids.get(&a).copied().unwrap_or(a));
         for g in &mut s.groups {
             *g = *groups.entry(*g).or_insert_with(Uuid::new_v4);
         }
@@ -288,13 +292,13 @@ mod tests {
         let current = to_clipboard(&[Shape::new_text_box((0., 0.))]);
         assert!(is_mindweave_payload(&current));
         assert!(!is_newer_payload(&current));
-        let newer = current.replace("\"version\":4", "\"version\":99");
+        let newer = current.replace("\"version\":5", "\"version\":99");
         assert!(from_clipboard(&newer).is_none());
         assert!(is_mindweave_payload(&newer));
         assert!(is_newer_payload(&newer));
         // Too large to read: still a payload, not known to be newer.
         let big = format!(
-            "{{\"mindweave\":\"shapes\",\"version\":4,\"pad\":\"{}\"}}",
+            "{{\"mindweave\":\"shapes\",\"version\":5,\"pad\":\"{}\"}}",
             "x".repeat(MAX_CLIPBOARD_BYTES)
         );
         assert!(from_clipboard(&big).is_none());
@@ -337,7 +341,7 @@ mod tests {
         let text = to_clipboard(&shapes);
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["mindweave"], "shapes");
-        assert_eq!(v["version"], 4);
+        assert_eq!(v["version"], 5);
         assert_eq!(v["shapes"].as_array().unwrap().len(), 2);
         assert_eq!(from_clipboard(&text), Some(shapes));
         assert_eq!(from_clipboard(&to_clipboard(&[])), Some(vec![]));
@@ -347,9 +351,9 @@ mod tests {
     fn from_clipboard_rejects_foreign_text() {
         let good = to_clipboard(&[shape(0.0, 0.0, 10.0, 10.0)]);
         let truncated = &good[..good.len() / 2];
-        let version_5 = good.replace("\"version\":4", "\"version\":5");
-        assert_ne!(version_5, good);
-        let version_0 = good.replace("\"version\":4", "\"version\":0");
+        let version_6 = good.replace("\"version\":5", "\"version\":6");
+        assert_ne!(version_6, good);
+        let version_0 = good.replace("\"version\":5", "\"version\":0");
         let other_marker = good.replace("\"mindweave\":\"shapes\"", "\"mindweave\":\"pages\"");
         assert_ne!(other_marker, good);
         for text in [
@@ -363,7 +367,7 @@ mod tests {
             r#"{"mindweave":"shapes","version":"1","shapes":[]}"#,
             r#"{"mindweave":"shapes","version":1,"shapes":[{"id":"nope"}]}"#,
             truncated,
-            &version_5,
+            &version_6,
             &version_0,
             &other_marker,
         ] {
@@ -392,7 +396,7 @@ mod tests {
         tb.text_box.as_mut().unwrap().auto_width = false;
         let shapes = vec![a, tb];
         let payload = to_clipboard(&shapes);
-        assert!(payload.starts_with(r#"{"mindweave":"shapes","version":4,"#));
+        assert!(payload.starts_with(r#"{"mindweave":"shapes","version":5,"#));
         let back = from_clipboard(&payload).unwrap();
         assert_eq!(back, shapes);
         assert!(back.iter().all(|s| s.extra.is_empty()));
@@ -458,7 +462,7 @@ mod tests {
         let good = to_clipboard(&[shape(0.0, 0.0, 10.0, 10.0)]);
         assert!(from_clipboard(&format!("\n  {good}  \n")).is_some());
         let reordered = good.replacen(
-            r#"{"mindweave":"shapes","version":4,"#,
+            r#"{"mindweave":"shapes","version":5,"#,
             r#"{"version":2,"mindweave":"shapes","#,
             1,
         );
@@ -540,6 +544,39 @@ mod tests {
         a.locked = true;
         let pasted = prepare_paste(vec![a], &view());
         assert!(!pasted[0].locked);
+    }
+
+    #[test]
+    fn pasted_artboard_keeps_its_members() {
+        let board = Shape::new_artboard(
+            Frame {
+                w: 100.0,
+                h: 100.0,
+                ..Frame::default()
+            },
+            "Board",
+        );
+        // One member lies outside the frame: membership is kept, not
+        // recomputed.
+        let (mut inside, mut outside) = (shape(10., 10., 10., 10.), shape(300., 10., 10., 10.));
+        inside.artboard = Some(board.id);
+        outside.artboard = Some(board.id);
+        let originals = vec![board.clone(), inside, outside];
+        let text = to_clipboard(&originals);
+        for copies in [
+            prepare_paste(from_clipboard(&text).unwrap(), &view()),
+            duplicate(&originals),
+        ] {
+            assert!(copies[0].is_artboard());
+            assert_ne!(copies[0].id, board.id);
+            assert_eq!(copies[0].name.as_deref(), Some("Board"));
+            assert_eq!(copies[1].artboard, Some(copies[0].id));
+            assert_eq!(copies[2].artboard, Some(copies[0].id));
+        }
+        // A member copied without its artboard keeps the old one here;
+        // the session lets it go where that artboard is missing.
+        let lone = duplicate(&originals[1..2]);
+        assert_eq!(lone[0].artboard, Some(board.id));
     }
 
     #[test]

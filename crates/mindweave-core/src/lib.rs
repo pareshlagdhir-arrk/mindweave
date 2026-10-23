@@ -1,6 +1,7 @@
 //! Mindweave core: pure-Rust document model and file format.
 
 pub mod arrange;
+pub mod artboard;
 pub mod clipboard;
 pub mod color;
 pub mod document;
@@ -23,6 +24,10 @@ pub mod transform;
 pub mod viewport;
 
 pub use arrange::{expand_to_units, unit_members, unit_of, whole_units_only, Arrange};
+pub use artboard::{
+    artboard_placement, membership, with_members, ArtboardPreset, ArtboardProps, PresetCategory,
+    ARTBOARD_FILL, ARTBOARD_GAP, ARTBOARD_PRESETS, ARTBOARD_SHAPE,
+};
 pub use clipboard::{
     duplicate, from_clipboard, is_mindweave_payload, is_newer_payload, plain_text_box,
     prepare_paste, to_clipboard, CLIPBOARD_MARKER, CLIPBOARD_VERSION, MAX_CLIPBOARD_BYTES,

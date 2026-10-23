@@ -40,8 +40,8 @@ use crate::actions::*;
 pub const TEXT_PAYLOAD_MARKER: &str = "text";
 /// Rich-text payload version this build writes; it reads this and every
 /// older one. Version 2 added lists and links, which older builds would
-/// silently drop.
-pub const TEXT_PAYLOAD_VERSION: u64 = 2;
+/// silently drop; version 3 goes with the artboards format.
+pub const TEXT_PAYLOAD_VERSION: u64 = 3;
 /// How long the caret stays on, then off.
 const CARET_BLINK: Duration = Duration::from_millis(500);
 /// Width of the painted caret, in pixels.
@@ -167,7 +167,7 @@ pub fn byte_to_utf16(text: &str, n: usize) -> usize {
 }
 
 /// `text` as a rich-text clipboard payload:
-/// `{"mindweave":"text","version":2,"text":{...}}`.
+/// `{"mindweave":"text","version":3,"text":{...}}`.
 pub fn text_payload(text: &RichText) -> String {
     json!({
         "mindweave": TEXT_PAYLOAD_MARKER,
@@ -2251,7 +2251,7 @@ mod tests {
         assert_eq!(plain_text, "n bold\nn");
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["mindweave"], "text");
-        assert_eq!(value["version"], 2);
+        assert_eq!(value["version"], 3);
         let rich = parse_text_payload(&payload).unwrap();
         assert_eq!(rich, text.slice(4..14));
 
@@ -2275,11 +2275,15 @@ mod tests {
             parse_text_payload(r#"{"mindweave":"shapes","version":2,"shapes":[]}"#),
             None
         );
-        let future = payload.replace("\"version\":2", "\"version\":3");
+        let future = payload.replace("\"version\":3", "\"version\":4");
+        assert_ne!(future, payload);
         assert_eq!(parse_text_payload(&future), None);
-        // A payload from before lists and links still pastes.
-        let older = payload.replace("\"version\":2", "\"version\":1");
-        assert_eq!(parse_text_payload(&older).as_ref(), Some(&rich));
+        // Payloads from before artboards, and before lists and links,
+        // still paste.
+        for v in ["\"version\":2", "\"version\":1"] {
+            let older = payload.replace("\"version\":3", v);
+            assert_eq!(parse_text_payload(&older).as_ref(), Some(&rich));
+        }
         // A selection replaced by a paste, styles kept.
         let mut t = plain("abc");
         t.apply(0..3, &StyleChange::Italic(true));
@@ -2339,7 +2343,7 @@ mod tests {
         assert_eq!(pasted(None, None), None);
         // Shapes this build cannot read are never pasted as their JSON:
         // from a newer Mindweave (refused with a notice), or too large.
-        let newer = shapes.replace("\"version\":4", "\"version\":99");
+        let newer = shapes.replace("\"version\":5", "\"version\":99");
         assert_ne!(newer, shapes);
         assert_eq!(pasted(None, Some(&newer)), Some(Pasted::Newer));
         let big = format!(

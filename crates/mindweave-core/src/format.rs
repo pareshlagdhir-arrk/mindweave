@@ -1,7 +1,8 @@
 //! `.mindweave` file format: pretty-printed JSON with a top-level
 //! `version`. Version 4 adds `images`: each picture the document shows,
 //! stored once by id (see [`crate::image`]). Version 5 adds topic notes,
-//! equations, list items and links.
+//! equations, list items and links. Version 6 adds artboards and the
+//! artboard each shape belongs to (see [`crate::artboard`]).
 
 use std::path::Path;
 
@@ -10,7 +11,7 @@ use thiserror::Error;
 use crate::document::Document;
 use crate::image::{collect_images, resolve_images, ImageStore};
 
-pub const FORMAT_VERSION: u32 = 5;
+pub const FORMAT_VERSION: u32 = 6;
 /// Top-level key of the stored pictures.
 const IMAGES_KEY: &str = "images";
 
@@ -93,7 +94,7 @@ mod tests {
     #[test]
     fn new_document_has_one_page_one_layer() {
         let d = Document::new();
-        assert_eq!(d.version, 5);
+        assert_eq!(d.version, 6);
         assert_eq!(d.pages.len(), 1);
         assert_eq!(d.pages[0].name, "Page 1");
         assert_eq!(d.pages[0].layers[0].name, "Layer 1");
@@ -156,17 +157,17 @@ mod tests {
         let s = fs::read_to_string(&path).unwrap();
         assert!(s.contains("\n  "));
         assert!(s.contains("\"pattern\": \"dots\""));
-        assert!(s.contains("\"version\": 5"));
+        assert!(s.contains("\"version\": 6"));
     }
 
     #[test]
     fn load_rejects_newer_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.mindweave");
-        fs::write(&path, r#"{"version":6,"pages":[],"active_page":0}"#).unwrap();
+        fs::write(&path, r#"{"version":7,"pages":[],"active_page":0}"#).unwrap();
         assert!(matches!(
             load(&path),
-            Err(FormatError::UnsupportedVersion(6))
+            Err(FormatError::UnsupportedVersion(7))
         ));
     }
 
@@ -328,9 +329,9 @@ mod tests {
         v["pages"][0]["layers"][0]["objects"] = serde_json::json!([]);
         fs::write(&a, v.to_string()).unwrap();
         let d = load(&a).unwrap();
-        assert_eq!(d.version, 5);
+        assert_eq!(d.version, 6);
         save(&d, &b).unwrap();
-        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 5"));
+        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 6"));
     }
 
     #[test]
@@ -345,7 +346,7 @@ mod tests {
         // A version 2 file (no labels or text boxes) loads unchanged.
         fs::write(&a, SHAPE_DOC).unwrap();
         let mut d = load(&a).unwrap();
-        assert_eq!(d.version, 5);
+        assert_eq!(d.version, 6);
         let objects = &mut d.pages[0].layers[0].objects;
         assert_eq!(objects[0].label, None);
         assert_eq!(objects[0].text_box, None);
@@ -371,7 +372,7 @@ mod tests {
 
         save(&d, &b).unwrap();
         let saved = fs::read_to_string(&b).unwrap();
-        assert!(saved.contains("\"version\": 5"));
+        assert!(saved.contains("\"version\": 6"));
         let back = load(&b).unwrap();
         assert_eq!(back, d);
         let shapes = &back.pages[0].layers[0].objects;
@@ -420,7 +421,7 @@ mod tests {
         save(&d, &path).unwrap();
         assert!(fs::read_to_string(&path)
             .unwrap()
-            .contains("\"version\": 5"));
+            .contains("\"version\": 6"));
         assert_eq!(load(&path).unwrap(), d);
     }
 
@@ -438,6 +439,60 @@ mod tests {
         let topic = d.pages[0].layers[0].objects[0].topic.as_ref().unwrap();
         assert_eq!((topic.note.as_ref(), topic.equation.as_ref()), (None, None));
         save(&d, &b).unwrap();
-        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 5"));
+        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 6"));
+    }
+
+    #[test]
+    fn v5_files_load_and_save_as_v6() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (
+            dir.path().join("a.mindweave"),
+            dir.path().join("b.mindweave"),
+        );
+        let mut v = serde_json::to_value(doc_with_topic()).unwrap();
+        v["version"] = 5.into();
+        fs::write(&a, v.to_string()).unwrap();
+        let d = load(&a).unwrap();
+        assert_eq!(d.version, 6);
+        let shape = &d.pages[0].layers[0].objects[0];
+        assert_eq!(
+            (shape.artboard, shape.artboard_props.as_ref()),
+            (None, None)
+        );
+        save(&d, &b).unwrap();
+        let saved = fs::read_to_string(&b).unwrap();
+        assert!(saved.contains("\"version\": 6"));
+        assert!(!saved.contains("artboard"));
+    }
+
+    #[test]
+    fn artboard_round_trips() {
+        use crate::artboard::ArtboardProps;
+        use crate::shape::Shape;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mindweave");
+        let mut d = doc_with_topic();
+        let mut board = Shape::new_artboard(
+            crate::geometry::Frame {
+                x: -10.0,
+                y: 20.0,
+                w: 393.0,
+                h: 852.0,
+                ..Default::default()
+            },
+            "iPhone 16",
+        );
+        board.artboard_props = Some(ArtboardProps { clip: false });
+        let objects = &mut d.pages[0].layers[0].objects;
+        objects[0].artboard = Some(board.id);
+        objects.insert(0, board.clone());
+        save(&d, &path).unwrap();
+        let back = load(&path).unwrap();
+        assert_eq!(back, d);
+        let shapes = &back.pages[0].layers[0].objects;
+        assert!(shapes[0].is_artboard());
+        assert_eq!(shapes[0].name.as_deref(), Some("iPhone 16"));
+        assert_eq!(shapes[1].artboard, Some(board.id));
+        assert!(shapes.iter().all(|s| s.extra.is_empty()));
     }
 }
