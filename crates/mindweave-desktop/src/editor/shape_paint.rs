@@ -33,6 +33,12 @@ const MIN_STROKE_PX: f32 = 0.5;
 pub const HANDLE_SIZE_PX: f32 = 6.;
 /// Fill opacity of the marquee, times the accent colour.
 const MARQUEE_FILL_OPACITY: f32 = 0.08;
+/// Size of an artboard's name, in pixels at every zoom.
+const NAME_TEXT_SIZE: f32 = 11.;
+/// Height of an artboard's name label, in pixels.
+const NAME_HEIGHT_PX: f32 = 16.;
+/// Gap between an artboard's name label and its top edge, in pixels.
+const NAME_GAP_PX: f32 = 4.;
 
 /// A shape's outline in canvas coordinates.
 #[derive(Clone, Debug, PartialEq)]
@@ -71,6 +77,9 @@ pub fn shape_geometry_with(shape: &Shape, libs: &LibraryRegistry, jumps: &[f32])
                 (k == "corner_radius").then_some(12.)
             })
         };
+        (g, false)
+    } else if shape.is_artboard() {
+        let g = primitive_geometry(Primitive::Rect, f.w, f.h, &|k| shape.param(k));
         (g, false)
     } else if let Some(t) = &shape.topic {
         let radius = if t.is_central() { 12. } else { 6. };
@@ -302,6 +311,44 @@ pub fn overlaps_canvas(r: &Rect, extent: (f32, f32)) -> bool {
     r.x <= extent.0 && r.y <= extent.1 && r.x + r.w >= 0. && r.y + r.h >= 0.
 }
 
+/// Where an artboard's name is shown, its frame being `frame_on_screen`
+/// and its name `text_width` pixels wide: left-aligned, [`NAME_GAP_PX`]
+/// above the top edge, [`NAME_HEIGHT_PX`] high, the same at every zoom.
+pub(super) fn name_label_rect(frame_on_screen: Rect, text_width: f32) -> Rect {
+    Rect {
+        x: frame_on_screen.x,
+        y: frame_on_screen.y - NAME_GAP_PX - NAME_HEIGHT_PX,
+        w: text_width,
+        h: NAME_HEIGHT_PX,
+    }
+}
+
+/// The part of the canvas (of size `extent`, relative to its origin) each
+/// clipping artboard among `objects` shows its members in, by artboard
+/// id; empty for an artboard off the canvas.
+pub(super) fn artboard_clips(
+    objects: &[Shape],
+    vp: &Viewport,
+    extent: (f32, f32),
+) -> HashMap<Uuid, Rect> {
+    objects
+        .iter()
+        .filter(|s| s.artboard_props.as_ref().is_some_and(|p| p.clip) && s.is_artboard())
+        .map(|s| {
+            let r = screen_rect(&frame_aabb(&s.frame), vp, 0.);
+            let (x0, y0) = (r.x.max(0.), r.y.max(0.));
+            let (x1, y1) = ((r.x + r.w).min(extent.0), (r.y + r.h).min(extent.1));
+            let clip = Rect {
+                x: x0,
+                y: y0,
+                w: (x1 - x0).max(0.),
+                h: (y1 - y0).max(0.),
+            };
+            (s.id, clip)
+        })
+        .collect()
+}
+
 /// The text shown in a placeholder: the shape's name, else
 /// `library/shape`.
 pub fn placeholder_label(shape: &Shape) -> String {
@@ -367,86 +414,159 @@ pub fn paint_shapes(
         paint_map_decor(window, page, &painter);
         // Layers are stored top first.
         for layer in page.layers.iter().rev().filter(|l| l.visible) {
-            for shape in &layer.objects {
-                let entry = cache.entry(shape, libs);
-                let visible = painter.visible(&shape.style, &entry.outline);
-                if visible {
-                    if let Some(data) = shape.image.as_ref().filter(|_| shape.is_image()) {
-                        let r = screen_rect(&frame_aabb(&shape.frame), vp, 0.);
-                        let shown = r.w.max(r.h) * window.scale_factor();
-                        if let Some(image) = images.get(data, shown, cx) {
-                            let at = Bounds::new(
-                                bounds.origin + point(px(r.x), px(r.y)),
-                                size_of(r.w, r.h),
-                            );
-                            // A picture as dark (or light) as the canvas, with
-                            // no fill of its own, sits on a contrasting plate.
-                            let plate = shape
-                                .style
-                                .fill
-                                .is_none()
-                                .then(|| images.luminance(data, cx))
-                                .flatten()
-                                .and_then(|l| contrast_plate(l, hsla_luminance(auto.fill)));
-                            if let Some(color) = plate {
-                                let radius = (r.w.min(r.h) * 0.12).min(8. * vp.zoom);
-                                window.paint_quad(
-                                    fill(at, color.opacity(shape.style.opacity))
-                                        .corner_radii(px(radius)),
+            let clips = artboard_clips(&layer.objects, vp, painter.extent());
+            // A layer's artboards lie beneath its other shapes.
+            let artboards = layer.objects.iter().filter(|s| s.is_artboard());
+            let others = layer.objects.iter().filter(|s| !s.is_artboard());
+            for shape in artboards.chain(others) {
+                // Members of a clipping artboard show inside it only; none
+                // of a member shows while its artboard is off the canvas.
+                let clip_rect = shape.artboard.and_then(|a| clips.get(&a));
+                let clipped_away = clip_rect.is_some_and(|r| r.w <= 0. || r.h <= 0.);
+                let clip = clip_rect.map(|r| ContentMask {
+                    bounds: Bounds::new(bounds.origin + point(px(r.x), px(r.y)), size_of(r.w, r.h)),
+                });
+                window.with_content_mask(clip, |window| {
+                    let entry = cache.entry(shape, libs);
+                    let visible = !clipped_away && painter.visible(&shape.style, &entry.outline);
+                    if visible {
+                        if let Some(data) = shape.image.as_ref().filter(|_| shape.is_image()) {
+                            let r = screen_rect(&frame_aabb(&shape.frame), vp, 0.);
+                            let shown = r.w.max(r.h) * window.scale_factor();
+                            if let Some(image) = images.get(data, shown, cx) {
+                                let at = Bounds::new(
+                                    bounds.origin + point(px(r.x), px(r.y)),
+                                    size_of(r.w, r.h),
                                 );
+                                // A picture as dark (or light) as the canvas, with
+                                // no fill of its own, sits on a contrasting plate.
+                                let plate = shape
+                                    .style
+                                    .fill
+                                    .is_none()
+                                    .then(|| images.luminance(data, cx))
+                                    .flatten()
+                                    .and_then(|l| contrast_plate(l, hsla_luminance(auto.fill)));
+                                if let Some(color) = plate {
+                                    let radius = (r.w.min(r.h) * 0.12).min(8. * vp.zoom);
+                                    window.paint_quad(
+                                        fill(at, color.opacity(shape.style.opacity))
+                                            .corner_radii(px(radius)),
+                                    );
+                                }
+                                window
+                                    .paint_image(bounds, at, Corners::default(), image, 0, false)
+                                    .ok();
                             }
-                            window
-                                .paint_image(bounds, at, Corners::default(), image, 0, false)
-                                .ok();
+                        }
+                        let stale = entry.tessellation.as_ref().is_none_or(|t| {
+                            t.zoom != vp.zoom || t.style != shape.style || t.auto != auto
+                        });
+                        if stale {
+                            entry.tessellation = Some(Tessellation {
+                                zoom: vp.zoom,
+                                style: shape.style.clone(),
+                                auto,
+                                paths: if shape.is_boundary() {
+                                    boundary_paths(&painter, &shape.style, &entry.outline)
+                                } else {
+                                    painter.tessellate(&shape.style, &entry.outline)
+                                },
+                            });
+                        }
+                        if let Some(t) = &entry.tessellation {
+                            painter.paint_paths(&t.paths, window);
+                        }
+                        if shape.topic.is_some() {
+                            let extras = TopicExtras {
+                                images: &mut *images,
+                                equations: &mut *equations,
+                                auto,
+                                canvas: text.canvas,
+                            };
+                            paint_topic_extras(window, cx, bounds, vp, shape, extras);
+                        }
+                        if entry.outline.placeholder {
+                            painter.paint_label(shape, &entry.outline, window, cx);
+                        }
+                    } else {
+                        // Out of sight: its pictures stay decoded for when it
+                        // comes back.
+                        let topic_picture = shape.topic.as_ref().and_then(|t| t.picture.as_ref());
+                        for data in shape.image.iter().chain(topic_picture) {
+                            images.keep(data);
+                        }
+                        if let Some((latex, color, font_size)) = equation_key(shape, text.canvas) {
+                            equations.keep(latex, color, font_size);
                         }
                     }
-                    let stale = entry.tessellation.as_ref().is_none_or(|t| {
-                        t.zoom != vp.zoom || t.style != shape.style || t.auto != auto
-                    });
-                    if stale {
-                        entry.tessellation = Some(Tessellation {
-                            zoom: vp.zoom,
-                            style: shape.style.clone(),
-                            auto,
-                            paths: if shape.is_boundary() {
-                                boundary_paths(&painter, &shape.style, &entry.outline)
-                            } else {
-                                painter.tessellate(&shape.style, &entry.outline)
-                            },
-                        });
-                    }
-                    if let Some(t) = &entry.tessellation {
-                        painter.paint_paths(&t.paths, window);
-                    }
-                    if shape.topic.is_some() {
-                        let extras = TopicExtras {
-                            images: &mut *images,
-                            equations: &mut *equations,
-                            auto,
-                            canvas: text.canvas,
-                        };
-                        paint_topic_extras(window, cx, bounds, vp, shape, extras);
-                    }
-                    if entry.outline.placeholder {
-                        painter.paint_label(shape, &entry.outline, window, cx);
-                    }
-                } else {
-                    // Out of sight: its pictures stay decoded for when it
-                    // comes back.
-                    let topic_picture = shape.topic.as_ref().and_then(|t| t.picture.as_ref());
-                    for data in shape.image.iter().chain(topic_picture) {
-                        images.keep(data);
-                    }
-                    if let Some((latex, color, font_size)) = equation_key(shape, text.canvas) {
-                        equations.keep(latex, color, font_size);
-                    }
-                }
-                paint_shape_text(window, cx, bounds, vp, shape, visible, text);
+                    paint_shape_text(window, cx, bounds, vp, shape, visible, text);
+                });
             }
         }
     });
     cache.end_frame();
     images.end_frame(window);
+}
+
+/// Paints the names of the artboards on `page`'s visible layers above
+/// their top-left corners, at one size whatever the zoom: muted, or in
+/// the accent colour for those in `selection`. Painted after every shape, so no
+/// member covers a name.
+pub fn paint_artboard_names(
+    window: &mut Window,
+    cx: &mut App,
+    bounds: Bounds<Pixels>,
+    page: &Page,
+    vp: &Viewport,
+    selection: &[Uuid],
+) {
+    let (muted, accent) = (cx.theme().muted_foreground, cx.theme().primary);
+    let extent = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+    let font = window.text_style().font();
+    let size = px(NAME_TEXT_SIZE);
+    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        for shape in page
+            .layers
+            .iter()
+            .filter(|l| l.visible)
+            .flat_map(|l| &l.objects)
+            .filter(|s| s.is_artboard())
+        {
+            let Some(name) = shape.name.as_deref().filter(|n| !n.trim().is_empty()) else {
+                continue;
+            };
+            let on_screen = screen_rect(&frame_aabb(&shape.frame), vp, 0.);
+            // Cheap cull before shaping: the label starts at the frame's
+            // left edge and is never taller than its row.
+            let row = name_label_rect(on_screen, on_screen.w.max(1.));
+            if row.y + row.h < 0. || row.y > extent.1 || on_screen.x > extent.0 {
+                continue;
+            }
+            let color = if selection.contains(&shape.id) {
+                accent
+            } else {
+                muted
+            };
+            let text: SharedString = name.to_string().into();
+            let run = TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(text, size, &[run], None);
+            let r = name_label_rect(on_screen, f32::from(line.width));
+            if !overlaps_canvas(&r, extent) {
+                continue;
+            }
+            let origin = bounds.origin + point(px(r.x), px(r.y));
+            line.paint(origin, px(r.h), TextAlign::Left, None, window, cx)
+                .ok();
+        }
+    });
 }
 
 /// Paints the branch lines and summary brackets of `page`'s mind maps,
@@ -986,8 +1106,8 @@ fn push_built(builder: PathBuilder, color: Hsla, paths: &mut Vec<(Path<Pixels>, 
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        overlaps_canvas, placeholder_label, screen_rect, screen_stroke_width, shape_geometry,
-        GeometryCache,
+        artboard_clips, name_label_rect, overlaps_canvas, placeholder_label, screen_rect,
+        screen_stroke_width, shape_geometry, GeometryCache,
     };
     use mindweave_core::geometry::{Frame, Rect};
     use mindweave_core::{builtin_libraries, LibraryRegistry, LineDash, Shape, Viewport};
@@ -1135,5 +1255,79 @@ mod tests {
             cache.end_frame();
         }
         assert_eq!(cache.outline(&a, &libs).dash, LineDash::Dashed.pattern(3.));
+    }
+
+    #[test]
+    fn artboards_are_rounded_rectangles() {
+        let libs = registry();
+        let mut board = Shape::new_artboard(frame(10., 20., 300., 200.), "Desktop");
+        let square = shape_geometry(&board, &libs);
+        assert!(!square.placeholder);
+        assert_eq!(
+            square.aabb,
+            Rect {
+                x: 10.,
+                y: 20.,
+                w: 300.,
+                h: 200.
+            }
+        );
+        board.set_param("corner_radius", 12.);
+        let rounded = shape_geometry(&board, &libs);
+        assert_eq!(rounded.aabb, square.aabb);
+        assert_ne!(rounded.geometry, square.geometry);
+    }
+
+    #[test]
+    fn name_labels_sit_above_the_top_left_corner() {
+        let on_screen = Rect {
+            x: 100.,
+            y: 50.,
+            w: 300.,
+            h: 200.,
+        };
+        assert_eq!(
+            name_label_rect(on_screen, 42.),
+            Rect {
+                x: 100.,
+                y: 30.,
+                w: 42.,
+                h: 16.
+            }
+        );
+    }
+
+    #[test]
+    fn only_clipping_artboards_clip_to_their_visible_part() {
+        let libs = registry();
+        let vp = Viewport {
+            x: 0.,
+            y: 0.,
+            zoom: 2.,
+        };
+        let clipping = Shape::new_artboard(frame(-10., 10., 50., 20.), "A");
+        let mut open = Shape::new_artboard(frame(0., 0., 10., 10.), "B");
+        open.artboard_props.as_mut().unwrap().clip = false;
+        let away = Shape::new_artboard(frame(500., 0., 10., 10.), "C");
+        let mut member = rectangle(&libs, frame(0., 10., 5., 5.));
+        member.artboard = Some(clipping.id);
+        let shapes = [clipping.clone(), open.clone(), away.clone(), member.clone()];
+
+        let clips = artboard_clips(&shapes, &vp, (60., 50.));
+        assert_eq!(clips.len(), 2);
+        // On screen at (-20, 20) 100 × 40, cut to the 60 × 50 canvas.
+        assert_eq!(
+            clips[&clipping.id],
+            Rect {
+                x: 0.,
+                y: 20.,
+                w: 60.,
+                h: 30.
+            }
+        );
+        // Off the canvas: nothing of its members shows.
+        let gone = clips[&away.id];
+        assert!(gone.w <= 0. || gone.h <= 0.);
+        assert!(!clips.contains_key(&open.id));
     }
 }

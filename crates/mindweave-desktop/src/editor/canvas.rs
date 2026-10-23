@@ -19,8 +19,8 @@ use super::interaction::{
 };
 use super::shape_gallery;
 use super::shape_paint::{
-    paint_highlight, paint_line_ends, paint_marquee, paint_preview, paint_selection, paint_shapes,
-    AutoColors,
+    paint_artboard_names, paint_highlight, paint_line_ends, paint_marquee, paint_preview,
+    paint_selection, paint_shapes, AutoColors,
 };
 use super::text_paint::{
     auto_color, canvas_background, equation_color, link_color, text_background, text_box_wrap,
@@ -465,6 +465,7 @@ impl EditorWindow {
             &mut self.equation_cache,
             &mut text,
         );
+        paint_artboard_names(window, cx, bounds, page, &viewport, &self.selection);
         self.equation_cache.end_frame(window);
         self.paint_text_edit(bounds, window, cx);
         self.text_layouts.end_frame();
