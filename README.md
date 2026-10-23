@@ -202,7 +202,15 @@ Documents themselves are saved wherever you choose, as `.mindweave` files.
 
 ### AI agents
 
-AI agents can build and edit Mindweave documents (mind maps, diagrams and artboards) and look at the result as a picture through `mindweave-mcp`, a Model Context Protocol server that works with Claude Code, Claude Desktop, Codex, opencode, Cursor and other MCP clients. A short skill in [`skills/mindweave`](skills/mindweave/SKILL.md) explains the workflow to agents. See [docs/agents.md](docs/agents.md) for installation and client setup.
+AI agents can build and edit Mindweave documents (mind maps, diagrams and artboards) and look at the result as a picture through `mindweave-mcp`, a Model Context Protocol server that works with Claude Code, Claude Desktop, Codex, opencode, Cursor and other MCP clients. A short skill in [`skills/mindweave`](skills/mindweave/SKILL.md) explains the workflow to agents. Agents can do what the app does with topics, including notes, equations, links and [tasks](#tasks) (with rich-text descriptions, dates, progress, status and parent tasks that roll up their subtasks).
+
+Quick start (details in [docs/agents.md](docs/agents.md)):
+
+1. **Install** the server: `cargo install --path crates/mindweave-mcp` (installs `~/.cargo/bin/mindweave-mcp`).
+2. **Register** it once with your client, for example `claude mcp add --scope user mindweave -- ~/.cargo/bin/mindweave-mcp` or `codex mcp add mindweave -- ~/.cargo/bin/mindweave-mcp`.
+3. **Use** it: open a new client session and ask, for example, "Create ~/notes/launch.mindweave with a project plan as tasks".
+
+You never start or stop the server yourself: the client starts it with a session and stops it when the session ends. See [Starting, stopping and updating](docs/agents.md#starting-stopping-and-updating) for turning it off, removing it and picking up a new build.
 
 ---
 

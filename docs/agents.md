@@ -164,6 +164,52 @@ with no arguments (or `--libraries-dir DIR`). It speaks MCP protocol
 versions 2025-06-18, 2025-03-26 and 2024-11-05 with newline-delimited
 JSON-RPC 2.0.
 
+## Starting, stopping and updating
+
+The server is not run by hand. Once registered, the client starts
+`mindweave-mcp` when a session begins, talks to it over stdin and
+stdout, and stops it when the session ends; between calls it holds no
+files open. Run in a terminal, it waits silently for JSON-RPC input.
+
+| To | Do |
+|---|---|
+| Start it | Register it (see [Client setup](#client-setup)), then open a new client session. |
+| Check it | `claude mcp list` or `codex mcp list`; in Claude Code, `/mcp` shows it and its tools. |
+| Stop it | Close the client session or quit the client. |
+| Turn it off but keep it | Claude Code: disable it in `/mcp`. opencode: `"enabled": false`. Other clients: remove or comment out its entry. |
+| Remove it | `claude mcp remove mindweave`, `codex mcp remove mindweave`, or delete its entry from the client's configuration file. |
+| Update it | `cargo install --path crates/mindweave-mcp` after pulling changes, then start a new session (in Claude Code, `/mcp` can reconnect it). The installed binary is a copy: new features, such as tasks, reach agents only after this. |
+
+To check the binary by hand:
+
+```sh
+echo '{"jsonrpc":"2.0","id":1,"method":"ping"}' | ~/.cargo/bin/mindweave-mcp
+```
+
+It prints `{"jsonrpc":"2.0","id":1,"result":{}}`.
+
+## Tasks
+
+Any topic can be a task. In `add_mind_map` and `add_topics` tree nodes,
+and in `set_topic`, pass `task`:
+
+```json
+{"text": "Build", "task": {"description": "First **release**", "start": "2026-11-02", "end": "2026-11-27"},
+ "children": [{"text": "API", "task": {"status": "done"}}, {"text": "UI", "task": {"progress": 40}}]}
+```
+
+- `description` is simple Markdown, like `note`; `start` and `end` are
+  `YYYY-MM-DD`; `progress` is 0 to 100; `status` is `not-started`,
+  `in-progress`, `blocked` or `done` (done sets progress to 100,
+  not-started to 0). An empty description or date clears it;
+  `{"remove": true}` makes the topic a plain topic again.
+- Topics added under a task are tasks too. A task with subtasks is a
+  parent task: `get_object` reports its progress (the average of its
+  subtasks'), status and dates (earliest start, latest end) rolled up,
+  with `subtasks` counting them; set progress and status on the tasks
+  without subtasks.
+- Exported pictures show each task's badge.
+
 ## Using the skill
 
 The skill is a plain folder in the open Agent Skills format
