@@ -112,6 +112,54 @@ fn icon_path_in(name: &str, bundled: &HashSet<SharedString>) -> SharedString {
     }
 }
 
+/// A format 2 test library, `uml-test`: shape `note`, template `class`
+/// (a name box over a body box, and a line), then shape `after`.
+#[cfg(test)]
+pub(crate) fn template_test_library() -> mindweave_core::Library {
+    use mindweave_core::{load_library, EmbeddedFiles};
+    const FILES: &[(&str, &str)] = &[
+        (
+            "library.toml",
+            "format = 2\nid = \"uml-test\"\nname = \"UML Test\"\nversion = \"1\"\n",
+        ),
+        (
+            "shapes.toml",
+            r#"
+[[shape]]
+id = "note"
+name = "Note"
+primitive = "rect"
+
+[[template]]
+id = "class"
+name = "Class"
+icon = "box"
+default_size = [100, 50]
+
+[[template.part]]
+frame = [0, 0, 100, 20]
+primitive = "rect"
+label = { text = "Name", bold = true }
+
+[[template.part]]
+frame = [0, 20, 100, 30]
+primitive = "rect"
+
+[[template.part]]
+line = { from = [0, 50], to = [100, 50] }
+
+[[shape]]
+id = "after"
+name = "After"
+primitive = "ellipse"
+"#,
+        ),
+    ];
+    let (library, report) = load_library(&EmbeddedFiles(FILES), false).unwrap();
+    assert!(report.notices.is_empty(), "{:?}", report.notices);
+    library
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

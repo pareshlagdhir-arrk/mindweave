@@ -92,7 +92,10 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
                     ibeam,
                     matches!(
                         editor.tools.tool,
-                        Tool::Shape { .. } | Tool::Relationship | Tool::Artboard
+                        Tool::Shape { .. }
+                            | Tool::Template { .. }
+                            | Tool::Relationship
+                            | Tool::Artboard
                     ) || matches!(editor.gesture, Gesture::Placing { .. }),
                     editor.tools.tool == Tool::Text,
                     pointer,
@@ -311,11 +314,13 @@ fn register_input(
                     let at = editor.to_canvas(local(event.position, bounds));
                     // The second click of a double click on a gallery
                     // shape, which closed the gallery, places nothing.
-                    let stray = matches!(editor.tools.tool, Tool::Shape { .. })
-                        && shape_gallery::is_stray_second_click(
-                            event.click_count,
-                            editor.ribbon.gallery_closed_at.map(|at| at.elapsed()),
-                        );
+                    let stray = matches!(
+                        editor.tools.tool,
+                        Tool::Shape { .. } | Tool::Template { .. }
+                    ) && shape_gallery::is_stray_second_click(
+                        event.click_count,
+                        editor.ribbon.gallery_closed_at.map(|at| at.elapsed()),
+                    );
                     if stray {
                         return;
                     }
@@ -347,9 +352,10 @@ fn register_input(
                         Tool::Pointer => {
                             editor.begin_pointer_press(at, event.modifiers, window, cx)
                         }
-                        Tool::Shape { .. } | Tool::Relationship | Tool::Artboard => {
-                            editor.begin_placing(at, event.modifiers, window, cx)
-                        }
+                        Tool::Shape { .. }
+                        | Tool::Template { .. }
+                        | Tool::Relationship
+                        | Tool::Artboard => editor.begin_placing(at, event.modifiers, window, cx),
                         Tool::Text => editor.place_text_box(at, window, cx),
                         Tool::Hand => {}
                     }
@@ -487,14 +493,14 @@ impl EditorWindow {
                 let remembered = &cx.global::<crate::app_state::AppState>().settings;
                 self.placement_preview(&libs, remembered)
             }
-            _ => None,
+            _ => Vec::new(),
         };
-        if let Some(shape) = preview {
+        for shape in &preview {
             paint_preview(
                 window,
                 cx,
                 bounds,
-                &shape,
+                shape,
                 &libs,
                 &viewport,
                 PREVIEW_OPACITY,

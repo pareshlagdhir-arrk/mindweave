@@ -1,5 +1,5 @@
-//! The More gallery of the ribbon: every shape of a library, filtered by a
-//! search field.
+//! The More gallery of the ribbon: every shape and template of a library,
+//! filtered by a search field.
 
 use std::time::{Duration, Instant};
 
@@ -12,9 +12,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use mindweave_core::{Library, ShapeDef};
+use mindweave_core::Library;
 
-use super::toolbar::{button_icon, lock_dot, shape_button, ToolButton, MORE_BUTTON_WIDTH};
+use super::tool::{ribbon_items, RibbonItem};
+use super::toolbar::{button_icon, item_button, lock_dot, ToolButton, MORE_BUTTON_WIDTH};
 use super::EditorWindow;
 use crate::libraries::Libraries;
 
@@ -76,15 +77,16 @@ pub(super) fn more_button(
         .content(move |_, _, cx| {
             // Built only while the gallery is open.
             let query = search.read(cx).value();
-            let shapes = libraries
+            let items = libraries
                 .libraries()
                 .iter()
                 .find(|l| l.id == library_id)
-                .map_or(&[][..], |l| &l.shapes[..]);
-            let cells: Vec<ToolButton> = filter_shapes(shapes, &query)
-                .into_iter()
+                .map(ribbon_items)
+                .unwrap_or_default();
+            let cells: Vec<ToolButton> = filter_items(items, &query)
+                .iter()
                 .enumerate()
-                .map(|(ix, shape)| shape_button(&library_id, ("gallery-shape", ix), shape, cx))
+                .map(|(ix, item)| item_button(&library_id, ("gallery-shape", ix), item, cx))
                 .collect();
             let popover = cx.entity().downgrade();
             let theme = cx.theme();
@@ -238,64 +240,73 @@ pub(super) fn is_stray_second_click(click_count: usize, since: Option<Duration>)
     click_count >= 2 && since.is_some_and(|since| since < DOUBLE_CLICK_INTERVAL)
 }
 
-/// The shapes whose name contains `query`, ignoring case and surrounding
-/// spaces, in library order. A blank query keeps them all.
-fn filter_shapes<'a>(shapes: &'a [ShapeDef], query: &str) -> Vec<&'a ShapeDef> {
+/// The shapes and templates among `items` whose name contains `query`,
+/// ignoring case and surrounding spaces, in library order. A blank query
+/// keeps them all.
+fn filter_items<'a>(items: Vec<RibbonItem<'a>>, query: &str) -> Vec<RibbonItem<'a>> {
     let query = query.trim().to_lowercase();
-    shapes
-        .iter()
-        .filter(|shape| shape.name.to_lowercase().contains(&query))
+    items
+        .into_iter()
+        .filter(|item| item.name.to_lowercase().contains(&query))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_shapes, is_stray_second_click, DOUBLE_CLICK_INTERVAL};
-    use mindweave_core::geometry::Primitive;
-    use mindweave_core::{Icon, ShapeDef, ShapeSource, StyleDefaults};
+    use super::{filter_items, is_stray_second_click, DOUBLE_CLICK_INTERVAL};
+    use crate::editor::tool::{ribbon_items, RibbonItem, Tool};
+    use mindweave_core::Icon;
     use std::time::Duration;
 
-    fn shape(name: &str) -> ShapeDef {
-        ShapeDef {
-            id: name.to_lowercase(),
-            name: name.into(),
-            icon: Icon::Lucide("square".into()),
-            default_size: (1.0, 1.0),
-            style: StyleDefaults::default(),
-            source: ShapeSource::Primitive(Primitive::Rect),
-            params: Vec::new(),
-        }
+    static ICON: Icon = Icon::Lucide(String::new());
+
+    /// Shape buttons named `names`.
+    fn items<'a>(names: &[&'a str]) -> Vec<RibbonItem<'a>> {
+        names
+            .iter()
+            .map(|name| RibbonItem {
+                tool: Tool::shape("test", name),
+                id: name,
+                name,
+                icon: &ICON,
+            })
+            .collect()
     }
 
-    fn names(shapes: &[&ShapeDef]) -> Vec<String> {
-        shapes.iter().map(|s| s.name.clone()).collect()
+    fn names(items: &[RibbonItem]) -> Vec<String> {
+        items.iter().map(|i| i.name.to_string()).collect()
     }
 
     #[test]
     fn blank_query_keeps_every_shape() {
-        let shapes = [shape("Rectangle"), shape("Ellipse"), shape("Star")];
-        assert_eq!(filter_shapes(&shapes, "").len(), 3);
-        assert_eq!(filter_shapes(&shapes, "   ").len(), 3);
+        let shapes = ["Rectangle", "Ellipse", "Star"];
+        assert_eq!(filter_items(items(&shapes), "").len(), 3);
+        assert_eq!(filter_items(items(&shapes), "   ").len(), 3);
     }
 
     #[test]
     fn query_matches_names_ignoring_case_and_spaces() {
-        let shapes = [
-            shape("Rectangle"),
-            shape("Rounded Rectangle"),
-            shape("Ellipse"),
-            shape("Right Arrow"),
-        ];
+        let shapes = ["Rectangle", "Rounded Rectangle", "Ellipse", "Right Arrow"];
         assert_eq!(
-            names(&filter_shapes(&shapes, "RECT")),
+            names(&filter_items(items(&shapes), "RECT")),
             ["Rectangle", "Rounded Rectangle"]
         );
         assert_eq!(
-            names(&filter_shapes(&shapes, "  ed re ")),
+            names(&filter_items(items(&shapes), "  ed re ")),
             ["Rounded Rectangle"]
         );
-        assert_eq!(names(&filter_shapes(&shapes, "ow")), ["Right Arrow"]);
-        assert!(filter_shapes(&shapes, "hexagon").is_empty());
+        assert_eq!(names(&filter_items(items(&shapes), "ow")), ["Right Arrow"]);
+        assert!(filter_items(items(&shapes), "hexagon").is_empty());
+    }
+
+    #[test]
+    fn templates_are_listed_and_searched_with_shapes() {
+        let library = crate::libraries::template_test_library();
+        let all = filter_items(ribbon_items(&library), "");
+        assert_eq!(names(&all), ["Note", "Class", "After"]);
+        let found = filter_items(ribbon_items(&library), " CLA ");
+        assert_eq!(names(&found), ["Class"]);
+        assert_eq!(found[0].tool, Tool::template("uml-test", "class"));
     }
 
     #[test]

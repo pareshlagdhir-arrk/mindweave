@@ -1324,6 +1324,27 @@ mod tests {
     }
 
     #[test]
+    fn template_parts_without_their_library_are_placeholders() {
+        let library = crate::libraries::template_test_library();
+        let template = library.template("class").unwrap();
+        let parts =
+            mindweave_core::instantiate_template(&library, template, frame(0., 0., 100., 50.));
+        let with = LibraryRegistry::new(vec![library.clone()], None).0;
+        let without = registry();
+        for part in &parts {
+            assert!(!shape_geometry(part, &with).placeholder, "{}", part.shape);
+            // A line draws itself; a part shape becomes a placeholder box.
+            assert_eq!(
+                shape_geometry(part, &without).placeholder,
+                !part.is_line(),
+                "{}",
+                part.shape
+            );
+        }
+        assert_eq!(parts.iter().filter(|p| !p.is_line()).count(), 2);
+    }
+
+    #[test]
     fn cache_rebuilds_on_change_and_drops_unpainted_shapes() {
         let libs = registry();
         let mut a = rectangle(&libs, frame(0., 0., 10., 10.));

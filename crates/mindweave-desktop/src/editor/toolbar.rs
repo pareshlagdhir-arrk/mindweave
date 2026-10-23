@@ -19,10 +19,12 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{Geometry, PathCmd};
-use mindweave_core::{ArtboardPreset, Icon, PresetCategory, ShapeDef, ARTBOARD_PRESETS};
+use mindweave_core::{ArtboardPreset, Icon, PresetCategory, ARTBOARD_PRESETS};
 
 use super::mindmap_edit::NewTopic;
-use super::tool::{shape_key, Tool, ARTBOARD_TAB, BASIC_SHAPES, HOME_TAB, MINDMAP_TAB};
+use super::tool::{
+    ribbon_items, shape_key, RibbonItem, Tool, ARTBOARD_TAB, BASIC_SHAPES, HOME_TAB, MINDMAP_TAB,
+};
 use super::{shape_gallery, EditorWindow, SMALL_TEXT_SIZE};
 use crate::assets;
 use crate::libraries::{lucide_icon_path, Libraries};
@@ -302,11 +304,10 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
         .find(|l| l.id == editor.tools.tab);
     let content: Vec<AnyElement> = match library {
         Some(library) => {
-            let buttons: Vec<ToolButton> = library
-                .shapes
+            let buttons: Vec<ToolButton> = ribbon_items(library)
                 .iter()
                 .enumerate()
-                .map(|(ix, shape)| shape_button(&library.id, ("tool-shape", ix), shape, cx))
+                .map(|(ix, item)| item_button(&library.id, ("tool-shape", ix), item, cx))
                 .collect();
             // The expander takes room only when some shapes do not fit.
             let shown = match editor.ribbon.tool_row_width {
@@ -737,30 +738,35 @@ fn image_button(cx: &mut Context<EditorWindow>) -> impl IntoElement {
     }))
 }
 
-/// The button placing `shape` of library `library`.
-pub(super) fn shape_button(
+/// The button placing ribbon item `item` (a shape or template) of library
+/// `library`.
+pub(super) fn item_button(
     library: &str,
     id: impl Into<ElementId>,
-    shape: &ShapeDef,
+    item: &RibbonItem,
     cx: &mut App,
 ) -> ToolButton {
+    let key = match &item.tool {
+        Tool::Shape { .. } => shape_key(library, item.id),
+        _ => None,
+    };
     ToolButton {
         id: id.into(),
-        tool: Tool::shape(library, &shape.id),
-        icon: match &shape.icon {
+        tool: item.tool.clone(),
+        icon: match item.icon {
             Icon::Lucide(name) => ButtonIcon::lucide_or_fallback(name, cx),
             Icon::Outline(geometry) => ButtonIcon::Outline(
                 cx.default_global::<OutlineIcons>()
                     .0
-                    .entry((library.to_string(), shape.id.clone()))
+                    .entry((library.to_string(), item.id.to_string()))
                     .or_insert_with(|| outline_icon_path(geometry).map(Rc::new))
                     .clone(),
             ),
         },
-        name: shape.name.clone().into(),
-        tooltip: match shape_key(library, &shape.id) {
-            Some(key) => format!("{} ({key})", shape.name).into(),
-            None => shape.name.clone().into(),
+        name: item.name.to_string().into(),
+        tooltip: match key {
+            Some(key) => format!("{} ({key})", item.name).into(),
+            None => item.name.to_string().into(),
         },
     }
 }

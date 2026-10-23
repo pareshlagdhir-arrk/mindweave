@@ -1,5 +1,7 @@
 //! The editor's active tool and the ribbon tab being shown.
 
+use mindweave_core::{Icon, Library, LibraryItem};
+
 /// The ribbon tab holding Pointer, Hand and Text.
 pub const HOME_TAB: &str = "home";
 /// The ribbon tab holding the mind map tools.
@@ -29,6 +31,12 @@ pub enum Tool {
         library: String,
         shape: String,
     },
+    /// Places template `template` of library `library`: its parts, as one
+    /// group.
+    Template {
+        library: String,
+        template: String,
+    },
 }
 
 impl Tool {
@@ -40,13 +48,21 @@ impl Tool {
         }
     }
 
+    /// The tool placing template `template` of `library`.
+    pub fn template(library: &str, template: &str) -> Tool {
+        Tool::Template {
+            library: library.to_string(),
+            template: template.to_string(),
+        }
+    }
+
     /// The ribbon tab showing this tool's button.
     pub fn tab(&self) -> &str {
         match self {
             Tool::Pointer | Tool::Hand | Tool::Text => HOME_TAB,
             Tool::Relationship => MINDMAP_TAB,
             Tool::Artboard => ARTBOARD_TAB,
-            Tool::Shape { library, .. } => library,
+            Tool::Shape { library, .. } | Tool::Template { library, .. } => library,
         }
     }
 }
@@ -60,6 +76,41 @@ pub fn shape_key(library: &str, shape: &str) -> Option<&'static str> {
         .iter()
         .find(|(id, _)| *id == shape)
         .map(|(_, key)| *key)
+}
+
+/// One button of a library's ribbon: a shape or a template.
+pub struct RibbonItem<'a> {
+    /// The tool the button selects.
+    pub tool: Tool,
+    /// The shape or template id.
+    pub id: &'a str,
+    pub name: &'a str,
+    pub icon: &'a Icon,
+}
+
+/// The buttons of `library`'s ribbon, shapes and templates in file order.
+pub fn ribbon_items(library: &Library) -> Vec<RibbonItem<'_>> {
+    library
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            LibraryItem::Shape(ix) => {
+                let shape = library.shapes.get(*ix)?;
+                Some(RibbonItem {
+                    tool: Tool::shape(&library.id, &shape.id),
+                    id: &shape.id,
+                    name: &shape.name,
+                    icon: &shape.icon,
+                })
+            }
+            LibraryItem::Template(t) => Some(RibbonItem {
+                tool: Tool::template(&library.id, &t.id),
+                id: &t.id,
+                name: &t.name,
+                icon: &t.icon,
+            }),
+        })
+        .collect()
 }
 
 /// The active tool, whether it stays active after placing a shape, and the
@@ -190,6 +241,45 @@ mod tests {
         state.select(rectangle(), true);
         state.select(Tool::shape(BASIC_SHAPES, "ellipse"), false);
         assert!(!state.locked);
+    }
+
+    #[test]
+    fn template_tool_round_trips_tab() {
+        let class = Tool::template("uml-test", "class");
+        assert_eq!(class.tab(), "uml-test");
+        let mut state = ToolState::default();
+        state.select(class.clone(), false);
+        assert_eq!(state.tab, "uml-test");
+        state.after_place();
+        assert_eq!(state.tool, Tool::Pointer);
+        assert_eq!(state.tab, "uml-test");
+        // Locked, it stays for the next placement.
+        state.select(class.clone(), true);
+        state.after_place();
+        assert_eq!(state.tool, class);
+        // A shape of the same id is another tool.
+        assert_ne!(class, Tool::shape("uml-test", "class"));
+    }
+
+    #[test]
+    fn templates_appear_in_ribbon_order() {
+        let library = crate::libraries::template_test_library();
+        let tools: Vec<Tool> = ribbon_items(&library).into_iter().map(|i| i.tool).collect();
+        assert_eq!(
+            tools,
+            [
+                Tool::shape("uml-test", "note"),
+                Tool::template("uml-test", "class"),
+                Tool::shape("uml-test", "after"),
+            ]
+        );
+        let names: Vec<&str> = ribbon_items(&library).iter().map(|i| i.name).collect();
+        assert_eq!(names, ["Note", "Class", "After"]);
+        // A library without templates lists its shapes, as before.
+        let basic = &mindweave_core::builtin_libraries()[0];
+        let ids: Vec<&str> = ribbon_items(basic).iter().map(|i| i.id).collect();
+        let shapes: Vec<&str> = basic.shapes.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, shapes);
     }
 
     #[test]

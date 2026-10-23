@@ -12,11 +12,11 @@ use gpui_kit::*;
 use mindweave_core::geometry::{hit_test, line_endpoints, FillRole, Frame, Primitive, Pt, Rect};
 use mindweave_core::line::target_of;
 use mindweave_core::{
-    bend_through, clamp_topic_picture, drag_create, handle_positions, line_frame, line_midpoint,
-    marquee_selects, resize_with_text_boxes, rotate, rotate_handle_position, route_line,
-    selection_bounds, translate, unit_members, whole_units_only, with_members, DocumentSession,
-    Handle, LibraryRegistry, LineEnd, Shape, ShapeDef, ShapeSource, ARTBOARD_SHAPE,
-    CLICK_DRAG_THRESHOLD, TEXT_LIBRARY,
+    bend_through, clamp_topic_picture, drag_create, handle_positions, instantiate_template,
+    line_frame, line_midpoint, marquee_selects, resize_with_text_boxes, rotate,
+    rotate_handle_position, route_line, selection_bounds, translate, unit_members,
+    whole_units_only, with_members, DocumentSession, Handle, LibraryRegistry, LineEnd, Shape,
+    ShapeDef, ShapeSource, ARTBOARD_SHAPE, CLICK_DRAG_THRESHOLD, TEXT_LIBRARY,
 };
 use uuid::Uuid;
 
@@ -62,7 +62,9 @@ pub enum Gesture {
         current: Pt,
         library: String,
         shape: String,
-        /// Shift: square box or 45° line.
+        /// `shape` names a template of `library`, placed as its parts.
+        template: bool,
+        /// Shift: square box, 45° line, or a template's own proportion.
         constrain: bool,
         /// Alt: `start` is the centre.
         from_center: bool,
@@ -583,11 +585,16 @@ impl EditorWindow {
         );
         let artboard = (TEXT_LIBRARY.to_string(), ARTBOARD_SHAPE.to_string());
         let (library, shape) = match &self.tools.tool {
-            Tool::Shape { library, shape } => (library, shape),
+            Tool::Shape { library, shape }
+            | Tool::Template {
+                library,
+                template: shape,
+            } => (library, shape),
             Tool::Relationship => (&line.0, &line.1),
             Tool::Artboard => (&artboard.0, &artboard.1),
             _ => return,
         };
+        let template = matches!(self.tools.tool, Tool::Template { .. });
         self.placing_relationship = self.tools.tool == Tool::Relationship;
         if !self.session.active_layer_selectable() {
             window.push_notification(Notification::warning("Show the layer to draw on it."), cx);
@@ -595,7 +602,7 @@ impl EditorWindow {
         }
         let (library, shape) = (library.clone(), shape.clone());
         self.line_ends = [None; 2];
-        if is_line_tool(&library, &shape) {
+        if !template && is_line_tool(&library, &shape) {
             self.line_ends[0] = self.attach_target_at(at, None, cx);
             self.attach_highlight = self.line_ends[0];
         }
@@ -604,6 +611,7 @@ impl EditorWindow {
             current: at,
             library,
             shape,
+            template,
             constrain: modifiers.shift,
             from_center: modifiers.alt,
             dragged: false,
@@ -621,7 +629,16 @@ impl EditorWindow {
     ) {
         let zoom = self.session.page().viewport.zoom;
         if move_placement(&mut self.gesture, at, modifiers.shift, modifiers.alt, zoom) {
-            if let (Some(at), Gesture::Placing { library, shape, .. }) = (at, &self.gesture) {
+            if let (
+                Some(at),
+                Gesture::Placing {
+                    library,
+                    shape,
+                    template: false,
+                    ..
+                },
+            ) = (at, &self.gesture)
+            {
                 if is_line_tool(library, shape) {
                     let end = self
                         .attach_target_at(at, None, cx)
@@ -635,8 +652,8 @@ impl EditorWindow {
     }
 
     /// Mouse released at canvas point `at` (or where the pointer was last
-    /// seen): adds the shape as one undo step, selects it and lets the
-    /// tool return to Pointer unless locked.
+    /// seen): adds the shape, or a template's parts, as one undo step,
+    /// selects it and lets the tool return to Pointer unless locked.
     pub(super) fn finish_placing(
         &mut self,
         at: Option<Pt>,
@@ -647,6 +664,20 @@ impl EditorWindow {
         let gesture = std::mem::take(&mut self.gesture);
         let ends = std::mem::take(&mut self.line_ends);
         self.attach_highlight = None;
+        if let Gesture::Placing { template: true, .. } = gesture {
+            // Parts keep the template's styles, not the remembered one.
+            let parts = placement_shapes(&gesture, &cx.global::<Libraries>().0);
+            if parts.is_empty() {
+                return;
+            }
+            let ids = parts.iter().map(|p| p.id).collect();
+            // Parts placed inside an artboard join it, in the same step.
+            self.update_session(|s| add_with_membership(s, parts), cx);
+            self.selection = ids;
+            self.tools.after_place();
+            cx.notify();
+            return;
+        }
         let Some(mut shape) = placement_shape(&gesture, &cx.global::<Libraries>().0) else {
             return;
         };
@@ -1354,14 +1385,19 @@ impl EditorWindow {
         })
     }
 
-    /// The shape being placed, for the preview: a line already meets the
-    /// shapes it will attach to.
+    /// The shapes being placed, for the preview: a template's parts, or
+    /// the one shape (a line already meets the shapes it will attach to).
     pub(super) fn placement_preview(
         &self,
         libs: &LibraryRegistry,
         remembered: &AppSettings,
-    ) -> Option<Shape> {
-        let mut shape = preview_shape(&self.gesture, libs)?;
+    ) -> Vec<Shape> {
+        if let Gesture::Placing { template: true, .. } = self.gesture {
+            return preview_shapes(&self.gesture, libs);
+        }
+        let Some(mut shape) = preview_shape(&self.gesture, libs) else {
+            return Vec::new();
+        };
         if self.placing_relationship {
             relationship_style(&mut shape);
         } else if !shape.is_artboard() {
@@ -1376,7 +1412,7 @@ impl EditorWindow {
             let (start, end) = (target(props.start), target(props.end));
             route_line(&mut shape.frame, props, start.as_ref(), end.as_ref());
         }
-        Some(shape)
+        vec![shape]
     }
 
     /// The one selected line, if the selection is exactly one unlocked
@@ -1560,6 +1596,15 @@ fn preview_shape(gesture: &Gesture, libs: &LibraryRegistry) -> Option<Shape> {
     }
 }
 
+/// The previewed shapes of the placement `gesture`: like [`preview_shape`],
+/// nothing until the pointer has dragged.
+fn preview_shapes(gesture: &Gesture, libs: &LibraryRegistry) -> Vec<Shape> {
+    match gesture {
+        Gesture::Placing { dragged: true, .. } => placement_shapes(gesture, libs),
+        _ => Vec::new(),
+    }
+}
+
 /// The topmost unlocked shape of the active layer at canvas point `p`
 /// (within `tolerance` canvas units of its outline); `None` when the active
 /// layer is hidden. Builds each outline afresh; the editor hit-tests
@@ -1610,13 +1655,65 @@ fn move_placement(
     before != (*current, *constrain, *from_center, *dragged)
 }
 
-/// The shape `gesture` places, if it is placing an installed shape.
+/// The shapes `gesture` places: an installed template's parts, in one
+/// group, or the one shape [`placement_shape`] gives. Empty when nothing
+/// is installed under that name.
+fn placement_shapes(gesture: &Gesture, libs: &LibraryRegistry) -> Vec<Shape> {
+    let Gesture::Placing {
+        start,
+        current,
+        library,
+        shape,
+        template: true,
+        constrain,
+        from_center,
+        dragged,
+    } = gesture
+    else {
+        return placement_shape(gesture, libs).into_iter().collect();
+    };
+    let Some((lib, template)) = libs.template(library, shape) else {
+        return Vec::new();
+    };
+    let end = dragged.then_some(*current);
+    let frame = template_frame(template.default_size, *start, end, *constrain, *from_center);
+    instantiate_template(lib, template, frame)
+}
+
+/// The frame of a template of `default_size` drawn from `start` to `end`,
+/// or placed with a click at `start` when `end` is `None`. `constrain`
+/// keeps the default size's proportion, the larger scale winning.
+fn template_frame(
+    default_size: (f32, f32),
+    start: Pt,
+    end: Option<Pt>,
+    constrain: bool,
+    from_center: bool,
+) -> Frame {
+    let end = end.map(|end| {
+        if !constrain {
+            return end;
+        }
+        let (dx, dy) = (end.0 - start.0, end.1 - start.1);
+        let (w, h) = (default_size.0.max(1.), default_size.1.max(1.));
+        let scale = (dx.abs() / w).max(dy.abs() / h);
+        (
+            start.0 + (w * scale).copysign(dx),
+            start.1 + (h * scale).copysign(dy),
+        )
+    });
+    drag_create(start, end, default_size, false, false, from_center)
+}
+
+/// The shape `gesture` places, if it is placing an installed shape (not
+/// a template).
 fn placement_shape(gesture: &Gesture, libs: &LibraryRegistry) -> Option<Shape> {
     let Gesture::Placing {
         start,
         current,
         library,
         shape,
+        template: false,
         constrain,
         from_center,
         dragged,
@@ -1647,10 +1744,12 @@ mod tests {
     use super::{
         artboard_press, attaches_at, chrome_frame, dropped_shapes, handle_at, hit_shape, is_drag,
         is_line_like, lines_to_detach, marquee_rect, marquee_selection, move_placement,
-        moved_frames_of, nudge_shapes, placement_frame, placement_shape, press_kind,
-        press_selection, press_target, preview_shape, resize_cursor, shape_geometry,
-        text_box_widths_off, transformed, visible_handles, Gesture, HandleHit, PressKind,
+        moved_frames_of, nudge_shapes, placement_frame, placement_shape, placement_shapes,
+        press_kind, press_selection, press_target, preview_shape, preview_shapes, resize_cursor,
+        shape_geometry, text_box_widths_off, transformed, visible_handles, Gesture, HandleHit,
+        PressKind,
     };
+    use crate::editor::artboard_edit::add_with_membership;
     use gpui_kit::CursorStyle;
     use mindweave_core::geometry::Rect;
     use mindweave_core::geometry::{Frame, Pt};
@@ -1729,6 +1828,7 @@ mod tests {
             current: (30., 20.),
             library: "basic-shapes".into(),
             shape: shape.into(),
+            template: false,
             constrain: false,
             from_center: false,
             dragged: true,
@@ -1758,12 +1858,117 @@ mod tests {
         assert!(placement_shape(&click, &libs).is_some());
     }
 
+    /// Placing template `class` of the test library from `(100, 100)`.
+    fn placing_class(current: (f32, f32), constrain: bool, dragged: bool) -> Gesture {
+        Gesture::Placing {
+            start: (100., 100.),
+            current,
+            library: "uml-test".into(),
+            shape: "class".into(),
+            template: true,
+            constrain,
+            from_center: false,
+            dragged,
+        }
+    }
+
+    fn template_registry() -> LibraryRegistry {
+        LibraryRegistry::new(vec![crate::libraries::template_test_library()], None).0
+    }
+
+    /// The frames of `shapes`, as `(x, y, w, h)`.
+    fn boxes(shapes: &[Shape]) -> Vec<(f32, f32, f32, f32)> {
+        shapes
+            .iter()
+            .map(|s| (s.frame.x, s.frame.y, s.frame.w, s.frame.h))
+            .collect()
+    }
+
+    #[test]
+    fn a_template_click_places_its_default_size_centred() {
+        let libs = template_registry();
+        let parts = placement_shapes(&placing_class((100., 100.), false, false), &libs);
+        // 100 x 50 centred on (100, 100): name box, body box, then the line.
+        assert_eq!(
+            boxes(&parts),
+            [
+                (50., 75., 100., 20.),
+                (50., 95., 100., 30.),
+                (50., 125., 100., 0.)
+            ]
+        );
+        assert_eq!(parts[0].library, "uml-test");
+        assert!(parts[2].is_line());
+        // No preview before a drag.
+        assert!(preview_shapes(&placing_class((100., 100.), false, false), &libs).is_empty());
+    }
+
+    #[test]
+    fn a_template_drag_sizes_it_and_shift_keeps_its_proportion() {
+        let libs = template_registry();
+        let drawn = placement_shapes(&placing_class((300., 200.), false, true), &libs);
+        assert_eq!(
+            boxes(&drawn)[..2],
+            [(100., 100., 200., 40.), (100., 140., 200., 60.)]
+        );
+        // The preview shows the same parts.
+        let preview = preview_shapes(&placing_class((300., 200.), false, true), &libs);
+        assert_eq!(boxes(&preview), boxes(&drawn));
+        // Shift: 2:1 like its default size, the larger scale winning.
+        let kept = placement_shapes(&placing_class((300., 150.), true, true), &libs);
+        assert_eq!(boxes(&kept)[0], (100., 100., 200., 40.));
+        assert_eq!(boxes(&kept)[1], (100., 140., 200., 60.));
+        // Dragged up and left, it still keeps it.
+        let back = placement_shapes(&placing_class((60., 0.), true, true), &libs);
+        assert_eq!(boxes(&back)[0], (-100., 0., 200., 40.));
+        // A template that is not installed places nothing.
+        assert!(
+            placement_shapes(&placing_class((300., 200.), false, true), &registry()).is_empty()
+        );
+    }
+
+    #[test]
+    fn placing_a_template_is_one_undo_step() {
+        let libs = template_registry();
+        let (_d, mut s) = session();
+        let board = Shape::new_artboard(
+            Frame {
+                w: 1000.,
+                h: 1000.,
+                ..Frame::default()
+            },
+            "Board",
+        );
+        let board_id = board.id;
+        s.add_shapes(vec![board]);
+        let parts = placement_shapes(&placing_class((300., 200.), false, true), &libs);
+        let ids: Vec<Uuid> = parts.iter().map(|p| p.id).collect();
+        assert_eq!(ids.len(), 3);
+        // One group holds them all.
+        let group = parts[0].groups.clone();
+        assert_eq!(group.len(), 1);
+        assert!(parts.iter().all(|p| p.groups == group));
+        add_with_membership(&mut s, parts);
+        for id in &ids {
+            assert_eq!(s.find_shape(*id).unwrap().artboard, Some(board_id));
+        }
+        // One undo removes every part and leaves the artboard.
+        assert!(s.undo());
+        assert!(ids.iter().all(|id| s.find_shape(*id).is_none()));
+        assert!(s.find_shape(board_id).is_some());
+        assert!(s.redo());
+        for id in &ids {
+            assert_eq!(s.find_shape(*id).unwrap().artboard, Some(board_id));
+        }
+    }
+
     fn start_placing(at: (f32, f32)) -> Gesture {
         Gesture::Placing {
             start: at,
             current: at,
             library: "basic-shapes".into(),
             shape: "rectangle".into(),
+            template: false,
             constrain: false,
             from_center: false,
             dragged: false,
@@ -2443,6 +2648,7 @@ mod tests {
             current,
             library: TEXT_LIBRARY.into(),
             shape: ARTBOARD_SHAPE.into(),
+            template: false,
             constrain,
             from_center: false,
             dragged,
