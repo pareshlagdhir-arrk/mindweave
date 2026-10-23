@@ -368,23 +368,27 @@ mod tests {
 
     #[test]
     fn disabled_libraries_are_hidden_but_still_resolve() {
-        let reg = LibraryRegistry::new(builtin_libraries(), None).0;
-        let order = vec!["uml".to_string(), "flowchart".to_string()];
-        let disabled = vec!["flowchart".to_string()];
+        let user = tempfile::tempdir().unwrap();
+        for id in ["alpha", "beta", "gamma"] {
+            write_lib(user.path(), id, id);
+        }
+        let reg = registry(user.path());
+        let order = vec!["gamma".to_string(), "alpha".to_string()];
+        let disabled = vec!["alpha".to_string()];
         let all: Vec<&str> = ordered_libraries(reg.libraries(), &order)
             .iter()
             .map(|l| l.id.as_str())
             .collect();
-        assert_eq!(all, ["uml", "flowchart", "basic-shapes", "wireframe"]);
+        assert_eq!(all, ["gamma", "alpha", "basic-shapes", "beta"]);
         let shown: Vec<&str> = shown_libraries(reg.libraries(), &order, &disabled)
             .iter()
             .map(|l| l.id.as_str())
             .collect();
-        assert_eq!(shown, ["uml", "basic-shapes", "wireframe"]);
+        assert_eq!(shown, ["gamma", "basic-shapes", "beta"]);
         // The registry still draws a hidden library's shapes.
-        let flowchart = reg.library("flowchart").unwrap();
-        let first = &flowchart.shapes[0].id;
-        assert!(reg.shape("flowchart", first).is_some());
+        let alpha = reg.library("alpha").unwrap();
+        let first = &alpha.shapes[0].id;
+        assert!(reg.shape("alpha", first).is_some());
     }
 
     #[test]

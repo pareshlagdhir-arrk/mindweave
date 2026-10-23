@@ -596,12 +596,28 @@ mod tests {
 
     #[test]
     fn basic_shapes_leads_the_list_and_others_follow_the_users_order() {
-        let registry = LibraryRegistry::new(builtin_libraries(), None).0;
-        let order = vec!["uml".to_string(), "basic-shapes".to_string()];
+        // Three user libraries next to the built-in Basic Shapes.
+        let user = tempfile::tempdir().unwrap();
+        for id in ["alpha", "beta", "gamma"] {
+            let dir = user.path().join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("library.toml"),
+                format!("format = 1\nid = \"{id}\"\nname = \"{id}\"\nversion = \"1\"\n"),
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("shapes.toml"),
+                "[[shape]]\nid = \"r\"\nname = \"R\"\nprimitive = \"rect\"\n",
+            )
+            .unwrap();
+        }
+        let registry = LibraryRegistry::new(builtin_libraries(), Some(user.path())).0;
+        let order = vec!["gamma".to_string(), "basic-shapes".to_string()];
         let listed = listed_libraries(&registry, &order);
         let ids: Vec<&str> = listed.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, ["basic-shapes", "uml", "flowchart", "wireframe"]);
-        assert_eq!(movable_ids(&listed), ["uml", "flowchart", "wireframe"]);
+        assert_eq!(ids, ["basic-shapes", "gamma", "alpha", "beta"]);
+        assert_eq!(movable_ids(&listed), ["gamma", "alpha", "beta"]);
     }
 
     #[test]
