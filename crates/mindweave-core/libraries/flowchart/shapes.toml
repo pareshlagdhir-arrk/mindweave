@@ -1,0 +1,214 @@
+[[shape]]
+id = "process"
+name = "Process"
+icon = "square"
+default_size = [120, 80]
+primitive = "rect"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "corner_radius"
+label = "Corner radius"
+min = 0
+max = 1000
+step = 1
+default = 0
+
+[[shape]]
+id = "alternate-process"
+name = "Alternate Process"
+icon = "rectangle-horizontal"
+default_size = [120, 80]
+primitive = "rect"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "corner_radius"
+label = "Corner radius"
+min = 0
+max = 1000
+step = 1
+default = 14
+
+[[shape]]
+id = "decision"
+name = "Decision"
+default_size = [120, 80]
+svg = "shapes/decision.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "terminator"
+name = "Start / End"
+default_size = [120, 60]
+svg = "shapes/terminator.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "data"
+name = "Data (Input / Output)"
+default_size = [120, 80]
+svg = "shapes/data.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "predefined-process"
+name = "Predefined Process"
+default_size = [120, 80]
+svg = "shapes/predefined-process.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "document"
+name = "Document"
+default_size = [120, 80]
+svg = "shapes/document.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "multi-document"
+name = "Multiple Documents"
+default_size = [120, 80]
+svg = "shapes/multi-document.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "manual-input"
+name = "Manual Input"
+default_size = [120, 80]
+svg = "shapes/manual-input.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "manual-operation"
+name = "Manual Operation"
+default_size = [120, 80]
+svg = "shapes/manual-operation.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "preparation"
+name = "Preparation"
+default_size = [120, 80]
+svg = "shapes/preparation.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "connector"
+name = "Connector"
+icon = "circle"
+default_size = [60, 60]
+primitive = "ellipse"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "off-page-connector"
+name = "Off-page Connector"
+default_size = [60, 60]
+svg = "shapes/off-page-connector.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "delay"
+name = "Delay"
+default_size = [120, 80]
+svg = "shapes/delay.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "stored-data"
+name = "Stored Data"
+default_size = [120, 80]
+svg = "shapes/stored-data.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "database"
+name = "Database"
+default_size = [120, 80]
+svg = "shapes/database.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "internal-storage"
+name = "Internal Storage"
+default_size = [120, 80]
+svg = "shapes/internal-storage.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "display"
+name = "Display"
+default_size = [120, 80]
+svg = "shapes/display.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "merge"
+name = "Merge"
+default_size = [120, 80]
+svg = "shapes/merge.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "extract"
+name = "Extract"
+default_size = [120, 80]
+svg = "shapes/extract.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "sort"
+name = "Sort"
+default_size = [120, 80]
+svg = "shapes/sort.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "collate"
+name = "Collate"
+default_size = [120, 80]
+svg = "shapes/collate.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "summing-junction"
+name = "Summing Junction"
+default_size = [60, 60]
+svg = "shapes/summing-junction.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "or"
+name = "Or"
+default_size = [60, 60]
+svg = "shapes/or.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "loop-limit"
+name = "Loop Limit"
+default_size = [120, 80]
+svg = "shapes/loop-limit.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "punched-card"
+name = "Card"
+default_size = [120, 80]
+svg = "shapes/punched-card.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "paper-tape"
+name = "Paper Tape"
+default_size = [120, 80]
+svg = "shapes/paper-tape.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "annotation"
+name = "Annotation"
+default_size = [120, 80]
+svg = "shapes/annotation.svg"
+style = { fill = "none", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }

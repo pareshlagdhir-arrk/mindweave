@@ -120,10 +120,11 @@ mod tests {
     #[test]
     fn unbundled_lucide_icons_get_a_notice() {
         let registry = LibraryRegistry::new(builtin_libraries(), None).0;
-        let all: HashSet<SharedString> = registry.libraries()[0]
-            .shapes
+        let all: HashSet<SharedString> = registry
+            .libraries()
             .iter()
-            .filter_map(|s| match &s.icon {
+            .flat_map(|l| std::iter::once(&l.icon).chain(l.shapes.iter().map(|s| &s.icon)))
+            .filter_map(|icon| match icon {
                 Icon::Lucide(name) => Some(format!("icons/{name}.svg").into()),
                 Icon::Outline(_) => None,
             })

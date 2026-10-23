@@ -963,12 +963,132 @@ const BASIC_SHAPES_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The Flowchart library files, compiled in.
+const FLOWCHART_FILES: &[(&str, &str)] = &[
+    (
+        "library.toml",
+        include_str!("../libraries/flowchart/library.toml"),
+    ),
+    (
+        "shapes.toml",
+        include_str!("../libraries/flowchart/shapes.toml"),
+    ),
+    (
+        "shapes/annotation.svg",
+        include_str!("../libraries/flowchart/shapes/annotation.svg"),
+    ),
+    (
+        "shapes/collate.svg",
+        include_str!("../libraries/flowchart/shapes/collate.svg"),
+    ),
+    (
+        "shapes/data.svg",
+        include_str!("../libraries/flowchart/shapes/data.svg"),
+    ),
+    (
+        "shapes/database.svg",
+        include_str!("../libraries/flowchart/shapes/database.svg"),
+    ),
+    (
+        "shapes/decision.svg",
+        include_str!("../libraries/flowchart/shapes/decision.svg"),
+    ),
+    (
+        "shapes/delay.svg",
+        include_str!("../libraries/flowchart/shapes/delay.svg"),
+    ),
+    (
+        "shapes/display.svg",
+        include_str!("../libraries/flowchart/shapes/display.svg"),
+    ),
+    (
+        "shapes/document.svg",
+        include_str!("../libraries/flowchart/shapes/document.svg"),
+    ),
+    (
+        "shapes/extract.svg",
+        include_str!("../libraries/flowchart/shapes/extract.svg"),
+    ),
+    (
+        "shapes/internal-storage.svg",
+        include_str!("../libraries/flowchart/shapes/internal-storage.svg"),
+    ),
+    (
+        "shapes/loop-limit.svg",
+        include_str!("../libraries/flowchart/shapes/loop-limit.svg"),
+    ),
+    (
+        "shapes/manual-input.svg",
+        include_str!("../libraries/flowchart/shapes/manual-input.svg"),
+    ),
+    (
+        "shapes/manual-operation.svg",
+        include_str!("../libraries/flowchart/shapes/manual-operation.svg"),
+    ),
+    (
+        "shapes/merge.svg",
+        include_str!("../libraries/flowchart/shapes/merge.svg"),
+    ),
+    (
+        "shapes/multi-document.svg",
+        include_str!("../libraries/flowchart/shapes/multi-document.svg"),
+    ),
+    (
+        "shapes/off-page-connector.svg",
+        include_str!("../libraries/flowchart/shapes/off-page-connector.svg"),
+    ),
+    (
+        "shapes/or.svg",
+        include_str!("../libraries/flowchart/shapes/or.svg"),
+    ),
+    (
+        "shapes/paper-tape.svg",
+        include_str!("../libraries/flowchart/shapes/paper-tape.svg"),
+    ),
+    (
+        "shapes/predefined-process.svg",
+        include_str!("../libraries/flowchart/shapes/predefined-process.svg"),
+    ),
+    (
+        "shapes/preparation.svg",
+        include_str!("../libraries/flowchart/shapes/preparation.svg"),
+    ),
+    (
+        "shapes/punched-card.svg",
+        include_str!("../libraries/flowchart/shapes/punched-card.svg"),
+    ),
+    (
+        "shapes/sort.svg",
+        include_str!("../libraries/flowchart/shapes/sort.svg"),
+    ),
+    (
+        "shapes/stored-data.svg",
+        include_str!("../libraries/flowchart/shapes/stored-data.svg"),
+    ),
+    (
+        "shapes/summing-junction.svg",
+        include_str!("../libraries/flowchart/shapes/summing-junction.svg"),
+    ),
+    (
+        "shapes/terminator.svg",
+        include_str!("../libraries/flowchart/shapes/terminator.svg"),
+    ),
+];
+
+/// Every built-in library's files, in toolbar order.
+const BUILTIN_LIBRARY_FILES: &[&[(&str, &str)]] = &[BASIC_SHAPES_FILES, FLOWCHART_FILES];
+
 /// The libraries compiled into the app. Panics only if a built-in library
 /// is invalid, which the tests rule out.
 pub fn builtin_libraries() -> Vec<Library> {
-    let (basic_shapes, _) = load_library(&EmbeddedFiles(BASIC_SHAPES_FILES), true)
-        .expect("the built-in Basic Shapes library is valid");
-    vec![basic_shapes]
+    BUILTIN_LIBRARY_FILES
+        .iter()
+        .map(|files| {
+            load_library(&EmbeddedFiles(files), true)
+                .expect("the built-in libraries are valid")
+                .0
+        })
+        .collect()
 }
 
 /// Where users install libraries: `<data dir>/Mindweave/libraries`
@@ -1227,11 +1347,33 @@ version = "1.0.0"
     }
 
     #[test]
-    fn builtin_libraries_returns_basic_shapes() {
+    fn builtin_libraries_come_in_toolbar_order() {
         let libs = builtin_libraries();
-        assert_eq!(libs.len(), 1);
-        assert_eq!(libs[0].id, "basic-shapes");
+        let ids: Vec<&str> = libs.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, ["basic-shapes", "flowchart"]);
         assert_eq!(libs[0].shapes.len(), 6);
+    }
+
+    #[test]
+    fn every_builtin_library_loads_without_warnings() {
+        for files in BUILTIN_LIBRARY_FILES {
+            let (lib, report) = load_library(&EmbeddedFiles(files), true).unwrap();
+            assert_eq!(report, LoadReport::default(), "{}", lib.id);
+            assert!(lib.builtin && !lib.shapes.is_empty(), "{}", lib.id);
+        }
+    }
+
+    #[test]
+    fn flowchart_has_the_standard_symbols() {
+        let libs = builtin_libraries();
+        let flow = libs.iter().find(|l| l.id == "flowchart").unwrap();
+        assert_eq!(flow.name, "Flowchart");
+        assert_eq!(flow.shapes.len(), 28);
+        for id in ["process", "decision", "terminator", "data", "document", "database"] {
+            assert!(flow.shape(id).is_some(), "{id}");
+        }
+        // Inner lines are strokes only, so the annotation bracket has no fill.
+        assert_eq!(flow.shape("annotation").unwrap().style.fill, None);
     }
 
     #[test]
@@ -1775,7 +1917,7 @@ max = 8
         let (registry, report) = LibraryRegistry::new(builtin_libraries(), Some(user));
         let notices = report.notices;
         let ids: Vec<_> = registry.libraries().iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, ["basic-shapes", "first", "alpha", "zeta"]);
+        assert_eq!(ids, ["basic-shapes", "flowchart", "first", "alpha", "zeta"]);
         assert!(registry.libraries()[0].builtin);
         assert_eq!(registry.libraries()[0].name, "Basic Shapes");
         assert_eq!(notices.len(), 2, "{notices:?}");
@@ -1820,7 +1962,7 @@ max = 8
         let (registry, report) = LibraryRegistry::new(builtin_libraries(), Some(user));
         let notices = report.notices;
         let ids: Vec<_> = registry.libraries().iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, ["basic-shapes", "good", "warns"]);
+        assert_eq!(ids, ["basic-shapes", "flowchart", "good", "warns"]);
         assert_eq!(notices.len(), 4, "{notices:?}");
         assert!(notices
             .iter()
@@ -1837,10 +1979,11 @@ max = 8
 
         let (registry, report) =
             LibraryRegistry::new(builtin_libraries(), Some(&user.join("does-not-exist")));
-        assert_eq!(registry.libraries().len(), 1);
+        let builtin = builtin_libraries().len();
+        assert_eq!(registry.libraries().len(), builtin);
         assert_eq!(report, LoadReport::default());
         let (registry, report) = LibraryRegistry::new(builtin_libraries(), None);
-        assert_eq!(registry.libraries().len(), 1);
+        assert_eq!(registry.libraries().len(), builtin);
         assert_eq!(report, LoadReport::default());
     }
 
