@@ -18,6 +18,7 @@ pub mod session;
 pub mod settings;
 pub mod shape;
 pub mod svg;
+pub mod template;
 pub mod text;
 pub mod text_history;
 pub mod transform;
@@ -50,9 +51,9 @@ pub use image::{
 };
 pub use library::{
     builtin_libraries, load_library, user_libraries_dir, Charge, DirFiles, EmbeddedFiles, Icon,
-    Library, LibraryError, LibraryFiles, LibraryRegistry, LoadReport, ParamDef, ShapeDef,
-    ShapeSource, StyleDefaults, LIBRARY_FORMAT, MAX_FILE_BYTES, MAX_LIBRARY_BYTES, MAX_SHAPES,
-    MAX_USER_LIBRARIES,
+    Library, LibraryError, LibraryFiles, LibraryItem, LibraryRegistry, LoadReport, ParamDef,
+    ShapeDef, ShapeSource, StyleDefaults, LIBRARY_FORMAT, MAX_FILE_BYTES, MAX_LIBRARY_BYTES,
+    MAX_SHAPES, MAX_USER_LIBRARIES,
 };
 pub use line::{
     bend_through, double_outline, edge_point, line_frame, line_geometry, line_jumps, line_midpoint,
@@ -71,6 +72,9 @@ pub use settings::{
     MAX_RECENT_COLORS, MAX_RECENT_FONTS,
 };
 pub use shape::{Label, Shape, Style, TextBoxProps, VAlign, TEXT_LIBRARY, TEXT_SHAPE};
+pub use template::{
+    instantiate_template, PartKind, PartLabel, TemplateDef, TemplatePart, MAX_TEMPLATE_PARTS,
+};
 pub use text::{
     HAlign, Mixed, Paragraph, RichText, Run, RunStyle, StyleChange, StyleSummary,
     DEFAULT_FONT_SIZE, LABEL_FONT_SIZE, LINE_BREAK, MAX_FONT_SIZE, MIN_FONT_SIZE,

@@ -75,6 +75,7 @@ fn unbundled_icon_notices(
         .filter_map(|library| {
             let names: Vec<String> = std::iter::once(&library.icon)
                 .chain(library.shapes.iter().map(|s| &s.icon))
+                .chain(library.templates().map(|t| &t.icon))
                 .filter_map(missing)
                 .collect();
             let listed = names
@@ -115,7 +116,7 @@ fn icon_path_in(name: &str, bundled: &HashSet<SharedString>) -> SharedString {
 mod tests {
     use super::*;
     use mindweave_core::geometry::Primitive;
-    use mindweave_core::{Library, ShapeDef, ShapeSource, StyleDefaults};
+    use mindweave_core::{Library, LibraryItem, ShapeDef, ShapeSource, StyleDefaults};
 
     #[test]
     fn unbundled_lucide_icons_get_a_notice() {
@@ -123,7 +124,11 @@ mod tests {
         let all: HashSet<SharedString> = registry
             .libraries()
             .iter()
-            .flat_map(|l| std::iter::once(&l.icon).chain(l.shapes.iter().map(|s| &s.icon)))
+            .flat_map(|l| {
+                std::iter::once(&l.icon)
+                    .chain(l.shapes.iter().map(|s| &s.icon))
+                    .chain(l.templates().map(|t| &t.icon))
+            })
             .filter_map(|icon| match icon {
                 Icon::Lucide(name) => Some(format!("icons/{name}.svg").into()),
                 Icon::Outline(_) => None,
@@ -171,7 +176,9 @@ mod tests {
             icon: Icon::Lucide("shapes".into()),
             order: 0,
             builtin: false,
+            items: (0..50).map(LibraryItem::Shape).collect(),
             shapes,
+            parts: Vec::new(),
         };
         let registry = LibraryRegistry::new(vec![library], None).0;
         let bundled: HashSet<SharedString> = [SharedString::from("icons/shapes.svg")].into();

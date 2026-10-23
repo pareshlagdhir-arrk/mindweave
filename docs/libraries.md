@@ -4,7 +4,10 @@ Every shape in Mindweave comes from a **library**: a folder of plain data
 files that describes a set of shapes. You can write a library without any
 Rust; you only need a text editor and, optionally, an SVG editor.
 
-This guide describes format 1 of the library files.
+This guide describes formats 1 and 2 of the library files. Format 2 adds
+the `"ink"` colour, dashed outlines, hollow arrowheads and templates
+(items made of several shapes and lines); see [Format 2](#format-2).
+Format 1 libraries keep loading as before.
 
 ## Installing a library
 
@@ -95,7 +98,7 @@ style = { fill = "#FFF4D6", stroke = "#C99A2E" }
 
 | Field         | Type    | Required | Default    | Meaning |
 |---------------|---------|----------|------------|---------|
-| `format`      | integer | yes      | none       | The library format. It must be `1`. |
+| `format`      | integer | yes      | none       | The library format: `1`, or `2` to use the features of [Format 2](#format-2). |
 | `id`          | string  | yes      | none       | A stable, unique identifier. Documents store it, so never change it after you publish the library. 1 to 64 characters: lowercase letters, digits, `-`, `_` and `.`, starting with a letter or digit. Example: `"acme.flowchart"`. |
 | `name`        | string  | yes      | none       | The tab name shown in the ribbon (at most 100 characters). |
 | `version`     | string  | yes      | none       | Your library's own version, for example `"1.2.0"`. |
@@ -110,8 +113,9 @@ loads.
 
 ## `shapes.toml`
 
-The file holds one `[[shape]]` table per shape, at most 500 shapes. Shapes
-appear in the ribbon in the order they are written.
+The file holds one `[[shape]]` table per shape and, in format 2, one
+`[[template]]` table per [template](#templates): at most 500 of them in
+all. They appear in the ribbon in the order they are written.
 
 | Field          | Type             | Required        | Default      | Meaning |
 |----------------|------------------|-----------------|--------------|---------|
@@ -130,10 +134,11 @@ A shape needs exactly one of `primitive` and `svg`.
 
 | Field          | Type   | Default     | Meaning |
 |----------------|--------|-------------|---------|
-| `fill`         | string | `"auto"` | Fill colour as `"#RRGGBB"`, `"auto"` for the canvas colour of the current theme, `"ink"` for the theme's text colour, or `"none"` for no fill. |
-| `stroke`       | string | `"auto"` | Outline colour as `"#RRGGBB"`, `"auto"` or `"ink"` for the theme's text colour (white in dark themes, dark in light ones), or `"none"` for no outline. |
+| `fill`         | string | `"auto"` | Fill colour as `"#RRGGBB"`, `"auto"` for the canvas colour of the current theme, `"ink"` (format 2) for the theme's text colour, or `"none"` for no fill. |
+| `stroke`       | string | `"auto"` | Outline colour as `"#RRGGBB"`, `"auto"` or `"ink"` (format 2) for the theme's text colour (white in dark themes, dark in light ones), or `"none"` for no outline. |
 | `stroke_width` | number | `1.5`       | Outline width in canvas units, from 0 to 100. |
 | `opacity`      | number | `1.0`       | From 0 (invisible) to 1 (opaque). |
+| `dash`         | string | `"solid"`   | Format 2: `"solid"`, `"dashed"` or `"dotted"` outline. |
 
 An invalid colour gives a warning and is treated as `"none"`. An invalid
 width or opacity gives a warning and uses the default.
@@ -224,9 +229,12 @@ rest.
 
 ## Compatibility and errors
 
-- `format` must be `1`. A library that declares a higher format is skipped
-  with the notice "needs a newer version of Mindweave". A missing or
-  invalid `format` skips the library too.
+- `format` must be `1` or `2`. A library that declares a higher format is
+  skipped with the notice "needs a newer version of Mindweave". A missing
+  or invalid `format` skips the library too.
+- A format 1 library that uses a format 2 feature gives a warning and
+  skips only that feature: an `"ink"` colour is treated as `"none"`,
+  `dash` is ignored, and each `[[template]]` is skipped.
 - Unknown fields are ignored, so a library written for a later Mindweave
   can still load when it only adds fields. They are written to the log
   (standard error) once per launch rather than shown as a notice.
@@ -236,12 +244,138 @@ rest.
 - These problems skip the whole library: a missing `library.toml` or
   `shapes.toml`, a file larger than 1 MB, files that add up to more than
   16 MB, invalid TOML, a missing or invalid required field in
-  `library.toml`, more than 500 shapes, or an `id` that another loaded
+  `library.toml`, more than 500 shapes and templates, or an `id` that another loaded
   library already uses. Built-in libraries keep their ids.
 - At most 100 library folders are loaded, in folder name order; one
   notice counts the folders that were skipped.
 - Notices quote at most 60 characters of any value from your files, and
   notices longer than 600 characters are cut short with `…`.
+
+## Format 2
+
+Set `format = 2` in `library.toml` to use:
+
+- **The ink colour.** `"ink"` as a `fill` or `stroke` is the theme's text
+  colour: white in dark themes, dark in light ones. Use it for solid
+  marks such as a UML initial node, which must stay visible on any
+  theme. (`"auto"` keeps its meaning: the canvas colour for a fill.)
+- **Dashed outlines.** `dash = "dashed"` or `"dotted"` in a `style`.
+- **Templates**, which can also use hollow arrowheads on their lines.
+
+### Templates
+
+A `[[template]]` is one ribbon item that places several shapes and lines
+at once. They are scaled from the template's `default_size` to the size
+the user drags (a click uses `default_size`) and grouped, so they select
+and move as one; ungrouping separates them. The placed shapes are
+ordinary shapes: their labels can be edited, and the ends of their lines
+attached to other shapes.
+
+| Field          | Type             | Required | Default     | Meaning |
+|----------------|------------------|----------|-------------|---------|
+| `id`           | string           | yes      | none        | Unique among the library's shapes and templates. Same rules as a shape `id`. |
+| `name`         | string           | yes      | none        | Shown in tooltips (at most 100 characters). |
+| `icon`         | string           | yes      | none        | The ribbon icon. See [Icons](#icons). An invalid icon gives a warning and `"shapes"` is used. |
+| `default_size` | `[width, height]`| no       | `[120, 80]` | The template's own units: part frames and line ends are given within this box. Each value is from 1 to 10000. |
+| `part`         | array of tables  | yes      | none        | The parts, back to front: 1 to 20 `[[template.part]]` tables. |
+
+Each `[[template.part]]` is either a shape or a line:
+
+| Field       | Type            | Meaning |
+|-------------|-----------------|---------|
+| `frame`     | `[x, y, w, h]`  | A shape part's box, in template units. Required for shapes; not used by lines. |
+| `primitive` | string          | A shape part built from a [primitive](#primitives). |
+| `svg`       | string          | A shape part from an [SVG outline](#svg-outlines). |
+| `params`    | table           | A primitive part's parameter values, such as `{ corner_radius = 4 }`. Values are clamped to the primitive's limits. |
+| `line`      | table           | A line part: `{ from = [x, y], to = [x, y], start_head = "none", end_head = "hollow-triangle" }`. `from` and `to` are in template units. |
+| `style`     | table           | As a shape's [`style`](#style), with `dash`. Lines have no fill, and their `stroke_width` defaults to `2`. |
+| `label`     | table           | The part's text: `{ text = "Name", align = "center", valign = "middle", bold = false, italic = false, underline = false, size = 14 }`. Only `text` is required (at most 1000 characters; `\n` starts a new paragraph). `align` is `"left"`, `"center"` or `"right"`; `valign` is `"top"`, `"middle"` or `"bottom"`; `size` is from 1 to 1000. |
+
+A part has exactly one of `primitive`, `svg` and `line`. Arrowheads are
+`"none"`, `"arrow"`, `"triangle"`, `"diamond"`, `"circle"`,
+`"hollow-triangle"` and `"hollow-diamond"`; the hollow heads are outlined
+in the line's colour and filled with the canvas colour.
+
+Documents store each placed shape part as the library's shape
+`<template id>.<part number>` (parts are numbered from 1 in the order
+they are written), so do not reorder the parts of a published template;
+add new parts at the end. If the library is not installed, these shapes
+are drawn as placeholders; lines are drawn as usual.
+
+A template with more than 20 parts, no usable parts, or a missing `id`,
+`name` or `icon` is skipped with a warning. A part with a problem (no
+`frame`, an unknown primitive, both a shape and a line) is skipped on its
+own; smaller problems in a label or a parameter give a warning and use a
+default.
+
+### A complete format 2 example
+
+A small UML library: an ink-filled initial node, a class box with three
+compartments, and a dashed realization arrow with a hollow head.
+
+`my-uml/library.toml`:
+
+<!-- format-2-file: library.toml -->
+```toml
+format = 2
+id = "my-uml"
+name = "My UML"
+version = "0.1.0"
+icon = "component"
+```
+
+`my-uml/shapes.toml`:
+
+<!-- format-2-file: shapes.toml -->
+```toml
+[[shape]]
+id = "initial-node"
+name = "Initial Node"
+icon = "circle-dot"
+default_size = [24, 24]
+primitive = "ellipse"
+style = { fill = "ink", stroke = "none" }
+
+[[template]]
+id = "class"
+name = "Class"
+icon = "shapes/class.svg"
+default_size = [160, 100]
+
+[[template.part]]
+frame = [0, 0, 160, 28]
+primitive = "rect"
+label = { text = "ClassName", bold = true }
+
+[[template.part]]
+frame = [0, 28, 160, 36]
+primitive = "rect"
+label = { text = "+ attribute: Type", align = "left", valign = "top", size = 12 }
+
+[[template.part]]
+frame = [0, 64, 160, 36]
+primitive = "rect"
+label = { text = "+ operation()", align = "left", valign = "top", size = 12 }
+
+[[template]]
+id = "realization"
+name = "Realization"
+icon = "move-up-right"
+default_size = [120, 60]
+
+[[template.part]]
+line = { from = [0, 60], to = [120, 0], end_head = "hollow-triangle" }
+style = { stroke = "ink", dash = "dashed" }
+```
+
+`my-uml/shapes/class.svg`, the class icon:
+
+<!-- format-2-file: shapes/class.svg -->
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <path d="M3 3H21V21H3Z M5 5V8H19V5Z M5 10V14H19V10Z M5 16V19H19V16Z"/>
+</svg>
+```
 
 ## Worked example: Basic Shapes
 

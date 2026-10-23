@@ -1,9 +1,11 @@
 //! Shape libraries: folders of data files (`library.toml`, `shapes.toml`
 //! and optional SVG outlines) that describe the shapes users can place.
 //! The format is documented for contributors in `docs/libraries.md`.
+//! Format 2 adds templates (see [`crate::template`]), the `"ink"` colour
+//! and dashed styles; format 1 libraries load as they always did.
 //!
 //! Library files are untrusted. Every file is limited to
-//! [`MAX_FILE_BYTES`], a library to [`MAX_SHAPES`] shapes and
+//! [`MAX_FILE_BYTES`], a library to [`MAX_SHAPES`] shapes and templates and
 //! [`MAX_LIBRARY_BYTES`] read in all, the user folder to
 //! [`MAX_USER_LIBRARIES`] libraries, paths must stay inside the library
 //! folder, and SVG files are read for geometry only (each once). Values
@@ -16,20 +18,28 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+use serde::de::IgnoredAny;
+use serde::Deserialize;
 use thiserror::Error;
-use toml::{Table, Value};
+use toml::{Spanned, Table, Value};
 
-use crate::color::{normalize_style_color, AUTO_COLOR};
+use crate::color::{normalize_style_color, AUTO_COLOR, INK_COLOR};
 use crate::geometry::{primitive_geometry, scale_unit, Geometry, Primitive};
+use crate::line::LineDash;
 use crate::svg::parse_outline;
+use crate::template::{load_template, TemplateDef};
 
-/// The library format this build reads (`format` in `library.toml`).
-pub const LIBRARY_FORMAT: u32 = 1;
+/// The newest library format this build reads (`format` in
+/// `library.toml`). Format 1 libraries still load.
+pub const LIBRARY_FORMAT: u32 = 2;
+
+/// The first library format with templates, `"ink"` and `dash`.
+pub(crate) const FORMAT_2: u32 = 2;
 
 /// Largest library file accepted, in bytes.
 pub const MAX_FILE_BYTES: usize = 1_048_576;
 
-/// Most shapes one library may declare.
+/// Most shapes and templates one library may declare, together.
 pub const MAX_SHAPES: usize = 500;
 
 /// Most bytes read from the files of one library, in all.
@@ -45,13 +55,13 @@ const MAX_QUOTED_CHARS: usize = 60;
 const MAX_NOTICE_CHARS: usize = 600;
 
 /// Longest library or shape id, in bytes.
-const MAX_ID_LEN: usize = 64;
+pub(crate) const MAX_ID_LEN: usize = 64;
 
 /// Longest library or shape name, in characters.
 const MAX_NAME_LEN: usize = 100;
 
 /// Largest default width or height, in canvas units.
-const MAX_DEFAULT_SIZE: f32 = 10_000.0;
+pub(crate) const MAX_DEFAULT_SIZE: f32 = 10_000.0;
 
 /// Widest default stroke, in canvas units.
 const MAX_STROKE_WIDTH: f32 = 100.0;
@@ -59,8 +69,8 @@ const MAX_STROKE_WIDTH: f32 = 100.0;
 /// Warnings listed in one registry notice before the rest are counted.
 const MAX_NOTICE_WARNINGS: usize = 5;
 
-const DEFAULT_ICON: &str = "shapes";
-const DEFAULT_SIZE: (f32, f32) = (120.0, 80.0);
+pub(crate) const DEFAULT_ICON: &str = "shapes";
+pub(crate) const DEFAULT_SIZE: (f32, f32) = (120.0, 80.0);
 const DEFAULT_FILL: &str = AUTO_COLOR;
 const DEFAULT_STROKE: &str = AUTO_COLOR;
 const DEFAULT_STROKE_WIDTH: f32 = 1.5;
@@ -86,7 +96,7 @@ const SHAPE_FIELDS: &[&str] = &[
     "style",
     "param",
 ];
-const STYLE_FIELDS: &[&str] = &["fill", "stroke", "stroke_width", "opacity"];
+const STYLE_FIELDS: &[&str] = &["fill", "stroke", "stroke_width", "opacity", "dash"];
 const PARAM_FIELDS: &[&str] = &["key", "label", "min", "max", "step", "default"];
 
 /// A toolbar icon: a Lucide icon name, or an outline from the library.
@@ -120,6 +130,8 @@ pub struct StyleDefaults {
     pub stroke_width: f32,
     /// From 0 to 1.
     pub opacity: f32,
+    /// How the outline is broken up (format 2; always solid in format 1).
+    pub dash: LineDash,
 }
 
 impl Default for StyleDefaults {
@@ -129,6 +141,7 @@ impl Default for StyleDefaults {
             stroke: Some(DEFAULT_STROKE.into()),
             stroke_width: DEFAULT_STROKE_WIDTH,
             opacity: DEFAULT_OPACITY,
+            dash: LineDash::Solid,
         }
     }
 }
@@ -178,6 +191,14 @@ impl ShapeDef {
     }
 }
 
+/// One entry of a library's ribbon.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LibraryItem {
+    /// The shape at this index of [`Library::shapes`].
+    Shape(usize),
+    Template(TemplateDef),
+}
+
 /// A loaded library.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Library {
@@ -191,14 +212,32 @@ pub struct Library {
     pub order: i32,
     /// Compiled into the app rather than read from the user folder.
     pub builtin: bool,
-    /// In file order; ids are unique.
+    /// The shapes users can place, in file order; ids are unique.
     pub shapes: Vec<ShapeDef>,
+    /// The ribbon: shapes and templates in file order.
+    pub items: Vec<LibraryItem>,
+    /// Hidden shapes drawing the parts of templates (ids
+    /// `<template>.<part number>`); never in the ribbon.
+    pub parts: Vec<ShapeDef>,
 }
 
 impl Library {
-    /// The shape with this id, if any.
+    /// The shape with this id, if any, including template part shapes.
     pub fn shape(&self, id: &str) -> Option<&ShapeDef> {
-        self.shapes.iter().find(|s| s.id == id)
+        self.shapes.iter().chain(&self.parts).find(|s| s.id == id)
+    }
+
+    /// The template with this id, if any.
+    pub fn template(&self, id: &str) -> Option<&TemplateDef> {
+        self.templates().find(|t| t.id == id)
+    }
+
+    /// The templates, in file order.
+    pub fn templates(&self) -> impl Iterator<Item = &TemplateDef> {
+        self.items.iter().filter_map(|item| match item {
+            LibraryItem::Template(t) => Some(t),
+            LibraryItem::Shape(_) => None,
+        })
     }
 }
 
@@ -214,7 +253,7 @@ pub enum LibraryError {
     Toml(String),
     #[error("needs a newer version of Mindweave (library format {0})")]
     NewerFormat(u32),
-    #[error("has {0} shapes; a library may have at most {max}", max = MAX_SHAPES)]
+    #[error("has {0} shapes and templates; a library may have at most {max}", max = MAX_SHAPES)]
     TooManyShapes(usize),
     #[error("its files add up to more than 16 MB")]
     TooMuchData,
@@ -339,7 +378,7 @@ pub struct LoadReport {
 /// [`MAX_LIBRARY_BYTES`], including those of reads that fail, and reads
 /// each SVG outline once, however many shapes and icons use it and
 /// however its path is written (`a.svg`, `./a.svg`).
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     files: &'a dyn LibraryFiles,
     bytes_read: usize,
     outlines: HashMap<String, Result<Geometry, String>>,
@@ -354,7 +393,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn over_budget(&self) -> bool {
+    pub(crate) fn over_budget(&self) -> bool {
         self.bytes_read > MAX_LIBRARY_BYTES
     }
 
@@ -392,7 +431,7 @@ impl<'a> Reader<'a> {
     }
 
     /// The SVG outline file `rel`.
-    fn outline(&mut self, rel: &str) -> Result<Geometry, String> {
+    pub(crate) fn outline(&mut self, rel: &str) -> Result<Geometry, String> {
         let rel = normalized_path(rel).map_err(|e| e.to_string())?;
         if let Some(outline) = self.outlines.get(&rel) {
             return outline.clone();
@@ -448,7 +487,7 @@ pub fn load_library(
 
     let table = read_toml(files, "library.toml")?;
     // Checked first: a newer format may change every other field.
-    check_format(&table)?;
+    let format = check_format(&table)?;
     warn_unknown(&table, LIBRARY_FIELDS, "library.toml", &mut report.log);
     let invalid = |e: String| LibraryError::Invalid(format!("library.toml: {e}"));
     let id = valid_id(required_str(&table, "id").map_err(invalid)?).map_err(invalid)?;
@@ -493,7 +532,8 @@ pub fn load_library(
         return Err(LibraryError::TooMuchData);
     }
 
-    let mut table = read_toml(files, "shapes.toml")?;
+    let text = files.read("shapes.toml")?;
+    let mut table = parse_toml(&text, "shapes.toml")?;
     let entries = match table.remove("shape") {
         None => Vec::new(),
         Some(Value::Array(entries)) => entries,
@@ -503,19 +543,64 @@ pub fn load_library(
             ))
         }
     };
+    let templates = match (format, table.remove("template")) {
+        (_, None) => Vec::new(),
+        (FORMAT_2.., Some(Value::Array(templates))) => templates,
+        (FORMAT_2.., Some(_)) => {
+            return Err(LibraryError::Invalid(
+                "shapes.toml: templates must be written as [[template]] tables".into(),
+            ))
+        }
+        (_, Some(value)) => {
+            let entries = match value {
+                Value::Array(entries) => entries,
+                other => vec![other],
+            };
+            for (index, entry) in entries.iter().enumerate() {
+                let context = match entry.get("id") {
+                    Some(Value::String(id)) => format!("template `{}`", quote(id)),
+                    _ => format!("template #{}", index + 1),
+                };
+                report.notices.push(format!(
+                    "{context}: templates need library format 2; skipped"
+                ));
+            }
+            Vec::new()
+        }
+    };
     warn_unknown(&table, &[], "shapes.toml", &mut report.log);
-    if entries.len() > MAX_SHAPES {
-        return Err(LibraryError::TooManyShapes(entries.len()));
+    let count = entries.len() + templates.len();
+    if count > MAX_SHAPES {
+        return Err(LibraryError::TooManyShapes(count));
     }
     let mut shapes: Vec<ShapeDef> = Vec::with_capacity(entries.len());
+    let mut items = Vec::with_capacity(count);
+    let mut parts = Vec::new();
+    // Shape, template and part shape ids share one namespace.
     let mut ids = HashSet::new();
-    for (index, entry) in entries.iter().enumerate() {
-        match load_shape(files, entry, index + 1, &ids, &mut report) {
-            Ok(shape) => {
-                ids.insert(shape.id.clone());
-                shapes.push(shape);
+    for item in item_order(&text, entries.len(), templates.len()) {
+        match item {
+            ItemRef::Shape(index) => {
+                match load_shape(files, &entries[index], index + 1, &ids, format, &mut report) {
+                    Ok(shape) => {
+                        ids.insert(shape.id.clone());
+                        items.push(LibraryItem::Shape(shapes.len()));
+                        shapes.push(shape);
+                    }
+                    Err(warning) => report.notices.push(warning),
+                }
             }
-            Err(warning) => report.notices.push(warning),
+            ItemRef::Template(index) => {
+                match load_template(files, &templates[index], index + 1, &ids, &mut report) {
+                    Ok((template, part_shapes)) => {
+                        ids.insert(template.id.clone());
+                        ids.extend(part_shapes.iter().map(|s| s.id.clone()));
+                        items.push(LibraryItem::Template(template));
+                        parts.extend(part_shapes);
+                    }
+                    Err(warning) => report.notices.push(warning),
+                }
+            }
         }
         if files.over_budget() {
             return Err(LibraryError::TooMuchData);
@@ -532,12 +617,67 @@ pub fn load_library(
         order,
         builtin,
         shapes,
+        items,
+        parts,
     };
     Ok((library, report))
 }
 
+/// A `[[shape]]` or `[[template]]` of `shapes.toml`, by its index among
+/// its own kind.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ItemRef {
+    Shape(usize),
+    Template(usize),
+}
+
+/// The order in which `shapes.toml` (`text`) writes its `shapes` shapes
+/// and `templates` templates. A parsed table keeps no order between
+/// the two arrays, so their positions are read from the text; when they
+/// cannot be, shapes come first.
+fn item_order(text: &str, shapes: usize, templates: usize) -> Vec<ItemRef> {
+    /// Where each item starts in the file.
+    #[derive(Deserialize)]
+    struct Positions {
+        #[serde(default)]
+        shape: Vec<Spanned<IgnoredAny>>,
+        #[serde(default)]
+        template: Vec<Spanned<IgnoredAny>>,
+    }
+    let in_order = (0..shapes)
+        .map(ItemRef::Shape)
+        .chain((0..templates).map(ItemRef::Template));
+    if templates == 0 {
+        return in_order.collect();
+    }
+    match toml::from_str::<Positions>(text) {
+        Ok(p) if p.shape.len() == shapes && p.template.len() == templates => {
+            let mut items: Vec<(usize, ItemRef)> = p
+                .shape
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.span().start, ItemRef::Shape(i)))
+                .chain(
+                    p.template
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| (t.span().start, ItemRef::Template(i))),
+                )
+                .collect();
+            items.sort_by_key(|(start, _)| *start);
+            items.into_iter().map(|(_, item)| item).collect()
+        }
+        _ => in_order.collect(),
+    }
+}
+
 fn read_toml(files: &mut Reader, rel: &str) -> Result<Table, LibraryError> {
     let text = files.read(rel)?;
+    parse_toml(&text, rel)
+}
+
+/// `text`, the contents of `rel`, as a TOML table.
+fn parse_toml(text: &str, rel: &str) -> Result<Table, LibraryError> {
     text.parse::<Table>().map_err(|e| {
         let message = e.message().trim_end();
         LibraryError::Toml(match e.span() {
@@ -555,12 +695,16 @@ fn read_toml(files: &mut Reader, rel: &str) -> Result<Table, LibraryError> {
     })
 }
 
-fn check_format(table: &Table) -> Result<(), LibraryError> {
+/// The library's format: 1 or 2.
+fn check_format(table: &Table) -> Result<u32, LibraryError> {
     match table.get("format") {
         None => Err(LibraryError::Invalid(format!(
             "library.toml has no `format` field; add `format = {LIBRARY_FORMAT}`"
         ))),
-        Some(Value::Integer(n)) if *n == i64::from(LIBRARY_FORMAT) => Ok(()),
+        Some(Value::Integer(n)) if (1..=i64::from(LIBRARY_FORMAT)).contains(n) => {
+            // In range, checked above.
+            Ok(*n as u32)
+        }
         Some(Value::Integer(n)) if *n > i64::from(LIBRARY_FORMAT) => Err(
             LibraryError::NewerFormat(u32::try_from(*n).unwrap_or(u32::MAX)),
         ),
@@ -574,13 +718,13 @@ fn check_format(table: &Table) -> Result<(), LibraryError> {
 }
 
 /// Adds one log line per key of `table` not in `known`.
-fn warn_unknown(table: &Table, known: &[&str], context: &str, log: &mut Vec<String>) {
+pub(crate) fn warn_unknown(table: &Table, known: &[&str], context: &str, log: &mut Vec<String>) {
     for key in table.keys().filter(|k| !known.contains(&k.as_str())) {
         log.push(format!("{context}: unknown field `{}` ignored", quote(key)));
     }
 }
 
-fn optional_str<'a>(table: &'a Table, key: &str) -> Result<Option<&'a str>, String> {
+pub(crate) fn optional_str<'a>(table: &'a Table, key: &str) -> Result<Option<&'a str>, String> {
     match table.get(key) {
         None => Ok(None),
         Some(Value::String(s)) => Ok(Some(s)),
@@ -588,12 +732,12 @@ fn optional_str<'a>(table: &'a Table, key: &str) -> Result<Option<&'a str>, Stri
     }
 }
 
-fn required_str<'a>(table: &'a Table, key: &str) -> Result<&'a str, String> {
+pub(crate) fn required_str<'a>(table: &'a Table, key: &str) -> Result<&'a str, String> {
     optional_str(table, key)?.ok_or_else(|| format!("`{key}` is missing"))
 }
 
 /// A finite number (TOML integer or float), if present.
-fn optional_number(table: &Table, key: &str) -> Result<Option<f32>, String> {
+pub(crate) fn optional_number(table: &Table, key: &str) -> Result<Option<f32>, String> {
     let n = match table.get(key) {
         None => return Ok(None),
         Some(Value::Integer(i)) => *i as f32,
@@ -608,7 +752,7 @@ fn optional_number(table: &Table, key: &str) -> Result<Option<f32>, String> {
 }
 
 /// Ids are stored in documents, so they are kept simple and stable.
-fn valid_id(id: &str) -> Result<&str, String> {
+pub(crate) fn valid_id(id: &str) -> Result<&str, String> {
     let ok = !id.is_empty()
         && id.len() <= MAX_ID_LEN
         && id.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
@@ -626,7 +770,7 @@ fn valid_id(id: &str) -> Result<&str, String> {
     }
 }
 
-fn valid_name(name: &str) -> Result<&str, String> {
+pub(crate) fn valid_name(name: &str) -> Result<&str, String> {
     let name = name.trim();
     if name.is_empty() {
         Err("`name` is empty".into())
@@ -649,7 +793,7 @@ fn valid_lucide_name(name: &str) -> bool {
 
 /// The icon named by `value` (a Lucide name, or an SVG file when it ends
 /// in `.svg`), or `fallback` with a warning when it cannot be used.
-fn load_icon(
+pub(crate) fn load_icon(
     files: &mut Reader,
     value: Option<&str>,
     fallback: Icon,
@@ -686,6 +830,7 @@ fn load_shape(
     entry: &Value,
     number: usize,
     taken_ids: &HashSet<String>,
+    format: u32,
     report: &mut LoadReport,
 ) -> Result<ShapeDef, String> {
     let Value::Table(table) = entry else {
@@ -740,7 +885,7 @@ fn load_shape(
     });
     let style = match table.get("style") {
         None => StyleDefaults::default(),
-        Some(Value::Table(style)) => load_style(style, &context, report),
+        Some(Value::Table(style)) => load_style(style, &context, format, report),
         Some(_) => {
             report
                 .notices
@@ -778,7 +923,7 @@ fn load_shape(
     })
 }
 
-fn load_default_size(value: Option<&Value>) -> Result<(f32, f32), String> {
+pub(crate) fn load_default_size(value: Option<&Value>) -> Result<(f32, f32), String> {
     let Some(value) = value else {
         return Ok(DEFAULT_SIZE);
     };
@@ -799,12 +944,26 @@ fn load_default_size(value: Option<&Value>) -> Result<(f32, f32), String> {
     }
 }
 
-fn load_style(table: &Table, context: &str, report: &mut LoadReport) -> StyleDefaults {
+/// The `style` table `table`, read as library format `format` allows.
+pub(crate) fn load_style(
+    table: &Table,
+    context: &str,
+    format: u32,
+    report: &mut LoadReport,
+) -> StyleDefaults {
     let context = format!("{context} style");
     warn_unknown(table, STYLE_FIELDS, &context, &mut report.log);
     let mut colour = |key: &str, default: &str| match table.get(key) {
         None => Some(default.to_owned()),
         Some(Value::String(s)) if s.trim() == "none" => None,
+        Some(Value::String(s))
+            if format < FORMAT_2 && normalize_style_color(s).as_deref() == Some(INK_COLOR) =>
+        {
+            report.notices.push(format!(
+                "{context}: `{key}` \"ink\" needs library format 2; no {key} is used"
+            ));
+            None
+        }
         Some(Value::String(s)) => normalize_style_color(s).or_else(|| {
             report.notices.push(format!(
                 "{context}: `{key}` \"{}\" is not a #RRGGBB colour or \"auto\"; no {key} is used",
@@ -839,11 +998,37 @@ fn load_style(table: &Table, context: &str, report: &mut LoadReport) -> StyleDef
     };
     let stroke_width = number("stroke_width", MAX_STROKE_WIDTH, DEFAULT_STROKE_WIDTH);
     let opacity = number("opacity", 1.0, DEFAULT_OPACITY);
+    let dash = match table.get("dash") {
+        None => LineDash::Solid,
+        Some(_) if format < FORMAT_2 => {
+            report
+                .notices
+                .push(format!("{context}: `dash` needs library format 2; ignored"));
+            LineDash::Solid
+        }
+        Some(value) => dash_from_value(value).unwrap_or_else(|| {
+            report.notices.push(format!(
+                "{context}: `dash` must be \"solid\", \"dashed\" or \"dotted\"; using solid"
+            ));
+            LineDash::Solid
+        }),
+    };
     StyleDefaults {
         fill,
         stroke,
         stroke_width,
         opacity,
+        dash,
+    }
+}
+
+/// The dash named by `value` (`"solid"`, `"dashed"` or `"dotted"`).
+fn dash_from_value(value: &Value) -> Option<LineDash> {
+    match value.as_str()?.trim() {
+        "solid" => Some(LineDash::Solid),
+        "dashed" => Some(LineDash::Dashed),
+        "dotted" => Some(LineDash::Dotted),
+        _ => None,
     }
 }
 
@@ -1290,6 +1475,13 @@ impl LibraryRegistry {
             .find(|l| l.id == library)
             .and_then(|l| l.shape(shape))
     }
+
+    /// The library `library` and its template `template`, if both are
+    /// installed.
+    pub fn template(&self, library: &str, template: &str) -> Option<(&Library, &TemplateDef)> {
+        let library = self.libraries.iter().find(|l| l.id == library)?;
+        Some((library, library.template(template)?))
+    }
 }
 
 /// Subfolders of `dir`, sorted by name, skipping hidden ones, and at most
@@ -1435,6 +1627,7 @@ version = "1.0.0"
             stroke: Some("auto".into()),
             stroke_width: 2.0,
             opacity: 1.0,
+            dash: LineDash::Solid,
         };
         assert_eq!(line.style, line_style);
         // Arrows are lines with heads now.
@@ -1568,6 +1761,7 @@ svg = "shapes/tri.svg"
                 stroke: None,
                 stroke_width: 3.0,
                 opacity: 0.5,
+                dash: LineDash::Solid,
             }
         );
         assert_eq!(rect.params[0].label, "Corner radius");
@@ -1630,17 +1824,17 @@ default = 5
     #[test]
     fn newer_format_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
-        let lib = "format = 2\nid = \"x\"\nwhatever = { new = true }\n";
+        let lib = "format = 3\nid = \"x\"\nwhatever = { new = true }\n";
         let root = write_lib(
             dir.path(),
             "l",
             &[("library.toml", lib), ("shapes.toml", "")],
         );
         let err = load_dir(&root).unwrap_err();
-        assert_eq!(err, LibraryError::NewerFormat(2));
+        assert_eq!(err, LibraryError::NewerFormat(3));
         assert_eq!(
             err.to_string(),
-            "needs a newer version of Mindweave (library format 2)"
+            "needs a newer version of Mindweave (library format 3)"
         );
     }
 
@@ -2574,6 +2768,90 @@ max = 100000
         let ids: Vec<_> = lib.shapes.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["process", "decision"]);
         assert!(matches!(lib.shapes[1].icon, Icon::Outline(_)));
+    }
+
+    #[test]
+    fn format_1_library_loads_unchanged() {
+        // The format 1 example from the docs and the format 1 built-ins.
+        let files = doc_files("example-file");
+        let dir = tempfile::tempdir().unwrap();
+        let borrowed: Vec<_> = files
+            .iter()
+            .map(|(p, t)| (p.as_str(), t.as_str()))
+            .collect();
+        let root = write_lib(dir.path(), "my-flowchart", &borrowed);
+        let (lib, warnings) = load_dir(&root).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let process = lib.shape("process").unwrap();
+        assert_eq!(
+            process,
+            &ShapeDef {
+                id: "process".into(),
+                name: "Process".into(),
+                icon: Icon::Lucide("rectangle-horizontal".into()),
+                default_size: (140.0, 70.0),
+                style: StyleDefaults {
+                    fill: Some("#E8F0FE".into()),
+                    stroke: Some("#3B6FD8".into()),
+                    stroke_width: 1.5,
+                    opacity: 1.0,
+                    dash: LineDash::Solid,
+                },
+                source: ShapeSource::Primitive(Primitive::Rect),
+                params: vec![ParamDef {
+                    key: "corner_radius".into(),
+                    label: "Corner radius".into(),
+                    min: 0.0,
+                    max: 40.0,
+                    step: 1.0,
+                    default: 8.0,
+                }],
+            }
+        );
+        let mut libraries = vec![lib];
+        libraries.extend(
+            BUILTIN_LIBRARY_FILES
+                .iter()
+                .map(|files| load_library(&EmbeddedFiles(files), true).unwrap().0),
+        );
+        for lib in &libraries {
+            // Every item is a shape, in file order, with nothing hidden.
+            let indices: Vec<usize> = lib
+                .items
+                .iter()
+                .map(|item| match item {
+                    LibraryItem::Shape(i) => *i,
+                    LibraryItem::Template(t) => panic!("template {}", t.id),
+                })
+                .collect();
+            assert_eq!(indices, (0..lib.shapes.len()).collect::<Vec<_>>());
+            assert!(lib.parts.is_empty(), "{}", lib.id);
+        }
+    }
+
+    #[test]
+    fn docs_format_2_example_loads() {
+        let files = doc_files("format-2-file");
+        assert_eq!(files.len(), 3);
+        let dir = tempfile::tempdir().unwrap();
+        let borrowed: Vec<_> = files
+            .iter()
+            .map(|(p, t)| (p.as_str(), t.as_str()))
+            .collect();
+        let root = write_lib(dir.path(), "my-uml", &borrowed);
+        let (lib, warnings) = load_dir(&root).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(lib.id, "my-uml");
+        let kinds: Vec<&str> = lib
+            .items
+            .iter()
+            .map(|item| match item {
+                LibraryItem::Shape(i) => lib.shapes[*i].id.as_str(),
+                LibraryItem::Template(t) => t.id.as_str(),
+            })
+            .collect();
+        assert_eq!(kinds, ["initial-node", "class", "realization"]);
+        assert_eq!(lib.template("class").unwrap().parts.len(), 3);
     }
 
     #[test]

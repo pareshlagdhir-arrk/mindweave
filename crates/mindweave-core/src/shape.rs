@@ -193,6 +193,7 @@ impl Shape {
                 stroke: def.style.stroke.clone(),
                 stroke_width: def.style.stroke_width,
                 opacity: def.style.opacity,
+                dash: def.style.dash,
                 ..Style::default()
             },
             params: def
