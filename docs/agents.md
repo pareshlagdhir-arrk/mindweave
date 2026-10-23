@@ -23,8 +23,9 @@ tells agents how to use it well.
   `add_relationship`, `set_structure`. Diagrams: `add_shape`, `add_text`,
   `connect`, `add_line`, `group`, `ungroup`, `set_style`, `set_text`,
   `set_name`, `move_objects`, `set_frame`, `delete_objects`, `arrange`.
-  Artboards: `add_artboard`. Pictures: `export_png` (returned as an image,
-  optionally written to a `.png`), `export_svg`.
+  Artboards: `add_artboard`. Pictures: `export_png` (returned as an image
+  of at most 2048 px a side, optionally written to a `.png` at full size),
+  `export_svg`.
 - **Same rules as the app.** Edits go through the same document model:
   mind maps are laid out automatically, connectors stay attached to the
   shapes they join, objects placed inside an artboard join it, and the file
@@ -37,8 +38,9 @@ tells agents how to use it well.
   LaTeX engine, link and note badges are not drawn, and fonts come from
   the system.
 - **Safety.** The server only touches the paths it is given, reads and
-  writes only files ending in `.mindweave` (exports only `.png` or `.svg`),
-  requires absolute paths, never replaces an existing document with
+  writes only files ending in `.mindweave` (exports only `.png` or `.svg`;
+  an existing file at an export's `out_path` is replaced, written through a
+  temporary file), requires absolute paths, never replaces an existing document with
   `create_document` and never deletes files. Texts, batches and picture
   sizes are limited. Logs go to stderr; stdout carries only protocol
   messages.
@@ -63,11 +65,15 @@ binary (for example `/Users/me/.cargo/bin/mindweave-mcp`).
 
 ## Client setup
 
-> The snippets follow each client's documentation as we understood it and
-> were not all tested against current releases; check your client's MCP
-> documentation if one does not work.
+> Each snippet says whether it was checked against the client's current
+> documentation. None was run against a live client release; if one does
+> not work, check the client's MCP documentation.
 
 ### Claude Code
+
+*Unverified (written from memory of the `claude mcp add` command; the
+`--` before the command and the `--scope user` option are the parts we
+are least sure of).*
 
 ```sh
 claude mcp add mindweave -- /path/to/mindweave-mcp
@@ -76,6 +82,9 @@ claude mcp add --scope user mindweave -- /path/to/mindweave-mcp
 ```
 
 ### Claude Desktop
+
+*Unverified (the `mcpServers` form is the widely used one; the menu path
+to the file may differ between versions).*
 
 In `claude_desktop_config.json` (Settings → Developer → Edit Config):
 
@@ -92,7 +101,13 @@ In `claude_desktop_config.json` (Settings → Developer → Edit Config):
 
 ### Codex
 
-In `~/.codex/config.toml`:
+*Verified against developers.openai.com/codex/mcp.* With the Codex CLI:
+
+```sh
+codex mcp add mindweave -- /path/to/mindweave-mcp
+```
+
+Or in `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.mindweave]
@@ -101,6 +116,11 @@ args = []
 ```
 
 ### opencode
+
+*Verified against opencode.ai/docs/mcp-servers.* Newer ("v2")
+documentation nests servers one level deeper, under `"mcp": { "servers":
+{ "mindweave": { ... } } }`; use that form if your version's documentation
+shows it.
 
 In `opencode.json` (project) or `~/.config/opencode/opencode.json`:
 
@@ -119,6 +139,9 @@ In `opencode.json` (project) or `~/.config/opencode/opencode.json`:
 
 ### Cursor
 
+*Unverified (the `mcpServers` form in `.cursor/mcp.json` is the one we
+know; the global file location is the part we are least sure of).*
+
 In `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`:
 
 ```json
@@ -134,7 +157,8 @@ In `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`:
 
 ### Any other MCP client
 
-Register a **stdio** server whose command is the `mindweave-mcp` binary,
+*Follows the MCP specification (stdio transport), which the server's tests
+exercise.* Register a **stdio** server whose command is the `mindweave-mcp` binary,
 with no arguments (or `--libraries-dir DIR`). It speaks MCP protocol
 versions 2025-06-18, 2025-03-26 and 2024-11-05 with newline-delimited
 JSON-RPC 2.0.
@@ -144,10 +168,12 @@ JSON-RPC 2.0.
 The skill is a plain folder in the open Agent Skills format
 (`SKILL.md` with `name` and `description` frontmatter):
 
-- **Claude Code:** copy `skills/mindweave` to `~/.claude/skills/mindweave`
-  (all projects) or `.claude/skills/mindweave` (one project).
-- **Clients with skills folders** (for example Codex and opencode): copy
-  the folder where the client looks for skills; see its documentation.
+- **Claude Code** *(unverified)*: copy `skills/mindweave` to
+  `~/.claude/skills/mindweave` (all projects) or `.claude/skills/mindweave`
+  (one project).
+- **Clients with skills folders** (for example Codex and opencode)
+  *(unverified; we do not know their folder locations)*: copy the folder
+  where the client looks for skills; see its documentation.
 - **Any client:** add a line to the project's `AGENTS.md` (or `CLAUDE.md`)
   such as "When working with .mindweave files, follow
   skills/mindweave/SKILL.md", or paste the skill's body into the client's

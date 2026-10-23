@@ -475,3 +475,69 @@ fn validate_reports_dangling_references() {
         .any(|p| p.severity == Severity::Error && p.object == Some(a)));
     assert!(problems.iter().any(|p| p.severity == Severity::Warning));
 }
+
+#[test]
+fn validate_checks_groups() {
+    let (_dir, _path, mut ws) = new_ws("groups.mindweave");
+    let a = ws
+        .add_shape(
+            None,
+            "basic-shapes",
+            "rectangle",
+            (0.0, 0.0),
+            None,
+            None,
+            None,
+        )
+        .unwrap()[0];
+    let b = ws
+        .add_shape(
+            None,
+            "basic-shapes",
+            "ellipse",
+            (200.0, 0.0),
+            None,
+            None,
+            None,
+        )
+        .unwrap()[0];
+    let c = ws
+        .add_shape(None, "basic-shapes", "star", (400.0, 0.0), None, None, None)
+        .unwrap()[0];
+    let g = ws.group(&[a, b]).unwrap();
+    assert!(ws.validate().is_empty(), "{:?}", ws.validate());
+    let about = |doc: &crate::document::Document, sev: Severity, words: &str| {
+        validate(doc, None)
+            .iter()
+            .any(|p| p.severity == sev && p.message.contains(words))
+    };
+    // One member left.
+    let mut doc = ws.doc().clone();
+    doc.pages[0].layers[0].objects[1].groups.clear();
+    assert!(about(&doc, Severity::Warning, "only one member"));
+    // Members on two layers.
+    let mut doc = ws.doc().clone();
+    let moved = doc.pages[0].layers[0].objects.remove(1);
+    let mut top = crate::document::Layer::new("Top");
+    top.objects.push(moved);
+    doc.pages[0].layers.insert(0, top);
+    assert!(about(&doc, Severity::Error, "different layers"));
+    // A group nested differently in its members.
+    let mut doc = ws.doc().clone();
+    let objects = &mut doc.pages[0].layers[0].objects;
+    objects[0].groups = vec![Uuid::new_v4(), g];
+    assert_eq!(objects[2].id, c);
+    assert!(about(&doc, Severity::Error, "dangling group id"));
+}
+
+#[test]
+fn topics_cannot_be_resized_by_hand() {
+    let (_dir, _path, mut ws) = new_ws("topic-size.mindweave");
+    let map = ws.add_mind_map(None, "C", None, None).unwrap();
+    let err = ws
+        .set_frame(map, (0.0, 0.0), Some((300.0, 100.0)))
+        .unwrap_err();
+    assert!(err.to_string().contains("size themselves"), "{err}");
+    ws.set_frame(map, (50.0, 50.0), None).unwrap();
+    assert_eq!(ws.shape(map).unwrap().frame.x, 50.0);
+}

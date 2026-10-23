@@ -90,6 +90,9 @@ impl Args<'_> {
         let Some(Value::Array(items)) = self.get(key) else {
             return Err(format!("`{key}` must be a list of object ids."));
         };
+        if items.is_empty() {
+            return Err(format!("`{key}`: pass at least one id."));
+        }
         if items.len() > MAX_IDS {
             return Err(format!("`{key}` may list at most {MAX_IDS} ids."));
         }
@@ -179,6 +182,22 @@ pub fn expand(p: &str) -> Result<PathBuf, String> {
         return Err("Paths may not contain `..`.".into());
     }
     Ok(path)
+}
+
+/// Writes `bytes` to `path` through a temporary file renamed over it,
+/// so a reader never sees half a file; an existing file is replaced.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.tmp"));
+    let fail = |e: std::io::Error| format!("Could not write {}: {e}", path.display());
+    std::fs::write(&tmp, bytes).map_err(fail)?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        fail(e)
+    })
 }
 
 /// Whether `path`'s folder exists, with a message if not.

@@ -14,7 +14,7 @@ use mindweave_core::ops::{
 use mindweave_core::{builtin_libraries, user_libraries_dir, LibraryRegistry};
 use serde_json::{json, Map, Value};
 
-use crate::args::{check_folder, expand, Args};
+use crate::args::{check_folder, expand, write_atomic, Args};
 use crate::render;
 
 /// Why a tool call failed.
@@ -530,7 +530,7 @@ const TOOLS: &[Tool] = &[
         description: "Export a page, an artboard or some objects as SVG text. Writes it to `out_path` when given (a .svg file), else returns it.",
         props: || {
             let mut p = region_props();
-            p.push(("out_path", s("Absolute path of a .svg file to write")));
+            p.push(("out_path", s("Absolute path of a .svg file to write; an existing file there is replaced")));
             p
         },
         required: &[],
@@ -539,11 +539,11 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "export_png",
-        description: "Render a page, an artboard or some objects to a PNG image and return it, so you can look at your work. Optionally also writes it to `out_path`. Text is approximate until the app opens the file.",
+        description: "Render a page, an artboard or some objects to a PNG image and return it (at most 2048 px a side), so you can look at your work. Optionally also writes it to `out_path`. Text is approximate until the app opens the file.",
         props: || {
             let mut p = region_props();
             p.push(("scale", num("Pixels per canvas unit (default 1; at most 8192 px a side)")));
-            p.push(("out_path", s("Absolute path of a .png file to write")));
+            p.push(("out_path", s("Absolute path of a .png file to write at full size; an existing file there is replaced")));
             p
         },
         required: &[],
@@ -1124,8 +1124,7 @@ fn export_svg_tool(ctx: &Context, a: &Args) -> ToolResult {
     let size = json!({"width": svg.width, "height": svg.height});
     match out {
         Some(path) => {
-            std::fs::write(&path, &svg.svg)
-                .map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+            write_atomic(&path, svg.svg.as_bytes())?;
             reply(
                 format!("Wrote {}.", path.display()),
                 json!({"out_path": path, "size": size}),
@@ -1145,12 +1144,15 @@ fn export_png_tool(ctx: &Context, a: &Args) -> ToolResult {
         return Err("`scale` must be above 0 and at most 16.".into());
     }
     let svg = export(ctx, a)?;
-    let png = render::rasterise(&svg.svg, scale)?;
+    // The returned image stays small enough for a model to look at; the
+    // file gets the full size.
+    let png = render::rasterise(&svg.svg, scale, render::MAX_INLINE_SIDE)?;
     let mut info = json!({"width": png.width, "height": png.height, "canvas_size": {"width": svg.width, "height": svg.height}});
     if let Some(path) = &out {
-        std::fs::write(path, &png.bytes)
-            .map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+        let full = render::rasterise(&svg.svg, scale, render::MAX_PNG_SIDE)?;
+        write_atomic(path, &full.bytes)?;
         info["out_path"] = json!(path);
+        info["file_size"] = json!({"width": full.width, "height": full.height});
     }
     info["summary"] = json!(format!("PNG {}×{} px.", png.width, png.height));
     Ok(vec![

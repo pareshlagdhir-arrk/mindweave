@@ -320,7 +320,8 @@ impl Writer<'_> {
             let (f, s, rule) = match sub.fill {
                 FillRole::Shape => (fill.clone(), stroke.clone(), "evenodd"),
                 FillRole::NonZero => (fill.clone(), stroke.clone(), "nonzero"),
-                FillRole::StrokeColor => (stroke.clone(), None, "nonzero"),
+                // Even-odd, so a hollow head's ring keeps its hole.
+                FillRole::StrokeColor => (stroke.clone(), None, "evenodd"),
                 FillRole::None => (None, stroke.clone(), "evenodd"),
                 FillRole::FillOnly => (fill.clone(), None, "evenodd"),
                 FillRole::Canvas => (Some(hex(p.canvas)), None, "nonzero"),
@@ -1108,6 +1109,73 @@ mod tests {
         )
         .unwrap();
         assert!(drawn.svg.contains("data:image/svg+xml;base64"));
+    }
+
+    #[test]
+    fn hollow_heads_are_rings_over_the_canvas() {
+        let (_dir, mut ws) = workspace();
+        let a = ws
+            .add_shape(
+                None,
+                "basic-shapes",
+                "rectangle",
+                (0.0, 0.0),
+                None,
+                None,
+                None,
+            )
+            .unwrap()[0];
+        let b = ws
+            .add_shape(
+                None,
+                "basic-shapes",
+                "rectangle",
+                (400.0, 0.0),
+                None,
+                None,
+                None,
+            )
+            .unwrap()[0];
+        let line = ws
+            .connect(
+                a,
+                b,
+                &ConnectOptions {
+                    end_head: Some("hollow-triangle".into()),
+                    stroke: Some("#FF0000".into()),
+                    ..ConnectOptions::default()
+                },
+            )
+            .unwrap();
+        let libs = ws.libraries().clone();
+        let out = export_svg(
+            ws.doc(),
+            0,
+            &ExportRegion::Objects(vec![line]),
+            &ExportOptions {
+                libs: Some(&libs),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        let doc = roxmltree::Document::parse(&out.svg).unwrap();
+        let paths: Vec<_> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("path"))
+            .collect();
+        // The interior is painted in the canvas colour.
+        assert!(paths.iter().any(|p| p.attribute("fill") == Some("#FFFFFF")));
+        // The red filled parts are rings (two contours, even-odd), never
+        // a solid triangle.
+        let red: Vec<_> = paths
+            .iter()
+            .filter(|p| p.attribute("fill") == Some("#FF0000"))
+            .collect();
+        assert!(!red.is_empty());
+        for p in red {
+            assert_eq!(p.attribute("fill-rule"), Some("evenodd"));
+            assert_eq!(p.attribute("d").unwrap().matches('M').count(), 2);
+        }
     }
 
     #[test]

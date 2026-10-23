@@ -182,6 +182,52 @@ pub fn validate(doc: &Document, libs: Option<&LibraryRegistry>) -> Vec<Problem> 
                 }
             }
         }
+        // Groups: whole, on one layer, nested the same way in every member.
+        let mut groups: HashMap<Uuid, Vec<(usize, &crate::shape::Shape, usize)>> = HashMap::new();
+        for (li, s) in &shapes {
+            let unique: HashSet<&Uuid> = s.groups.iter().collect();
+            if unique.len() != s.groups.len() {
+                problem(
+                    Severity::Error,
+                    Some(s.id),
+                    "The object lists a group twice.".into(),
+                );
+            }
+            for (depth, g) in s.groups.iter().enumerate() {
+                groups.entry(*g).or_default().push((*li, *s, depth));
+            }
+        }
+        let mut group_ids: Vec<&Uuid> = groups.keys().collect();
+        group_ids.sort();
+        for g in group_ids {
+            let members = &groups[g];
+            let (first_layer, first, depth) = members[0];
+            if members.iter().any(|(l, _, _)| *l != first_layer) {
+                problem(
+                    Severity::Error,
+                    None,
+                    format!("Group {g} has members on different layers."),
+                );
+            }
+            if members.len() == 1 {
+                problem(
+                    Severity::Warning,
+                    Some(first.id),
+                    format!("Group {g} has only one member left; ungroup it."),
+                );
+            }
+            let outer = &first.groups[..depth];
+            if members
+                .iter()
+                .any(|(_, m, d)| *d != depth || m.groups[..*d] != *outer)
+            {
+                problem(
+                    Severity::Error,
+                    None,
+                    format!("Group {g} is nested in different groups in different members (a dangling group id)."),
+                );
+            }
+        }
         // Topic cycles: walking up from any topic must reach a central one.
         for (_, s) in &shapes {
             let Some(t) = &s.topic else { continue };

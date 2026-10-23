@@ -6,7 +6,8 @@
 //! Protocol problems are JSON-RPC errors; a tool that fails answers with
 //! a result marked `isError` whose text says what went wrong.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use serde_json::{json, Value};
 
@@ -68,6 +69,11 @@ impl Server {
             }
         };
         let reply = match msg {
+            Value::Array(batch) if batch.is_empty() => Some(error(
+                Value::Null,
+                INVALID_REQUEST,
+                "An empty batch is not a valid request.",
+            )),
             Value::Array(batch) => {
                 let replies: Vec<Value> =
                     batch.into_iter().filter_map(|m| self.handle(m)).collect();
@@ -109,7 +115,10 @@ impl Server {
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                match self.ctx.call(name, &args) {
+                // A panic in a tool (or in RaTeX or resvg) fails that call
+                // only; the server keeps serving.
+                let ctx = &self.ctx;
+                match guarded(name, || ctx.call(name, &args)) {
                     Ok(content) => result(id, json!({"content": content, "isError": false})),
                     Err(ToolError::UnknownTool) => {
                         error(id, INVALID_PARAMS, format!("Unknown tool: {name}"))
@@ -120,21 +129,81 @@ impl Server {
                     ),
                 }
             }
-            m if m.starts_with("notifications/") => return None,
+            m if m.starts_with("notifications/") => error(
+                id,
+                METHOD_NOT_FOUND,
+                format!("{m} is a notification; send it without an id."),
+            ),
             _ => error(id, METHOD_NOT_FOUND, format!("Method not found: {method}")),
         })
     }
 
-    /// Serves `input` until it ends, writing replies to `output`.
-    pub fn run(&mut self, input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
-        for line in input.lines() {
-            let line = line?;
-            if let Some(reply) = self.handle_line(&line) {
+    /// Serves `input` until it ends, writing replies to `output`. A line
+    /// longer than [`MAX_MESSAGE_BYTES`] is skipped without being buffered
+    /// whole, and a line that is not UTF-8 gets a parse error.
+    pub fn run(&mut self, mut input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            let cap = MAX_MESSAGE_BYTES as u64 + 1;
+            let read = (&mut input).take(cap).read_until(b'\n', &mut buf)?;
+            if read == 0 {
+                return Ok(());
+            }
+            let reply = if buf.len() > MAX_MESSAGE_BYTES && buf.last() != Some(&b'\n') {
+                skip_line(&mut input)?;
+                Some(error(Value::Null, INVALID_REQUEST, "Message too large.").to_string())
+            } else {
+                match std::str::from_utf8(&buf) {
+                    Ok(line) => self.handle_line(line),
+                    Err(_) => Some(
+                        error(
+                            Value::Null,
+                            PARSE_ERROR,
+                            "Parse error: the message is not UTF-8.",
+                        )
+                        .to_string(),
+                    ),
+                }
+            };
+            if let Some(reply) = reply {
                 writeln!(output, "{reply}")?;
                 output.flush()?;
             }
         }
-        Ok(())
+    }
+}
+
+/// Runs tool call `f` (of tool `name`), turning a panic into a failed
+/// call so one bad call cannot stop the server.
+pub fn guarded(
+    name: &str,
+    f: impl FnOnce() -> Result<Vec<Value>, ToolError>,
+) -> Result<Vec<Value>, ToolError> {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        Err(ToolError::Failed(format!(
+            "{name} failed unexpectedly (an internal error) and did not complete; check the file with document_summary, then try different arguments."
+        )))
+    })
+}
+
+/// Discards the rest of the current line of `input`.
+fn skip_line(input: &mut impl BufRead) -> std::io::Result<()> {
+    loop {
+        let chunk = input.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                input.consume(i + 1);
+                return Ok(());
+            }
+            None => {
+                let n = chunk.len();
+                input.consume(n);
+            }
+        }
     }
 }
 

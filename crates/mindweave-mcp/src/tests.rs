@@ -233,3 +233,94 @@ fn failures_say_what_to_do() {
     let r: Value = serde_json::from_str(&s.handle_line("{not json").unwrap()).unwrap();
     assert_eq!(r["error"]["code"], -32700);
 }
+
+#[test]
+fn empty_id_lists_are_refused_and_panics_become_failed_calls() {
+    let (dir, mut s) = server();
+    let path = dir.path().join("p.mindweave");
+    let path = path.to_str().unwrap();
+    call(&mut s, "create_document", json!({"path": path}));
+    for tool in ["export_png", "export_svg", "delete_objects"] {
+        let msg = failure(&call(&mut s, tool, json!({"path": path, "ids": []})));
+        assert!(msg.contains("at least one id"), "{tool}: {msg}");
+    }
+    let out = crate::server::guarded("boom", || panic!("test panic"));
+    match out {
+        Err(crate::tools::ToolError::Failed(m)) => assert!(m.contains("boom failed unexpectedly")),
+        other => panic!("{other:?}"),
+    }
+    // The server still answers.
+    assert_eq!(request(&mut s, "ping", json!({}))["result"], json!({}));
+}
+
+#[test]
+fn the_stream_survives_bad_lines() {
+    let (_d, mut s) = server();
+    let mut input: Vec<u8> = Vec::new();
+    input.extend_from_slice(b"\xff\xfe not utf-8\n");
+    input.extend(vec![b'x'; crate::server::MAX_MESSAGE_BYTES + 10]);
+    input.push(b'\n');
+    input.extend_from_slice(b"[]\n");
+    input.extend_from_slice(br#"{"jsonrpc":"2.0","id":7,"method":"notifications/initialized"}"#);
+    input.push(b'\n');
+    input.extend_from_slice(br#"{"jsonrpc":"2.0","id":8,"method":"ping"}"#);
+    input.push(b'\n');
+    let mut output = Vec::new();
+    s.run(std::io::Cursor::new(input), &mut output).unwrap();
+    let replies: Vec<Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let codes: Vec<i64> = replies[..4]
+        .iter()
+        .map(|r| r["error"]["code"].as_i64().unwrap())
+        .collect();
+    assert_eq!(codes, vec![-32700, -32600, -32600, -32601]);
+    assert_eq!(replies[4]["id"], 8);
+    assert_eq!(replies[4]["result"], json!({}));
+}
+
+#[test]
+fn inline_pngs_are_capped_and_files_get_full_size() {
+    let (dir, mut s) = server();
+    let path = dir.path().join("big.mindweave");
+    let path = path.to_str().unwrap();
+    call(&mut s, "create_document", json!({"path": path}));
+    call(
+        &mut s,
+        "add_shape",
+        json!({"path": path, "shape": "rectangle", "x": 0, "y": 0, "w": 400, "h": 100}),
+    );
+    let out = dir.path().join("big.png");
+    let r = call(
+        &mut s,
+        "export_png",
+        json!({"path": path, "scale": 8, "out_path": out.to_str().unwrap()}),
+    );
+    let info: Value = serde_json::from_str(r["content"][1]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(info["width"], 2048, "{info}");
+    assert!(
+        info["file_size"]["width"].as_u64().unwrap() > 3000,
+        "{info}"
+    );
+    let file = std::fs::read(&out).unwrap();
+    let inline = base64::engine::general_purpose::STANDARD
+        .decode(r["content"][0]["data"].as_str().unwrap())
+        .unwrap();
+    assert!(file.len() > inline.len());
+    // Writing again replaces the file and leaves no temporary file.
+    call(
+        &mut s,
+        "export_png",
+        json!({"path": path, "out_path": out.to_str().unwrap()}),
+    );
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(
+        names.iter().all(|n| !n.to_string_lossy().ends_with(".tmp")),
+        "{names:?}"
+    );
+}

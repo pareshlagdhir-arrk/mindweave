@@ -17,6 +17,8 @@ const MAX_EQUATION_CHARS: usize = 1_500;
 const MAX_EQUATION_SIDE: f32 = 800.0;
 /// The most pixels a PNG may have along either side.
 pub const MAX_PNG_SIDE: u32 = 8192;
+/// The most pixels along either side of a PNG returned inline.
+pub const MAX_INLINE_SIDE: u32 = 2048;
 /// The most pixels a PNG may have in all.
 const MAX_PNG_PIXELS: u64 = 32_000_000;
 
@@ -102,8 +104,8 @@ pub struct Png {
 }
 
 /// `svg` rasterised at `scale` pixels per unit, scaled down if needed to
-/// stay within [`MAX_PNG_SIDE`] and the pixel budget.
-pub fn rasterise(svg: &str, scale: f32) -> Result<Png, String> {
+/// stay within `max_side` (at most [`MAX_PNG_SIDE`]) and the pixel budget.
+pub fn rasterise(svg: &str, scale: f32, max_side: u32) -> Result<Png, String> {
     let options = usvg::Options {
         fontdb: fonts(),
         ..usvg::Options::default()
@@ -117,7 +119,7 @@ pub fn rasterise(svg: &str, scale: f32) -> Result<Png, String> {
     } else {
         1.0
     };
-    let side = MAX_PNG_SIDE as f32;
+    let side = max_side.clamp(1, MAX_PNG_SIDE) as f32;
     scale = scale.min(side / w.max(1.0)).min(side / h.max(1.0));
     let pixels = f64::from(w * scale) * f64::from(h * scale);
     if pixels > MAX_PNG_PIXELS as f64 {
@@ -159,9 +161,11 @@ mod tests {
     #[test]
     fn svgs_rasterise_at_a_scale() {
         let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"50\"><rect width=\"100\" height=\"50\" fill=\"#FF0000\"/></svg>";
-        let png = rasterise(svg, 2.0).unwrap();
+        let png = rasterise(svg, 2.0, MAX_PNG_SIDE).unwrap();
         assert_eq!((png.width, png.height), (200, 100));
         assert!(png.bytes.starts_with(b"\x89PNG"));
-        assert!(rasterise("<nope", 1.0).is_err());
+        assert!(rasterise("<nope", 1.0, MAX_PNG_SIDE).is_err());
+        let small = rasterise(svg, 100.0, 300).unwrap();
+        assert_eq!((small.width, small.height), (300, 150));
     }
 }

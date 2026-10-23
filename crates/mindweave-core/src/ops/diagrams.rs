@@ -794,6 +794,11 @@ impl Workspace {
             _ => {}
         }
         let topic = kind == ObjectKind::Topic;
+        if topic && size.is_some() {
+            return Err(OpError::invalid(
+                "Topics size themselves to their text; leave out w and h (change the text or its size with set_text).",
+            ));
+        }
         let (old_x, old_y) = (shape.frame.x, shape.frame.y);
         self.on_layer(page, Some(layer), |s| {
             s.begin_gesture();
