@@ -24,7 +24,7 @@ Users design screens and documents (phone apps, web pages, A4 sheets, slides, so
 - A new object kind, the **artboard**: a shape of the built-in `mindweave` library with shape id `artboard` (like topics and boundaries), carrying:
   - `frame` (x, y, w, h; never rotated or flipped),
   - `name` (the existing `Shape.name`, shown as the title; a new artboard is named after its preset, e.g. "iPhone 16", or "Artboard" for a custom one; duplicates keep the name),
-  - `style`: fill default `#FFFFFF`, no stroke by default, stroke/radius/opacity editable like any shape,
+  - `style`: Auto fill and Auto outline by default (the page background and the theme's outline colour, like other objects; changed from white on 2026-10-23 at the user's request), editable like any shape,
   - `artboard: ArtboardProps { clip: bool }` — `clip` defaults to true (a Properties toggle "Clip content").
 - **Membership:** every other shape gains `artboard: Option<Uuid>` — the artboard it belongs to (`None`: on the open canvas). Artboards themselves never belong to an artboard (no nesting).
 - **Membership rule** (one pure core function): after a shape is placed, moved, resized, pasted, duplicated or dropped, it belongs to the topmost artboard on the same layer whose frame contains the shape's **bounding-box centre**, else to none. Lines (connectors) use the midpoint of their two ends. Creating, moving or resizing an *artboard* never changes other shapes' membership (no capture — user decision).

@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::artboard::{ArtboardProps, ARTBOARD_FILL, ARTBOARD_SHAPE};
+use crate::artboard::{ArtboardProps, ARTBOARD_SHAPE};
 use crate::color::normalize_style_color;
 use crate::color::AUTO_COLOR;
 use crate::geometry::{Frame, Pt};
@@ -335,8 +335,10 @@ impl Shape {
         s.label = None;
         s.text_box = None;
         s.name = Some(name.to_string());
+        // Auto colours, like other objects: it follows the page and theme.
         s.style = Style {
-            fill: Some(ARTBOARD_FILL.to_string()),
+            fill: Some(AUTO_COLOR.to_string()),
+            stroke: Some(AUTO_COLOR.to_string()),
             ..Style::default()
         };
         s.artboard_props = Some(ArtboardProps::default());

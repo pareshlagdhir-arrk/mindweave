@@ -321,13 +321,13 @@ mod tests {
         assert!(!settings.remember_style(&t));
         settings.apply_remembered_style(&mut t);
         assert_eq!(t.style, Style::default());
-        // So do artboards: their white fill must not reach new shapes.
+        // So do artboards: their own style must not reach new shapes.
         let mut board = Shape::new_artboard(crate::geometry::Frame::default(), "Board");
         board.style.fill = Some("#00FF00".into());
         assert!(!settings.remember_style(&board));
         let mut board = Shape::new_artboard(crate::geometry::Frame::default(), "Board");
         settings.apply_remembered_style(&mut board);
-        assert_eq!(board.style.fill.as_deref(), Some(crate::ARTBOARD_FILL));
+        assert_eq!(board.style.fill.as_deref(), Some(crate::AUTO_COLOR));
         // Settings without the new fields still load.
         let old: AppSettings = serde_json::from_str(r#"{"theme":"x"}"#).unwrap();
         assert_eq!(old.shape_style, None);

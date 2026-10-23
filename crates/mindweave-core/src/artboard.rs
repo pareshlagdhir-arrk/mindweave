@@ -22,8 +22,6 @@ use crate::transform::{frame_aabb, selection_bounds};
 
 /// Shape id of an artboard in [`crate::shape::TEXT_LIBRARY`].
 pub const ARTBOARD_SHAPE: &str = "artboard";
-/// Fill of a new artboard.
-pub const ARTBOARD_FILL: &str = "#FFFFFF";
 /// Space between the rightmost artboard and a new one placed beside it.
 pub const ARTBOARD_GAP: f32 = 80.0;
 
@@ -287,12 +285,14 @@ mod tests {
     }
 
     #[test]
-    fn a_new_artboard_is_white_named_and_clips() {
+    fn a_new_artboard_has_auto_colours_a_name_and_clips() {
         let mut a = board(1.0, 2.0, 300.0, 200.0);
         assert!(a.is_artboard() && !a.is_text_box());
         assert_eq!(a.name.as_deref(), Some("Board"));
-        assert_eq!(a.style.fill.as_deref(), Some(ARTBOARD_FILL));
-        assert_eq!(a.style.stroke, None);
+        // Auto, like other objects: the page background and the theme's
+        // outline colour, never a bright white.
+        assert_eq!(a.style.fill.as_deref(), Some(crate::AUTO_COLOR));
+        assert_eq!(a.style.stroke.as_deref(), Some(crate::AUTO_COLOR));
         assert_eq!(a.artboard_props, Some(ArtboardProps { clip: true }));
         assert!(a.label.is_none());
         // Never rotated, flipped or a member itself.
