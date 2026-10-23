@@ -1,6 +1,7 @@
 //! Importing an SVG file as editable shapes: each filled or stroked path
 //! becomes a path shape, each text a text box (see [`import_svg`]); then
-//! [`place_import`] fits them to the view as one group.
+//! [`place_import`] fits them to the view as one group, or
+//! [`convert_picture`] puts them where an SVG picture is drawn.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +15,8 @@ use usvg::{fontdb, FontFamily, FontStyle, ImageHrefResolver, Node, Paint, TextAn
 use uuid::Uuid;
 
 use crate::color::format_hex_color;
-use crate::geometry::{Frame, PathCmd, Pt, Rect};
+use crate::geometry::{frame_point, Frame, PathCmd, Pt, Rect};
+use crate::image::ImageFormat;
 use crate::line::LineDash;
 use crate::path_shape::PathProps;
 use crate::shape::{Shape, Style};
@@ -60,6 +62,9 @@ pub struct SvgImport {
     /// Elements left out: embedded or linked pictures, and text no font
     /// could lay out.
     pub skipped: usize,
+    /// The SVG's viewport (width, height): the area a picture of it
+    /// shows, in the shapes' units.
+    pub size: (f32, f32),
 }
 
 /// Why an SVG file could not be imported.
@@ -113,6 +118,7 @@ pub fn import_svg(bytes: &[u8]) -> Result<SvgImport, SvgImportError> {
     Ok(SvgImport {
         shapes: walk.shapes,
         skipped: walk.skipped + lost_texts + pictures.load(Ordering::Relaxed),
+        size: (tree.size().width(), tree.size().height()),
     })
 }
 
@@ -491,6 +497,94 @@ pub fn place_import(mut shapes: Vec<Shape>, view: &Rect) -> Vec<Shape> {
     shapes
 }
 
+/// Whether `shape` is an image showing an SVG picture.
+pub fn is_svg_picture(shape: &Shape) -> bool {
+    shape.is_image()
+        && shape
+            .image
+            .as_ref()
+            .is_some_and(|d| d.format == ImageFormat::Svg)
+}
+
+/// The editable shapes of SVG picture `picture`, drawn where and as it is
+/// drawn (see [`fit_import_to_frame`]): one new group (when there are
+/// several) inside the picture's groups, on its artboard. `None` when it
+/// is not an SVG picture.
+pub fn convert_picture(picture: &Shape) -> Option<Result<SvgImport, SvgImportError>> {
+    if !is_svg_picture(picture) {
+        return None;
+    }
+    let data = picture.image.as_ref()?;
+    Some(import_svg(&data.bytes).map(|import| {
+        let (skipped, size) = (import.skipped, import.size);
+        let mut shapes = fit_import_to_frame(import, &picture.frame, picture.style.opacity);
+        let group = (shapes.len() > 1).then(Uuid::new_v4);
+        for s in &mut shapes {
+            s.groups = picture.groups.iter().copied().chain(group).collect();
+            s.artboard = picture.artboard;
+        }
+        SvgImport {
+            shapes,
+            skipped,
+            size,
+        }
+    }))
+}
+
+/// `import`'s shapes as a picture of the SVG shown in `frame` draws them:
+/// the viewport stretched over the frame, then mirrored by the frame's
+/// flips and turned by its rotation about its centre. Stroke widths and
+/// text boxes' font sizes scale by the mean stretch and are then clamped;
+/// opacities are multiplied by `opacity`.
+pub fn fit_import_to_frame(import: SvgImport, frame: &Frame, opacity: f32) -> Vec<Shape> {
+    let stretch = |len: f32, view: f32| if view > 0.0 { len / view } else { 1.0 };
+    let (sx, sy) = (
+        stretch(frame.w, import.size.0),
+        stretch(frame.h, import.size.1),
+    );
+    let scale = (sx * sy).sqrt();
+    import
+        .shapes
+        .into_iter()
+        .map(|mut s| {
+            s.frame = part_frame(&s.frame, (sx, sy), frame);
+            s.style.stroke_width *= scale;
+            s.style.opacity *= opacity;
+            let text_box = s.is_text_box();
+            if let Some(label) = s.label.as_mut().filter(|_| text_box) {
+                scale_font_sizes(&mut label.text, scale);
+            }
+            s.normalize();
+            s
+        })
+        .collect()
+}
+
+/// Part frame `part` (in viewport units) stretched by `(sx, sy)` into
+/// picture frame `picture`: its centre placed as the picture places that
+/// point, its rotation and flips composed with the picture's (a mirror
+/// turns a turned part the other way).
+fn part_frame(part: &Frame, (sx, sy): (f32, f32), picture: &Frame) -> Frame {
+    let local = ((part.x + part.w / 2.0) * sx, (part.y + part.h / 2.0) * sy);
+    let (cx, cy) = frame_point(picture, local);
+    let (w, h) = (part.w * sx, part.h * sy);
+    let mirrored = picture.flip_x != picture.flip_y;
+    let turn = if mirrored {
+        -part.rotation
+    } else {
+        part.rotation
+    };
+    Frame {
+        x: cx - w / 2.0,
+        y: cy - h / 2.0,
+        w,
+        h,
+        rotation: picture.rotation + turn,
+        flip_x: part.flip_x != picture.flip_x,
+        flip_y: part.flip_y != picture.flip_y,
+    }
+}
+
 /// Multiplies every font size in `text` by `scale`.
 fn scale_font_sizes(text: &mut RichText, scale: f32) {
     for p in &mut text.paragraphs {
@@ -794,6 +888,169 @@ mod tests {
         assert_eq!(color(a).as_deref(), Some("#FF0000"));
         assert_eq!(color(b).as_deref(), Some("#00FF00"));
         assert!(close(b.style.opacity, 0.4));
+    }
+
+    /// An SVG picture of `svg` (its markup inside a 100 × 50 SVG) at
+    /// `frame`.
+    fn svg_picture(body: &str, frame: Frame) -> Shape {
+        let src = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50">{body}</svg>"#
+        );
+        let data = crate::image::ImageData::from_file_bytes(src.into_bytes()).unwrap();
+        Shape::new_image(data, frame)
+    }
+
+    fn picture_frame() -> Frame {
+        Frame {
+            x: 100.0,
+            y: 50.0,
+            w: 200.0,
+            h: 100.0,
+            ..Frame::default()
+        }
+    }
+
+    #[test]
+    fn the_import_knows_its_viewport() {
+        let out = import(r#"<rect width="5" height="5"/>"#);
+        assert_eq!(out.size, (400.0, 300.0));
+        let src = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12"><rect width="1" height="1"/></svg>"#;
+        let out = import_svg(src.as_bytes()).unwrap();
+        // No width or height: the viewBox's size.
+        assert_eq!(out.size, (24.0, 12.0));
+    }
+
+    #[test]
+    fn a_converted_picture_lands_on_its_frame() {
+        let pic = svg_picture(
+            r#"<rect width="50" height="25" fill="red" stroke="black" stroke-width="2"/>"#,
+            picture_frame(),
+        );
+        assert!(is_svg_picture(&pic));
+        let out = convert_picture(&pic).unwrap().unwrap();
+        assert_eq!(out.shapes.len(), 1);
+        let s = &out.shapes[0];
+        assert!(
+            frame_is(&s.frame, 100.0, 50.0, 100.0, 50.0),
+            "{:?}",
+            s.frame
+        );
+        // Stretched 2 × 2: strokes twice as wide.
+        assert!(close(s.style.stroke_width, 4.0));
+        assert_eq!(s.style.opacity, 1.0);
+        // A lone part joins no new group.
+        assert!(s.groups.is_empty());
+    }
+
+    #[test]
+    fn a_stretched_picture_stretches_its_parts() {
+        // 100 × 50 shown 400 × 50: four times wider, as tall.
+        let frame = Frame {
+            w: 400.0,
+            h: 50.0,
+            ..picture_frame()
+        };
+        let pic = svg_picture(
+            r#"<rect x="25" y="10" width="50" height="20" stroke="black" stroke-width="2"/>
+            <text x="0" y="40" font-size="10">Hi</text>"#,
+            frame,
+        );
+        let out = convert_picture(&pic).unwrap().unwrap();
+        let s = &out.shapes[0];
+        assert!(
+            frame_is(&s.frame, 200.0, 60.0, 200.0, 20.0),
+            "{:?}",
+            s.frame
+        );
+        // Lengths scale by the mean stretch, √(4 × 1) = 2.
+        assert!(close(s.style.stroke_width, 4.0));
+        let text = &out.shapes[1].label.as_ref().unwrap().text;
+        assert!(close(text.style_at(0).size, 20.0));
+    }
+
+    #[test]
+    fn rotation_and_flips_carry_onto_the_parts() {
+        let frame = Frame {
+            x: 0.0,
+            y: 0.0,
+            rotation: 90.0,
+            flip_x: true,
+            ..picture_frame()
+        };
+        // Pictures are kept upright, but the mapping honours any frame.
+        let mut pic = svg_picture(r#"<rect width="50" height="25"/>"#, frame);
+        pic.frame = frame;
+        let out = convert_picture(&pic).unwrap().unwrap();
+        let f = &out.shapes[0].frame;
+        // Centre (50, 25) mirrored to (150, 25), then turned 90° about
+        // (100, 50) to (125, 100).
+        assert!(frame_is(f, 75.0, 75.0, 100.0, 50.0), "{f:?}");
+        assert!(close(f.rotation, 90.0));
+        assert!(f.flip_x && !f.flip_y);
+        // A part already turned turns the other way in a mirror.
+        let mut part = Shape::new_text_box((0.0, 0.0));
+        part.frame.rotation = 30.0;
+        let mirrored = fit_import_to_frame(
+            SvgImport {
+                shapes: vec![part],
+                skipped: 0,
+                size: (100.0, 50.0),
+            },
+            &frame,
+            1.0,
+        );
+        assert!(close(mirrored[0].frame.rotation, 60.0));
+    }
+
+    #[test]
+    fn picture_opacity_multiplies_into_the_parts() {
+        let mut pic = svg_picture(
+            r#"<rect width="50" height="25"/><rect x="50" width="50" height="25" opacity="0.5"/>"#,
+            picture_frame(),
+        );
+        pic.style.opacity = 0.5;
+        let out = convert_picture(&pic).unwrap().unwrap();
+        assert!(close(out.shapes[0].style.opacity, 0.5));
+        assert!(close(out.shapes[1].style.opacity, 0.25));
+    }
+
+    #[test]
+    fn parts_share_a_new_group_inside_the_pictures_groups_and_artboard() {
+        let mut pic = svg_picture(
+            r#"<rect width="50" height="25"/><rect x="50" width="50" height="25"/>"#,
+            picture_frame(),
+        );
+        let (outer, board) = (Uuid::new_v4(), Uuid::new_v4());
+        pic.groups = vec![outer];
+        pic.artboard = Some(board);
+        let out = convert_picture(&pic).unwrap().unwrap();
+        let (a, b) = (&out.shapes[0], &out.shapes[1]);
+        assert_eq!(a.groups.len(), 2);
+        assert_eq!(a.groups[0], outer);
+        assert_ne!(a.groups[1], outer);
+        assert_eq!(a.groups, b.groups);
+        assert_eq!((a.artboard, b.artboard), (Some(board), Some(board)));
+    }
+
+    #[test]
+    fn only_svg_pictures_convert() {
+        let png = crate::image::ImageData {
+            format: crate::image::ImageFormat::Png,
+            id: "png".into(),
+            bytes: std::sync::Arc::new(vec![0x89, b'P', b'N', b'G']),
+        };
+        let pic = Shape::new_image(png, picture_frame());
+        assert!(!is_svg_picture(&pic));
+        assert!(convert_picture(&pic).is_none());
+        assert!(convert_picture(&Shape::new_text_box((0.0, 0.0))).is_none());
+        let mut broken = svg_picture("", picture_frame());
+        if let Some(data) = broken.image.as_mut() {
+            data.bytes = std::sync::Arc::new(b"<svg <<".to_vec());
+        }
+        assert!(matches!(
+            convert_picture(&broken),
+            Some(Err(SvgImportError::Invalid(_)))
+        ));
     }
 
     #[test]

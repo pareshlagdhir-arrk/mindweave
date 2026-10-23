@@ -63,6 +63,9 @@ actions!(
         BringForward,
         SendBackward,
         SendToBack,
+        /// Arrange > Convert to Editable Shapes: replaces the selected SVG
+        /// pictures with their shapes. Handled only while one is selected.
+        ConvertToShapes,
         /// Mind maps: a new map, a subtopic (Tab), a sibling before the
         /// selected topic (Shift+Enter; Enter adds one after it), a
         /// summary, a boundary, and the Relationship tool.

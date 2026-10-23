@@ -744,6 +744,32 @@ impl DocumentSession {
         self.reroute_lines();
     }
 
+    /// Replaces each shape of `replacements` on the active layer (by id)
+    /// with its shapes, normalised, at its place in the stacking order,
+    /// all as one undo step. Ids not on the active layer are skipped;
+    /// nothing is recorded when none is there.
+    pub fn replace_shapes(&mut self, replacements: Vec<(Uuid, Vec<Shape>)>) {
+        let mut by_id: std::collections::HashMap<Uuid, Vec<Shape>> =
+            replacements.into_iter().collect();
+        let objects = &self.active_layer().objects;
+        if !objects.iter().any(|s| by_id.contains_key(&s.id)) {
+            return;
+        }
+        let replaced: Vec<Shape> = objects
+            .iter()
+            .flat_map(|s| match by_id.remove(&s.id) {
+                Some(mut parts) => {
+                    parts.iter_mut().for_each(Shape::normalize);
+                    parts
+                }
+                None => vec![s.clone()],
+            })
+            .collect();
+        self.checkpoint();
+        self.active_layer_mut().objects = replaced;
+        self.reroute_lines();
+    }
+
     /// `ids` with the members of the artboards among them, from every
     /// layer of the active page.
     fn with_members(&self, ids: &[Uuid]) -> Vec<Uuid> {
@@ -1393,6 +1419,28 @@ mod tests {
         assert_eq!(s.can_undo(), can_undo);
         assert!(!s.is_dirty());
         assert_eq!(s.find_shape(id).unwrap().frame, original);
+    }
+
+    #[test]
+    fn replacing_a_shape_keeps_its_place_and_undoes_in_one_step() {
+        let (_d, mut s) = new_session("replace.mindweave");
+        let boxes: Vec<Shape> = (0..3)
+            .map(|i| Shape::new_text_box((i as f32 * 10., 0.)))
+            .collect();
+        let ids: Vec<Uuid> = boxes.iter().map(|b| b.id).collect();
+        s.add_shapes(boxes);
+        let before = s.shapes_on_active_layer().to_vec();
+        let parts: Vec<Shape> = (0..2).map(|_| Shape::new_text_box((5., 5.))).collect();
+        let part_ids: Vec<Uuid> = parts.iter().map(|p| p.id).collect();
+        s.replace_shapes(vec![(ids[1], parts), (Uuid::new_v4(), Vec::new())]);
+        let order: Vec<Uuid> = s.shapes_on_active_layer().iter().map(|x| x.id).collect();
+        assert_eq!(order, vec![ids[0], part_ids[0], part_ids[1], ids[2]]);
+        assert!(s.undo());
+        assert_eq!(s.shapes_on_active_layer(), before.as_slice());
+        // Nothing to replace: no step.
+        let can_redo = s.can_redo();
+        s.replace_shapes(vec![(Uuid::new_v4(), Vec::new())]);
+        assert_eq!(s.can_redo(), can_redo);
     }
 
     #[test]

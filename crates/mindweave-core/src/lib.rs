@@ -76,7 +76,8 @@ pub use settings::{
 };
 pub use shape::{Label, Shape, Style, TextBoxProps, VAlign, TEXT_LIBRARY, TEXT_SHAPE};
 pub use svg_import::{
-    import_svg, place_import, SvgImport, SvgImportError, MAX_IMPORT_BYTES, MAX_IMPORT_OBJECTS,
+    convert_picture, fit_import_to_frame, import_svg, is_svg_picture, place_import, SvgImport,
+    SvgImportError, MAX_IMPORT_BYTES, MAX_IMPORT_OBJECTS,
 };
 pub use template::{
     instantiate_line_template, instantiate_template, PartKind, PartLabel, TemplateDef,

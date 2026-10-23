@@ -53,12 +53,12 @@ use mindweave_core::{
 // `Copy` is used by path: importing it would hide the derivable trait.
 use crate::actions::{
     self, AddCentralTopic, AddSiblingBefore, AddSubtopic, AddSummary, BringForward, BringToFront,
-    Cancel, CloseWindow, Cut, Delete, Duplicate, EditEquation, EditLabel, EditNote, EditText,
-    Group, ImportSvgShapes, NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight,
-    NudgeRightFar, NudgeUp, NudgeUpFar, Paste, Redo, Save, SelectAll, SendBackward, SendToBack,
-    ToggleBoundary, ToggleIcons, ToggleLayers, ToggleLeftSidebar, ToggleProperties, ToolArtboard,
-    ToolEllipse, ToolHand, ToolLine, ToolPointer, ToolRectangle, ToolRelationship, ToolText, Undo,
-    Ungroup, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
+    Cancel, CloseWindow, ConvertToShapes, Cut, Delete, Duplicate, EditEquation, EditLabel,
+    EditNote, EditText, Group, ImportSvgShapes, NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar,
+    NudgeRight, NudgeRightFar, NudgeUp, NudgeUpFar, Paste, Redo, Save, SelectAll, SendBackward,
+    SendToBack, ToggleBoundary, ToggleIcons, ToggleLayers, ToggleLeftSidebar, ToggleProperties,
+    ToolArtboard, ToolEllipse, ToolHand, ToolLine, ToolPointer, ToolRectangle, ToolRelationship,
+    ToolText, Undo, Ungroup, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
 };
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
@@ -687,6 +687,16 @@ impl EditorWindow {
         cx: &mut Context<Self>,
     ) {
         self.import_svg_shapes(window, cx);
+    }
+
+    /// Arrange > Convert to Editable Shapes.
+    fn on_convert_to_shapes(
+        &mut self,
+        _: &ConvertToShapes,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.convert_svg_pictures(window, cx);
     }
 
     fn on_ungroup(&mut self, _: &Ungroup, window: &mut Window, cx: &mut Context<Self>) {
@@ -1502,7 +1512,13 @@ impl Render for EditorWindow {
             .size_full()
             .key_context(key_context(self.text_edit.is_some()))
             .track_focus(&self.focus_handle);
+        // Handled only while an SVG picture is selected, so the menu item
+        // is greyed out otherwise.
+        let convert = self
+            .svg_picture_selected()
+            .then(|| cx.listener(Self::on_convert_to_shapes));
         text_edit::on_text_actions(root, cx)
+            .when_some(convert, |root, listener| root.on_action(listener))
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_close_window))
             .on_action(cx.listener(Self::on_group))

@@ -22,7 +22,9 @@ use super::properties_panel::{
 };
 use super::{artboard_edit, artboard_properties, line_properties, text_properties};
 use super::{hex_to_hsla, hsla_to_hex, parse_number, section_label, EditorWindow, SMALL_TEXT_SIZE};
-use crate::actions::{BringForward, BringToFront, Group, SendBackward, SendToBack, Ungroup};
+use crate::actions::{
+    BringForward, BringToFront, ConvertToShapes, Group, SendBackward, SendToBack, Ungroup,
+};
 use crate::libraries::{lucide_icon_path, Libraries};
 
 /// Stroke widths run from 0 to this, in steps of [`STROKE_WIDTH_STEP`].
@@ -900,6 +902,9 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
         .child(section_label("Shape", cx))
         .child(title)
         .child(arrange_row(cx))
+        .when(editor.svg_picture_selected(), |panel| {
+            panel.child(convert_button())
+        })
         .children(topic_section)
         .children(artboard_section)
         .child(section_label("Transform", cx).mt(px(SECTION_GAP)))
@@ -999,6 +1004,16 @@ fn arrange_row(cx: &mut Context<EditorWindow>) -> impl IntoElement {
             || Box::new(Ungroup),
             cx,
         ))
+}
+
+/// Convert to Editable Shapes, shown while an SVG picture is selected.
+fn convert_button() -> impl IntoElement {
+    Button::new("convert-to-shapes")
+        .outline()
+        .small()
+        .w_full()
+        .label("Convert to Editable Shapes")
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(ConvertToShapes), cx))
 }
 
 /// Half a row: an X, Y, W or H field with its letter inside; `read_only`

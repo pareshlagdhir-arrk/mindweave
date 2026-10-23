@@ -400,7 +400,7 @@ pub fn to_canvas(local: &Geometry, f: &Frame) -> Geometry {
 
 /// One local point of `f` in canvas space: flip within the box, translate,
 /// rotate about the box centre.
-fn frame_point(f: &Frame, (lx, ly): Pt) -> Pt {
+pub(crate) fn frame_point(f: &Frame, (lx, ly): Pt) -> Pt {
     let (sin, cos) = f.rotation.to_radians().sin_cos();
     let (cx, cy) = (f.x + f.w / 2.0, f.y + f.h / 2.0);
     let lx = if f.flip_x { f.w - lx } else { lx };

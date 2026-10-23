@@ -9,10 +9,10 @@ use gpui_kit::component::{h_flex, ActiveTheme as _, Sizable as _, TitleBar};
 use gpui_kit::*;
 
 use crate::actions::{
-    self, BringForward, BringToFront, CloseWindow, Cut, Delete, Duplicate, Group, ImportSvgShapes,
-    NewFile, NotImplemented, OpenFile, Paste, Quit, Redo, Save, SelectAll, SendBackward,
-    SendToBack, ShowDashboard, ToggleIcons, ToggleLayers, ToggleLeftSidebar, ToggleProperties,
-    ToggleThemePicker, Undo, Ungroup, ZoomIn, ZoomOut, ZoomReset,
+    self, BringForward, BringToFront, CloseWindow, ConvertToShapes, Cut, Delete, Duplicate, Group,
+    ImportSvgShapes, NewFile, NotImplemented, OpenFile, Paste, Quit, Redo, Save, SelectAll,
+    SendBackward, SendToBack, ShowDashboard, ToggleIcons, ToggleLayers, ToggleLeftSidebar,
+    ToggleProperties, ToggleThemePicker, Undo, Ungroup, ZoomIn, ZoomOut, ZoomReset,
 };
 use crate::app_state::AppState;
 
@@ -179,6 +179,10 @@ pub(crate) fn menus(kind: WindowKind, panels: PanelState, include_quit: bool) ->
                 Separator,
                 item("Group", Group, editor),
                 item("Ungroup", Ungroup, editor),
+                Separator,
+                // Greyed out unless an SVG picture is selected: only then
+                // does the editor handle it.
+                item("Convert to Editable Shapes", ConvertToShapes, editor),
             ],
         },
         MenuSpec {
@@ -375,7 +379,8 @@ mod tests {
                 .into_iter()
                 .filter(|(menu, ..)| *menu == "Arrange")
                 .collect();
-            assert_eq!(arrange.len(), 6);
+            assert_eq!(arrange.len(), 7);
+            assert_eq!(arrange[6].1, "Convert to Editable Shapes");
             assert!(
                 arrange.iter().all(|(_, _, e, _)| *e == enabled),
                 "{arrange:?}"
