@@ -15,6 +15,7 @@ pub mod library;
 pub mod library_install;
 pub mod line;
 pub mod mindmap;
+pub mod ops;
 pub mod path_shape;
 pub mod session;
 pub mod settings;
@@ -24,6 +25,7 @@ pub mod svg_import;
 pub mod template;
 pub mod text;
 pub mod text_history;
+pub mod text_measure;
 pub mod transform;
 pub mod viewport;
 
