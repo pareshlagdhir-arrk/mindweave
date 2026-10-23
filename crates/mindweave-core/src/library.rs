@@ -1897,7 +1897,8 @@ max = 8
         fs::write(dir.path().join("x.svg"), svg).unwrap();
         let shapes = format!(
             "{ONE_RECT}\n[[shape]]\nid = \"up\"\nname = \"Up\"\nsvg = \"../x.svg\"\n\n\
-             [[shape]]\nid = \"abs\"\nname = \"Abs\"\nsvg = \"{}\"\n",
+             [[shape]]\nid = \"abs\"\nname = \"Abs\"\nsvg = '{}'\n",
+            // A literal string: a Windows path's backslashes are not escapes.
             dir.path().join("x.svg").display()
         );
         let root = write_lib(

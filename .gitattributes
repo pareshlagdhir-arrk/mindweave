@@ -1,0 +1,8 @@
+# LF everywhere, also in Windows checkouts: built-in libraries and other
+# files are compiled in with include_str! and must match byte for byte.
+* text=auto eol=lf
+*.png binary
+*.icns binary
+*.ttf binary
+*.otf binary
+*.zip binary

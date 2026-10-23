@@ -369,8 +369,16 @@ mod tests {
             ("cmd-shift-n", "mindweave::EditNote"),
             ("ctrl-shift-n", "mindweave::EditNote"),
         ];
+        // Written as on macOS; each system names the platform key its own
+        // way (`super` on Linux, `win` on Windows).
+        let as_bound = |keys: &str| {
+            keys.split(' ')
+                .map(|k| gpui_kit::Keystroke::parse(k).unwrap().unparse())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         let expected: Vec<(String, &str)> =
-            expected.iter().map(|(k, a)| (k.to_string(), *a)).collect();
+            expected.iter().map(|(k, a)| (as_bound(k), *a)).collect();
         assert_eq!(bindings, expected);
         assert_eq!(ShowDashboard.name(), "mindweave::ShowDashboard");
     }
