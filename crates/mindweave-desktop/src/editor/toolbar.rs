@@ -1,7 +1,8 @@
-//! The ribbon under the title bar: a row of tabs (Home and one per
-//! library), and under it a card with the tools of the shown tab, in groups
-//! split by dividers. A library's shapes sit in a gallery strip whose
-//! expander opens the shape gallery; shapes that do not fit wait there.
+//! The ribbon under the title bar: a row of tabs (Home, Mind Map, Artboard
+//! and one per library), and under it a card with the tools of the shown
+//! tab, in groups split by dividers. A library's shapes sit in a gallery
+//! strip whose expander opens the shape gallery; shapes that do not fit
+//! wait there, as artboard presets that do not fit wait in a menu.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -12,14 +13,16 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
+use gpui_kit::component::{
+    h_flex, v_flex, ActiveTheme as _, Icon as ComponentIcon, IconName, Sizable as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{Geometry, PathCmd};
-use mindweave_core::{Icon, ShapeDef};
+use mindweave_core::{ArtboardPreset, Icon, PresetCategory, ShapeDef, ARTBOARD_PRESETS};
 
 use super::mindmap_edit::NewTopic;
-use super::tool::{shape_key, Tool, BASIC_SHAPES, HOME_TAB, MINDMAP_TAB};
+use super::tool::{shape_key, Tool, ARTBOARD_TAB, BASIC_SHAPES, HOME_TAB, MINDMAP_TAB};
 use super::{shape_gallery, EditorWindow, SMALL_TEXT_SIZE};
 use crate::assets;
 use crate::libraries::{lucide_icon_path, Libraries};
@@ -50,6 +53,11 @@ const LOCK_DOT_INSET: f32 = 3.;
 /// Widest tab; longer library names are cut with an ellipsis.
 const TAB_MAX_WIDTH: f32 = 160.;
 const TOOL_GAP: f32 = 2.;
+/// Room a ribbon button takes in the tool row, with the gap after it.
+const BUTTON_STEP: f32 = BUTTON_SIZE + TOOL_GAP;
+/// Room a divider takes in the tool row, with its margins and the gap
+/// after it.
+const DIVIDER_STEP: f32 = 1. + 2. * DIVIDER_MARGIN + TOOL_GAP;
 /// Width of the gallery strip's expander, which opens the shape gallery.
 pub(super) const MORE_BUTTON_WIDTH: f32 = 20.;
 const TAB_MENU_MAX_WIDTH: f32 = 280.;
@@ -266,8 +274,8 @@ fn tab_row(editor: &mut EditorWindow, cx: &mut Context<EditorWindow>) -> impl In
         )
 }
 
-/// The tabs, as `(id, name)`: Home first, then Basic Shapes, Mind Map and
-/// the other libraries in `libraries`' order.
+/// The tabs, as `(id, name)`: Home first, then Basic Shapes, Mind Map,
+/// Artboard and the other libraries in `libraries`' order.
 fn tab_order(
     libraries: impl IntoIterator<Item = (SharedString, SharedString)>,
 ) -> Vec<(SharedString, SharedString)> {
@@ -276,7 +284,10 @@ fn tab_order(
         .partition(|(id, _)| id == BASIC_SHAPES);
     std::iter::once((HOME_TAB.into(), "Home".into()))
         .chain(basic)
-        .chain([(MINDMAP_TAB.into(), "Mind Map".into())])
+        .chain([
+            (MINDMAP_TAB.into(), "Mind Map".into()),
+            (ARTBOARD_TAB.into(), "Artboard".into()),
+        ])
         .chain(rest)
         .collect()
 }
@@ -389,6 +400,7 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
             let links = vec![tool_button(editor, relationship, cx).into_any_element()];
             with_dividers(vec![topics, content, marks, links], cx)
         }
+        None if editor.tools.tab == ARTBOARD_TAB => artboard_row(editor, cx),
         None => {
             let tools = home_buttons()
                 .into_iter()
@@ -480,6 +492,126 @@ fn gallery_strip(tiles: Vec<AnyElement>, more: impl IntoElement, cx: &App) -> im
                 .border_color(theme.border)
                 .child(more),
         )
+}
+
+/// The Artboard tab: the Custom Artboard tool, then a button per preset,
+/// a group per category. Presets the row has no room for wait in a menu
+/// at its end.
+fn artboard_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> Vec<AnyElement> {
+    let custom = ToolButton {
+        id: "tool-artboard".into(),
+        tool: Tool::Artboard,
+        icon: ButtonIcon::lucide("frame"),
+        name: "Custom Artboard".into(),
+        tooltip: "Custom Artboard (A): drag to draw one of any size".into(),
+    };
+    let categories: Vec<PresetCategory> = ARTBOARD_PRESETS.iter().map(|p| p.category).collect();
+    let shown = match editor.ribbon.tool_row_width {
+        Some(width) => presets_shown(f32::from(width), &categories),
+        // Not measured yet: show them all, cut off by the row.
+        None => ARTBOARD_PRESETS.len(),
+    };
+    let mut groups = vec![vec![tool_button(editor, custom, cx).into_any_element()]];
+    for (ix, preset) in ARTBOARD_PRESETS.iter().enumerate().take(shown) {
+        let button = preset_button(ix, preset, cx).into_any_element();
+        match groups.last_mut() {
+            Some(group) if ix > 0 && ARTBOARD_PRESETS[ix - 1].category == preset.category => {
+                group.push(button)
+            }
+            _ => groups.push(vec![button]),
+        }
+    }
+    let mut row = with_dividers(groups, cx);
+    if shown < ARTBOARD_PRESETS.len() {
+        row.push(more_presets(&ARTBOARD_PRESETS[shown..], cx).into_any_element());
+    }
+    row
+}
+
+/// A preset's tooltip and menu item: its name and size.
+pub(super) fn preset_tooltip(preset: &ArtboardPreset) -> String {
+    let (w, h) = preset.size;
+    format!("{} — {w} × {h}", preset.name)
+}
+
+/// How many presets, of `categories` in order, fit in a tool row
+/// `row_width` wide after the Custom Artboard button and its divider, a
+/// divider between categories. When they do not all fit, room is kept at
+/// the end for the menu holding the rest.
+fn presets_shown(row_width: f32, categories: &[PresetCategory]) -> usize {
+    let mut used = BUTTON_STEP + DIVIDER_STEP;
+    // The room taken up to and including each preset, gap after it too.
+    let mut ends = Vec::with_capacity(categories.len());
+    for (ix, category) in categories.iter().enumerate() {
+        if ix > 0 && categories[ix - 1] != *category {
+            used += DIVIDER_STEP;
+        }
+        used += BUTTON_STEP;
+        ends.push(used);
+    }
+    if ends.last().is_some_and(|&all| all - TOOL_GAP <= row_width) {
+        return categories.len();
+    }
+    ends.iter()
+        .take_while(|&&end| end + MORE_BUTTON_WIDTH <= row_width)
+        .count()
+}
+
+/// The button placing an artboard of `preset`, the `ix`th.
+fn preset_button(
+    ix: usize,
+    preset: &'static ArtboardPreset,
+    cx: &mut Context<EditorWindow>,
+) -> impl IntoElement {
+    let tooltip: SharedString = preset_tooltip(preset).into();
+    ribbon_button(
+        ("artboard-preset", ix),
+        ButtonIcon::lucide_or_fallback(preset.icon, cx),
+        false,
+        cx,
+    )
+    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+    .on_click(cx.listener(move |this, _, window, cx| {
+        this.focus_handle.focus(window, cx);
+        this.place_preset(preset, window, cx);
+    }))
+}
+
+/// The ⌄ menu at the end of the Artboard tab holding the presets the row
+/// has no room for, a separator between categories.
+fn more_presets(
+    hidden: &'static [ArtboardPreset],
+    cx: &mut Context<EditorWindow>,
+) -> impl IntoElement {
+    let this = cx.entity().downgrade();
+    Button::new("artboard-more")
+        .ghost()
+        .xsmall()
+        .icon(IconName::ChevronDown)
+        .w(px(MORE_BUTTON_WIDTH))
+        .h(px(BUTTON_SIZE))
+        .flex_none()
+        .tooltip("More Artboards")
+        .dropdown_menu(move |mut menu, _, cx| {
+            for (ix, preset) in hidden.iter().enumerate() {
+                if ix > 0 && hidden[ix - 1].category != preset.category {
+                    menu = menu.separator();
+                }
+                let this = this.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(preset_tooltip(preset))
+                        .icon(ComponentIcon::empty().path(lucide_icon_path(preset.icon, cx)))
+                        .on_click(move |_, window, cx| {
+                            this.update(cx, |this, cx| {
+                                this.focus_handle.focus(window, cx);
+                                this.place_preset(preset, window, cx);
+                            })
+                            .ok();
+                        }),
+                );
+            }
+            menu
+        })
 }
 
 /// Home's tools: Pointer, Hand and Text.
@@ -794,12 +926,14 @@ fn active_tool_hidden(buttons: &[ToolButton], shown: usize, active: &Tool) -> bo
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        active_tool_hidden, home_buttons, outline_icon_path, tab_order, visible_count, ICON_SIZE,
+        active_tool_hidden, home_buttons, outline_icon_path, preset_tooltip, presets_shown,
+        tab_order, visible_count, BUTTON_STEP, DIVIDER_STEP, ICON_SIZE, MORE_BUTTON_WIDTH,
+        TOOL_GAP,
     };
     use crate::editor::tool::Tool;
     use gpui_kit::{px, SharedString};
     use mindweave_core::geometry::Geometry;
-    use mindweave_core::{builtin_libraries, ShapeSource};
+    use mindweave_core::{builtin_libraries, PresetCategory, ShapeSource, ARTBOARD_PRESETS};
 
     #[test]
     fn outline_icons_are_built_inside_the_icon_box() {
@@ -827,9 +961,64 @@ mod tests {
                 lib("basic-shapes"),
                 lib("aws")
             ])),
-            ["home", "basic-shapes", "mindmap", "flowchart", "aws"]
+            [
+                "home",
+                "basic-shapes",
+                "mindmap",
+                "artboard",
+                "flowchart",
+                "aws"
+            ]
         );
-        assert_eq!(ids(tab_order([lib("aws")])), ["home", "mindmap", "aws"]);
+        assert_eq!(
+            ids(tab_order([lib("aws")])),
+            ["home", "mindmap", "artboard", "aws"]
+        );
+    }
+
+    #[test]
+    fn preset_tooltips_give_name_and_size() {
+        assert_eq!(
+            preset_tooltip(&ARTBOARD_PRESETS[0]),
+            "iPhone 16 — 393 × 852"
+        );
+        let banner = ARTBOARD_PRESETS
+            .iter()
+            .find(|p| p.name == "Banner")
+            .unwrap();
+        assert_eq!(preset_tooltip(banner), "Banner — 1584 × 396");
+    }
+
+    #[test]
+    fn presets_that_do_not_fit_wait_behind_the_menu() {
+        use PresetCategory::*;
+        let cats = [Device, Device, Desktop, Paper];
+        // Custom Artboard and its divider, then two phones, a divider and
+        // a desktop, a divider and a paper preset; no gap after the last.
+        let all = BUTTON_STEP
+            + DIVIDER_STEP
+            + 2. * BUTTON_STEP
+            + DIVIDER_STEP
+            + BUTTON_STEP
+            + DIVIDER_STEP
+            + BUTTON_STEP
+            - TOOL_GAP;
+        assert_eq!(presets_shown(all, &cats), 4);
+        assert_eq!(presets_shown(all + 100., &cats), 4);
+        // Short of that, room is kept for the menu after the shown ones.
+        let two = BUTTON_STEP + DIVIDER_STEP + 2. * BUTTON_STEP + MORE_BUTTON_WIDTH;
+        assert_eq!(presets_shown(all - 1., &cats), 3);
+        assert_eq!(presets_shown(two, &cats), 2);
+        assert_eq!(presets_shown(two - 1., &cats), 1);
+        // A preset after a divider needs the divider's room too.
+        assert_eq!(
+            presets_shown(two + BUTTON_STEP, &cats),
+            2,
+            "the divider before the desktop preset does not fit"
+        );
+        assert_eq!(presets_shown(two + BUTTON_STEP + DIVIDER_STEP, &cats), 3);
+        assert_eq!(presets_shown(0., &cats), 0);
+        assert_eq!(presets_shown(10., &[]), 0);
     }
 
     #[test]

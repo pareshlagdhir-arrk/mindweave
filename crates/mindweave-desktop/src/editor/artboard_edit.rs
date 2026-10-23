@@ -1,6 +1,7 @@
 //! Artboards on the canvas: which shapes a placement, move or resize
 //! gives membership to, hit-testing their names and clipped members, and
-//! renaming one in place by double-clicking its name.
+//! renaming one in place by double-clicking its name, and placing one of
+//! the ready-made sizes from the ribbon.
 //!
 //! Membership follows the core rule ([`mindweave_core::membership`]) and
 //! always joins the undo step of the edit that caused it: placing, pasting
@@ -12,7 +13,9 @@ use std::collections::HashSet;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{Frame, Pt, Rect};
-use mindweave_core::{frame_aabb, DocumentSession, Shape, Viewport};
+use mindweave_core::{
+    artboard_placement, frame_aabb, ArtboardPreset, DocumentSession, Shape, Viewport,
+};
 use uuid::Uuid;
 
 use super::shape_paint::{name_label_rect, screen_rect};
@@ -28,6 +31,8 @@ const RENAME_MIN_WIDTH: f32 = 160.;
 const RENAME_SLACK: f32 = 40.;
 /// Height of the rename field, in pixels.
 const RENAME_HEIGHT: f32 = 24.;
+/// Room kept round an artboard scrolled into view, in pixels.
+const REVEAL_MARGIN: f32 = 40.;
 
 /// The shapes among `moved` (on the layer of `shapes`) whose membership a
 /// move, resize or drop decides: not artboards (which take nothing in), nor
@@ -144,7 +149,78 @@ pub fn clipped_away(shape: &Shape, clips: &[(Uuid, Rect)], at: Pt) -> bool {
         .is_some_and(|(_, r)| !r.contains(at))
 }
 
+/// A new artboard of `preset`'s size and name, placed by
+/// [`artboard_placement`] among `page_shapes` (every layer's) or round
+/// `view_center`.
+pub fn preset_artboard(page_shapes: &[Shape], preset: &ArtboardPreset, view_center: Pt) -> Shape {
+    let (x, y) = artboard_placement(page_shapes, preset.size, view_center);
+    let frame = Frame {
+        x,
+        y,
+        w: preset.size.0,
+        h: preset.size.1,
+        ..Frame::default()
+    };
+    Shape::new_artboard(frame, preset.name)
+}
+
+/// The top-left corner the view (`view`, in canvas units) moves to so
+/// `target` shows, or `None` when it already shows whole (or the view has
+/// no size yet). Along each axis `target` is centred when it fits within
+/// `margin` of both edges, else its start is shown `margin` in.
+pub fn reveal_origin(view: Rect, target: &Rect, margin: f32) -> Option<Pt> {
+    if view.w <= 0. || view.h <= 0. || view.contains_rect(target) {
+        return None;
+    }
+    let axis = |start: f32, len: f32, view_len: f32| {
+        if len + 2. * margin <= view_len {
+            start + len / 2. - view_len / 2.
+        } else {
+            start - margin
+        }
+    };
+    Some((
+        axis(target.x, target.w, view.w),
+        axis(target.y, target.h, view.h),
+    ))
+}
+
 impl EditorWindow {
+    /// Places a new artboard of `preset` on the active layer as one undo
+    /// step (see [`preset_artboard`]), selects it and scrolls the view to
+    /// it when it is off-screen. A hidden active layer refuses it.
+    pub(super) fn place_preset(
+        &mut self,
+        preset: &ArtboardPreset,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_edit_action(window, cx);
+        let view = self.visible_canvas();
+        // Only artboards matter to the placement.
+        let artboards: Vec<Shape> = self
+            .session
+            .page()
+            .layers
+            .iter()
+            .flat_map(|l| l.objects.iter().filter(|s| s.is_artboard()).cloned())
+            .collect();
+        let board = preset_artboard(&artboards, preset, view.center());
+        let id = board.id;
+        let frame = frame_aabb(&board.frame);
+        self.add_and_select(vec![board], window, cx);
+        if self.selection != [id] {
+            // Refused: the layer is hidden.
+            return;
+        }
+        let mut viewport = self.session.page().viewport;
+        if let Some((x, y)) = reveal_origin(view, &frame, REVEAL_MARGIN / viewport.zoom) {
+            (viewport.x, viewport.y) = (x, y);
+            self.set_viewport(viewport, cx);
+            self.refresh_cursor(cx);
+        }
+    }
+
     /// The topmost artboard of the active layer whose name is at canvas
     /// point `at`, as last painted; none on a hidden layer or for locked
     /// artboards.
@@ -213,11 +289,12 @@ mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
         add_with_membership, artboard_body_hit, clip_frames, clipped_away, membership_targets,
-        name_hit, rename_artboard, settle_membership, without_members,
+        name_hit, preset_artboard, rename_artboard, reveal_origin, settle_membership,
+        without_members,
     };
     use crate::editor::{GestureOwner, SessionGesture};
-    use mindweave_core::geometry::Frame;
-    use mindweave_core::{duplicate, DocumentSession, Shape, Viewport};
+    use mindweave_core::geometry::{Frame, Rect};
+    use mindweave_core::{duplicate, DocumentSession, Shape, Viewport, ARTBOARD_PRESETS};
     use uuid::Uuid;
 
     fn frame(x: f32, y: f32, w: f32, h: f32) -> Frame {
@@ -416,5 +493,59 @@ mod tests {
         let mut open = a.clone();
         open.artboard_props.as_mut().unwrap().clip = false;
         assert!(!clipped_away(&m, &clip_frames(&[open]), (105., 10.)));
+    }
+
+    #[test]
+    fn a_preset_goes_beside_the_rightmost_artboard_or_mid_view() {
+        let iphone = &ARTBOARD_PRESETS[0];
+        let alone = preset_artboard(&[], iphone, (1000., 500.));
+        assert!(alone.is_artboard());
+        assert_eq!(alone.name.as_deref(), Some("iPhone 16"));
+        let f = alone.frame;
+        assert_eq!(
+            (f.x, f.y, f.w, f.h),
+            (1000. - 196.5, 500. - 426., 393., 852.)
+        );
+        let shapes = [board(0., 50., 100., 100.), rect(900., 0.)];
+        let f = preset_artboard(&shapes, iphone, (1000., 500.)).frame;
+        assert_eq!((f.x, f.y), (180., 50.));
+    }
+
+    #[test]
+    fn the_view_moves_only_to_show_what_is_off_screen() {
+        let view = Rect {
+            x: 0.,
+            y: 0.,
+            w: 800.,
+            h: 600.,
+        };
+        let inside = Rect {
+            x: 100.,
+            y: 100.,
+            w: 200.,
+            h: 200.,
+        };
+        assert_eq!(reveal_origin(view, &inside, 40.), None);
+        // Off to the right: centred, as it fits.
+        let right = Rect { x: 900., ..inside };
+        assert_eq!(reveal_origin(view, &right, 40.), Some((600., -100.)));
+        // Partly shown counts as off-screen.
+        let partly = Rect { x: 700., ..inside };
+        assert!(reveal_origin(view, &partly, 40.).is_some());
+        // Too tall for the view: its top is shown, below the margin.
+        let tall = Rect {
+            x: 900.,
+            y: 100.,
+            w: 200.,
+            h: 3000.,
+        };
+        assert_eq!(reveal_origin(view, &tall, 40.), Some((600., 60.)));
+        // Before the canvas is painted the view is empty: nothing moves.
+        let unpainted = Rect {
+            w: 0.,
+            h: 0.,
+            ..view
+        };
+        assert_eq!(reveal_origin(unpainted, &right, 40.), None);
     }
 }

@@ -131,6 +131,71 @@ const ACCENTS: &[(&str, &[Accent])] = &[
             color: PURPLE,
         }],
     ),
+    // The Artboard tab's: a small part of each (a screen, a play mark, a
+    // block of text), so the outline stays readable.
+    (
+        "frame",
+        &[Accent {
+            body: r#"<rect x="8.5" y="8.5" width="7" height="7" rx="1"/>"#,
+            color: BLUE,
+        }],
+    ),
+    (
+        "smartphone",
+        &[Accent {
+            body: r#"<rect x="7.5" y="4.5" width="9" height="10" rx="1"/>"#,
+            color: BLUE,
+        }],
+    ),
+    (
+        "tablet",
+        &[Accent {
+            body: r#"<rect x="6.5" y="4.5" width="11" height="10" rx="1"/>"#,
+            color: BLUE,
+        }],
+    ),
+    (
+        "monitor",
+        &[Accent {
+            body: r#"<rect x="5" y="6" width="14" height="8" rx="1"/>"#,
+            color: TEAL,
+        }],
+    ),
+    (
+        "laptop",
+        &[Accent {
+            body: r#"<rect x="7" y="7.5" width="10" height="6" rx="1"/>"#,
+            color: TEAL,
+        }],
+    ),
+    (
+        "file-text",
+        &[Accent {
+            body: r#"<rect x="6.5" y="11.5" width="11" height="7" rx="1"/>"#,
+            color: AMBER,
+        }],
+    ),
+    (
+        "presentation",
+        &[Accent {
+            body: r#"<rect x="6" y="5.5" width="12" height="7" rx="1"/>"#,
+            color: ORANGE,
+        }],
+    ),
+    (
+        "square-play",
+        &[Accent {
+            body: r#"<path d="M9 9.003a1 1 0 0 1 1.517-.859l4.997 2.997a1 1 0 0 1 0 1.718l-4.997 2.997A1 1 0 0 1 9 14.996z"/>"#,
+            color: ROSE,
+        }],
+    ),
+    (
+        "rectangle-horizontal",
+        &[Accent {
+            body: r#"<rect x="4.5" y="8.5" width="6" height="7" rx="1"/>"#,
+            color: PURPLE,
+        }],
+    ),
 ];
 
 /// The accent layers of Lucide icon `name`, if it has hand-drawn ones.
@@ -247,6 +312,14 @@ mod tests {
             .unwrap()
             .iter()
             .any(|p| p == "icons/square.svg"));
+    }
+
+    #[test]
+    fn the_artboard_tab_icons_have_accents() {
+        let presets = mindweave_core::ARTBOARD_PRESETS.iter().map(|p| p.icon);
+        for name in std::iter::once("frame").chain(presets) {
+            assert!(accents(name).is_some(), "{name}");
+        }
     }
 
     #[test]

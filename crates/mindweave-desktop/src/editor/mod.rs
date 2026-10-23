@@ -2,6 +2,7 @@
 //! tabs, Properties panel and status bar.
 
 mod artboard_edit;
+mod artboard_properties;
 mod canvas;
 mod cards;
 mod color_palette;
@@ -249,6 +250,8 @@ pub struct EditorWindow {
     icons: icons_panel::IconsPane,
     /// The Topic section's link field.
     topic_fields: topic_properties::TopicFields,
+    /// The Artboard section's name field.
+    artboard_fields: artboard_properties::ArtboardFields,
     /// Text layouts of the active page's labels and text boxes.
     text_layouts: TextLayoutCache,
     /// Glyph outlines for drawing rotated text.
@@ -305,6 +308,9 @@ impl EditorWindow {
         _subscriptions.push(icons_subscription);
         let (topic_fields, topic_subscription) = topic_properties::TopicFields::new(window, cx);
         _subscriptions.push(topic_subscription);
+        let (artboard_fields, artboard_subscription) =
+            artboard_properties::ArtboardFields::new(window, cx);
+        _subscriptions.push(artboard_subscription);
         let window_title = session.title();
         Self {
             session,
@@ -331,6 +337,7 @@ impl EditorWindow {
             dot_tile: dot_tile::DotTile::default(),
             icons,
             topic_fields,
+            artboard_fields,
             text_layouts: TextLayoutCache::default(),
             glyph_outlines: GlyphOutlines::default(),
             session_gesture: SessionGesture::default(),
@@ -1408,6 +1415,7 @@ impl Render for EditorWindow {
         self.sync_window_title(window);
         self.sync_properties(window, cx);
         self.sync_topic_fields(window, cx);
+        self.sync_artboard_fields(window, cx);
         self.sync_equation_card(window, cx);
         self.sync_note_card(window, cx);
 

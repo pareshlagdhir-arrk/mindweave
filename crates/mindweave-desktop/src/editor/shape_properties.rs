@@ -20,8 +20,8 @@ use uuid::Uuid;
 use super::properties_panel::{
     field_row, FIELD_GAP, NUMBER_INPUT_WIDTH, RESET_WIDTH, ROW_HEIGHT, SWATCH_SIZE,
 };
+use super::{artboard_properties, line_properties, text_properties};
 use super::{hex_to_hsla, hsla_to_hex, parse_number, section_label, EditorWindow, SMALL_TEXT_SIZE};
-use super::{line_properties, text_properties};
 use crate::actions::{BringForward, BringToFront, Group, SendBackward, SendToBack, Ungroup};
 use crate::libraries::{lucide_icon_path, Libraries};
 
@@ -186,6 +186,9 @@ pub(super) struct Summary {
     /// Every selected shape is a text box, whose height fits its text: H
     /// is shown but cannot be edited.
     pub height_read_only: bool,
+    /// No artboard is selected: artboards are never rotated, so the
+    /// Rotation field is hidden.
+    pub rotatable: bool,
     pub rotation: Value<f32>,
     pub fill: Value<Option<String>>,
     pub stroke: Value<Option<String>>,
@@ -220,6 +223,8 @@ pub(super) fn summarize(shapes: &[&Shape], libs: &LibraryRegistry) -> Option<Sum
         "Image".to_string()
     } else if first.is_boundary() {
         "Boundary".to_string()
+    } else if first.is_artboard() {
+        "Artboard".to_string()
     } else if first.topic.is_some() {
         // Topics belong to no shape library either.
         if shapes
@@ -243,17 +248,19 @@ pub(super) fn summarize(shapes: &[&Shape], libs: &LibraryRegistry) -> Option<Sum
             (Some(lib), Some(def)) => format!("{} · {}", lib.name, def.name),
         }
     };
-    let params = match def.filter(|_| same_kind) {
-        Some(def) => def
-            .params
-            .iter()
-            .filter_map(|p| {
-                let values = shapes.iter().map(|s| s.param(&p.key).unwrap_or(p.default));
-                Some((p.clone(), common_number(values, same)?))
-            })
-            .collect(),
-        None => Vec::new(),
+    let declared = if same_kind {
+        declared_params(first, libs)
+    } else {
+        Vec::new()
     };
+    let params = declared
+        .into_iter()
+        .filter_map(|p| {
+            let values = shapes.iter().map(|s| s.param(&p.key).unwrap_or(p.default));
+            let value = common_number(values, same)?;
+            Some((p, value))
+        })
+        .collect();
     // Colours are compared borrowed and copied once.
     let color = |f: fn(&Shape) -> Option<&str>| {
         common(shapes.iter().map(|s| f(s))).map(|v| v.map(|c| c.map(str::to_owned)))
@@ -263,6 +270,7 @@ pub(super) fn summarize(shapes: &[&Shape], libs: &LibraryRegistry) -> Option<Sum
         title,
         bounds: shown_bounds(&frames)?,
         height_read_only: shapes.iter().all(|s| s.is_text_box()),
+        rotatable: !shapes.iter().any(|s| s.is_artboard()),
         rotation: common_number(frames.iter().map(|f| f.rotation), same)?,
         fill: color(|s| s.style.fill.as_deref())?,
         stroke: color(|s| s.style.stroke.as_deref())?,
@@ -270,6 +278,17 @@ pub(super) fn summarize(shapes: &[&Shape], libs: &LibraryRegistry) -> Option<Sum
         opacity: common_number(shapes.iter().map(|s| s.style.opacity), opacity_percent)?,
         params,
     })
+}
+
+/// The parameters `shape` declares: an artboard's corner radius, else its
+/// library shape's (none when that is missing).
+fn declared_params(shape: &Shape, libs: &LibraryRegistry) -> Vec<ParamDef> {
+    if shape.is_artboard() {
+        return artboard_properties::artboard_params();
+    }
+    libs.shape(&shape.library, &shape.shape)
+        .map(|def| def.params.clone())
+        .unwrap_or_default()
 }
 
 /// A number shown as it is stored.
@@ -415,8 +434,8 @@ pub(super) fn apply_number(
             session.update_shapes(ids, |s| s.style.opacity = opacity);
         }
         NumberKind::Param(key) => session.update_shapes(ids, |s| {
-            let def = libs.shape(&s.library, &s.shape);
-            if let Some(p) = def.and_then(|d| d.params.iter().find(|p| p.key == *key)) {
+            let declared = declared_params(s, libs);
+            if let Some(p) = declared.iter().find(|p| p.key == *key) {
                 s.set_param(key, snap(value, p.min, p.max, p.step));
             }
         }),
@@ -837,19 +856,23 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
     let line_section = line_properties::render(editor, cx);
     let outline_rows = line_properties::style_rows(editor, cx);
     let topic_section = super::topic_properties::render(editor, cx);
+    let artboard_section = artboard_properties::render(editor, cx);
     panel
         .child(section_label("Shape", cx))
         .child(title)
         .child(arrange_row(cx))
         .children(topic_section)
+        .children(artboard_section)
         .child(section_label("Transform", cx).mt(px(SECTION_GAP)))
         .child(pair(BoundsField::X, BoundsField::Y))
         .child(pair(BoundsField::W, BoundsField::H))
-        .child(field_row(
-            "Rotation",
-            None,
-            number(NumberKind::Rotation, Some("°")),
-        ))
+        .when(summary.rotatable, |panel| {
+            panel.child(field_row(
+                "Rotation",
+                None,
+                number(NumberKind::Rotation, Some("°")),
+            ))
+        })
         .children(text_properties::render(editor, cx))
         .children(line_section)
         .child(section_label("Style", cx).mt(px(SECTION_GAP)))
@@ -1337,6 +1360,48 @@ mod tests {
         assert_eq!(title(&[&child]), "Topic");
         assert_eq!(title(&[&central, &child]), "Topic");
         assert_eq!(title(&[&boundary]), "Boundary");
+    }
+
+    #[test]
+    fn artboards_have_a_corner_radius_and_no_rotation() {
+        let libs = libs();
+        let board = Shape::new_artboard(frame(0., 0., 100., 100.), "Board");
+        let rect = shape(&libs, "rectangle", frame(0., 0., 10., 10.));
+        let one = summarize(&[&board], &libs).unwrap();
+        assert_eq!(one.title, "Artboard");
+        assert!(!one.rotatable);
+        assert_eq!(one.params.len(), 1);
+        assert_eq!(one.params[0].0.key, "corner_radius");
+        assert_eq!(one.params[0].1, Value::Same(0.0));
+        // With other shapes: no rotation either, and no parameters.
+        let mixed = summarize(&[&board, &rect], &libs).unwrap();
+        assert!(!mixed.rotatable && mixed.params.is_empty());
+        assert!(summarize(&[&rect], &libs).unwrap().rotatable);
+
+        // The corner radius applies, clamped to its range, as one step.
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("a.mindweave")).unwrap();
+        let id = board.id;
+        s.add_shapes(vec![board]);
+        let radius = |s: &DocumentSession| s.find_shape(id).unwrap().param("corner_radius");
+        apply_number(
+            &mut s,
+            &[id],
+            &NumberKind::Param("corner_radius".into()),
+            8.0,
+            &libs,
+        );
+        assert_eq!(radius(&s), Some(8.0));
+        apply_number(
+            &mut s,
+            &[id],
+            &NumberKind::Param("corner_radius".into()),
+            -5.0,
+            &libs,
+        );
+        assert_eq!(radius(&s), Some(0.0));
+        assert!(s.undo());
+        assert_eq!(radius(&s), Some(8.0));
     }
 
     #[test]

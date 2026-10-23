@@ -123,9 +123,10 @@ impl AppSettings {
 
     /// Gives a new `shape` the style last set on its kind: lines take the
     /// remembered line style and properties, other library shapes the
-    /// remembered shape style. Text boxes and images keep their own.
+    /// remembered shape style. Text boxes, images, topics and artboards keep
+    /// their own.
     pub fn apply_remembered_style(&self, shape: &mut Shape) {
-        if shape.is_text_box() || shape.is_image() || shape.is_topic() {
+        if shape.is_text_box() || shape.is_image() || shape.is_topic() || shape.is_artboard() {
             return;
         }
         if shape.is_line() {
@@ -150,7 +151,7 @@ impl AppSettings {
     /// Remembers `shape`'s style for new shapes of its kind (see
     /// [`Self::apply_remembered_style`]). Returns whether anything changed.
     pub fn remember_style(&mut self, shape: &Shape) -> bool {
-        if shape.is_text_box() || shape.is_image() || shape.is_topic() {
+        if shape.is_text_box() || shape.is_image() || shape.is_topic() || shape.is_artboard() {
             return false;
         }
         let before = (
@@ -320,6 +321,13 @@ mod tests {
         assert!(!settings.remember_style(&t));
         settings.apply_remembered_style(&mut t);
         assert_eq!(t.style, Style::default());
+        // So do artboards: their white fill must not reach new shapes.
+        let mut board = Shape::new_artboard(crate::geometry::Frame::default(), "Board");
+        board.style.fill = Some("#00FF00".into());
+        assert!(!settings.remember_style(&board));
+        let mut board = Shape::new_artboard(crate::geometry::Frame::default(), "Board");
+        settings.apply_remembered_style(&mut board);
+        assert_eq!(board.style.fill.as_deref(), Some(crate::ARTBOARD_FILL));
         // Settings without the new fields still load.
         let old: AppSettings = serde_json::from_str(r#"{"theme":"x"}"#).unwrap();
         assert_eq!(old.shape_style, None);
