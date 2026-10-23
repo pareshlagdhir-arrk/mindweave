@@ -22,6 +22,7 @@ It runs fully offline and stores each document as a single `.mindweave` file.
   - [Themes](#themes)
   - [Keyboard shortcuts](#keyboard-shortcuts)
   - [Where Mindweave keeps its data](#where-mindweave-keeps-its-data)
+  - [AI agents](#ai-agents)
 - [For developers](#for-developers)
   - [Prerequisites](#prerequisites)
   - [Build, run and test](#build-run-and-test)
@@ -189,6 +190,10 @@ On macOS, under `~/Library/Application Support/Mindweave/`:
 
 Documents themselves are saved wherever you choose, as `.mindweave` files.
 
+### AI agents
+
+AI agents can build and edit Mindweave documents (mind maps, diagrams and artboards) and look at the result as a picture through `mindweave-mcp`, a Model Context Protocol server that works with Claude Code, Claude Desktop, Codex, opencode, Cursor and other MCP clients. A short skill in [`skills/mindweave`](skills/mindweave/SKILL.md) explains the workflow to agents. See [docs/agents.md](docs/agents.md) for installation and client setup.
+
 ---
 
 ## For developers
@@ -226,7 +231,11 @@ crates/
     src/library.rs         Shape library loading (built-in and user)
     src/icons.rs           Icon pack import
     src/settings.rs        App settings (settings.json)
+    src/ops/               Command layer for agents and tools (validated edits, reading, validate)
+    src/export.rs          SVG export of a page, artboard or objects
+    src/text_measure.rs    Approximate text layout without fonts
     libraries/basic-shapes Built-in shape library (data files)
+  mindweave-mcp/         MCP server for AI agents (stdio JSON-RPC, tools, PNG rendering).
   mindweave-desktop/     The gpui application.
     src/main.rs            Entry point
     src/app_state.rs       Global state: open windows, settings, recent files
@@ -248,9 +257,11 @@ crates/
       link_popover.rs        ⌘K link popover
       *_properties.rs        Properties panel sections
 docs/
+  agents.md              The MCP server and AI agent setup
   libraries.md           Writing shape libraries
   superpowers/specs/     Design documents for each milestone
   superpowers/plans/     Implementation plans
+skills/mindweave/        Agent skill for working with Mindweave files
 THIRD_PARTY_NOTICES.md   Licences of bundled third-party components
 ```
 
@@ -293,6 +304,7 @@ When you add a field to the format: make it optional with a serde default, raise
 ### Documentation
 
 - [docs/libraries.md](docs/libraries.md): how to write and install shape libraries (no Rust required).
+- [docs/agents.md](docs/agents.md): the MCP server for AI agents and how to set it up in each client.
 - [docs/superpowers/specs/](docs/superpowers/specs/): design documents, one per milestone.
 - [docs/superpowers/plans/](docs/superpowers/plans/): the implementation plans that followed them.
 
