@@ -174,7 +174,7 @@ works for several clients: **`.agents/skills/mindweave`** in a repository
 (or `~/.agents/skills/mindweave` for your user) is read by both Codex and
 opencode.
 
-- **Claude Code** *(unverified)*: copy `skills/mindweave` to
+- **Claude Code** *(verified against the Claude Code skills documentation)*: copy `skills/mindweave` to
   `~/.claude/skills/mindweave` (all projects) or `.claude/skills/mindweave`
   (one project).
 - **Codex** *(verified against the Codex skills documentation)*:
