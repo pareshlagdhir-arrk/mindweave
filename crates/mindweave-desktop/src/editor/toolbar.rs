@@ -308,19 +308,21 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
                 .enumerate()
                 .map(|(ix, shape)| shape_button(&library.id, ("tool-shape", ix), shape, cx))
                 .collect();
+            // The expander takes room only when some shapes do not fit.
             let shown = match editor.ribbon.tool_row_width {
                 Some(width) => visible_count(
-                    f32::from(width) - MORE_BUTTON_WIDTH - 2. * (STRIP_BORDER + STRIP_PADDING),
+                    f32::from(width) - 2. * (STRIP_BORDER + STRIP_PADDING),
                     BUTTON_SIZE,
                     TOOL_GAP,
-                    0.,
+                    MORE_BUTTON_WIDTH + TOOL_GAP,
                     buttons.len(),
                 ),
                 // Not measured yet: show them all, cut off by the row.
                 None => buttons.len(),
             };
             let active_hidden = active_tool_hidden(&buttons, shown, &editor.tools.tool);
-            let more = shape_gallery::more_button(editor, library, active_hidden, cx);
+            let more = (shown < buttons.len())
+                .then(|| shape_gallery::more_button(editor, library, active_hidden, cx));
             let tiles: Vec<AnyElement> = buttons
                 .into_iter()
                 .take(shown)
@@ -462,8 +464,12 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
 }
 
 /// A library's shapes in a bordered strip, ending in `more`, the expander
-/// that opens the whole gallery.
-fn gallery_strip(tiles: Vec<AnyElement>, more: impl IntoElement, cx: &App) -> impl IntoElement {
+/// that opens the whole gallery, when some shapes do not fit.
+fn gallery_strip(
+    tiles: Vec<AnyElement>,
+    more: Option<impl IntoElement>,
+    cx: &App,
+) -> impl IntoElement {
     let theme = cx.theme();
     h_flex()
         .flex_none()
@@ -482,16 +488,18 @@ fn gallery_strip(tiles: Vec<AnyElement>, more: impl IntoElement, cx: &App) -> im
                 .overflow_hidden()
                 .children(tiles),
         )
-        .child(
-            div()
-                .flex_none()
-                .h_full()
-                .flex()
-                .items_center()
-                .border_l_1()
-                .border_color(theme.border)
-                .child(more),
-        )
+        .when_some(more, |strip, more| {
+            strip.child(
+                div()
+                    .flex_none()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .border_l_1()
+                    .border_color(theme.border)
+                    .child(more),
+            )
+        })
 }
 
 /// The Artboard tab: the Custom Artboard tool, then a button per preset,
