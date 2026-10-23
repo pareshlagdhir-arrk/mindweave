@@ -202,6 +202,21 @@ mod tests {
     }
 
     #[test]
+    fn every_builtin_lucide_icon_is_bundled() {
+        use gpui_kit::AssetSource;
+        let bundled: HashSet<SharedString> = crate::assets::Assets
+            .list("icons/")
+            .unwrap()
+            .into_iter()
+            .collect();
+        let registry = LibraryRegistry::new(builtin_libraries(), None).0;
+        assert_eq!(
+            unbundled_icon_notices(&registry, &bundled),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
     fn unbundled_icon_notice_is_capped() {
         let shape = |i: usize, icon: String| ShapeDef {
             id: format!("s{i}"),

@@ -1372,9 +1372,134 @@ const WIREFRAME_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The built-in UML library's files.
+const UML_FILES: &[(&str, &str)] = &[
+    (
+        "library.toml",
+        include_str!("../libraries/uml/library.toml"),
+    ),
+    ("shapes.toml", include_str!("../libraries/uml/shapes.toml")),
+    (
+        "shapes/accept-event.svg",
+        include_str!("../libraries/uml/shapes/accept-event.svg"),
+    ),
+    (
+        "shapes/actor-lifeline-head.svg",
+        include_str!("../libraries/uml/shapes/actor-lifeline-head.svg"),
+    ),
+    (
+        "shapes/actor.svg",
+        include_str!("../libraries/uml/shapes/actor.svg"),
+    ),
+    (
+        "shapes/component.svg",
+        include_str!("../libraries/uml/shapes/component.svg"),
+    ),
+    (
+        "shapes/decision.svg",
+        include_str!("../libraries/uml/shapes/decision.svg"),
+    ),
+    (
+        "shapes/destruction.svg",
+        include_str!("../libraries/uml/shapes/destruction.svg"),
+    ),
+    (
+        "shapes/flow-final.svg",
+        include_str!("../libraries/uml/shapes/flow-final.svg"),
+    ),
+    (
+        "shapes/fragment-tag.svg",
+        include_str!("../libraries/uml/shapes/fragment-tag.svg"),
+    ),
+    (
+        "shapes/note.svg",
+        include_str!("../libraries/uml/shapes/note.svg"),
+    ),
+    (
+        "shapes/package.svg",
+        include_str!("../libraries/uml/shapes/package.svg"),
+    ),
+    (
+        "shapes/send-signal.svg",
+        include_str!("../libraries/uml/shapes/send-signal.svg"),
+    ),
+    (
+        "shapes/icons/abstract-class.svg",
+        include_str!("../libraries/uml/shapes/icons/abstract-class.svg"),
+    ),
+    (
+        "shapes/icons/actor-lifeline.svg",
+        include_str!("../libraries/uml/shapes/icons/actor-lifeline.svg"),
+    ),
+    (
+        "shapes/icons/aggregation.svg",
+        include_str!("../libraries/uml/shapes/icons/aggregation.svg"),
+    ),
+    (
+        "shapes/icons/class.svg",
+        include_str!("../libraries/uml/shapes/icons/class.svg"),
+    ),
+    (
+        "shapes/icons/combined-fragment.svg",
+        include_str!("../libraries/uml/shapes/icons/combined-fragment.svg"),
+    ),
+    (
+        "shapes/icons/composition.svg",
+        include_str!("../libraries/uml/shapes/icons/composition.svg"),
+    ),
+    (
+        "shapes/icons/dependency.svg",
+        include_str!("../libraries/uml/shapes/icons/dependency.svg"),
+    ),
+    (
+        "shapes/icons/enumeration.svg",
+        include_str!("../libraries/uml/shapes/icons/enumeration.svg"),
+    ),
+    (
+        "shapes/icons/fork-join.svg",
+        include_str!("../libraries/uml/shapes/icons/fork-join.svg"),
+    ),
+    (
+        "shapes/icons/generalization.svg",
+        include_str!("../libraries/uml/shapes/icons/generalization.svg"),
+    ),
+    (
+        "shapes/icons/initial-node.svg",
+        include_str!("../libraries/uml/shapes/icons/initial-node.svg"),
+    ),
+    (
+        "shapes/icons/interface.svg",
+        include_str!("../libraries/uml/shapes/icons/interface.svg"),
+    ),
+    (
+        "shapes/icons/lifeline.svg",
+        include_str!("../libraries/uml/shapes/icons/lifeline.svg"),
+    ),
+    (
+        "shapes/icons/object.svg",
+        include_str!("../libraries/uml/shapes/icons/object.svg"),
+    ),
+    (
+        "shapes/icons/realization.svg",
+        include_str!("../libraries/uml/shapes/icons/realization.svg"),
+    ),
+    (
+        "shapes/icons/reply-message.svg",
+        include_str!("../libraries/uml/shapes/icons/reply-message.svg"),
+    ),
+    (
+        "shapes/icons/synchronous-message.svg",
+        include_str!("../libraries/uml/shapes/icons/synchronous-message.svg"),
+    ),
+];
+
 /// Every built-in library's files, in toolbar order.
-const BUILTIN_LIBRARY_FILES: &[&[(&str, &str)]] =
-    &[BASIC_SHAPES_FILES, FLOWCHART_FILES, WIREFRAME_FILES];
+const BUILTIN_LIBRARY_FILES: &[&[(&str, &str)]] = &[
+    BASIC_SHAPES_FILES,
+    FLOWCHART_FILES,
+    WIREFRAME_FILES,
+    UML_FILES,
+];
 
 /// The libraries compiled into the app. Panics only if a built-in library
 /// is invalid, which the tests rule out.
@@ -1656,7 +1781,7 @@ version = "1.0.0"
     fn builtin_libraries_come_in_toolbar_order() {
         let libs = builtin_libraries();
         let ids: Vec<&str> = libs.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, ["basic-shapes", "flowchart", "wireframe"]);
+        assert_eq!(ids, ["basic-shapes", "flowchart", "wireframe", "uml"]);
         assert_eq!(libs[0].shapes.len(), 6);
     }
 
@@ -1688,6 +1813,141 @@ version = "1.0.0"
         }
         // Buttons keep an adjustable corner radius.
         assert_eq!(wire.shape("button").unwrap().params[0].default, 8.0);
+    }
+
+    #[test]
+    fn uml_loads_without_warnings() {
+        let (lib, report) = load_library(&EmbeddedFiles(UML_FILES), true).unwrap();
+        assert_eq!(report, LoadReport::default());
+        assert_eq!(lib.id, "uml");
+        assert_eq!(lib.name, "UML");
+        assert_eq!(lib.icon, Icon::Lucide("component".into()));
+        // Every template comes through with all of its parts.
+        let parts: usize = lib.templates().map(|t| t.parts.len()).sum();
+        let (_, shapes) = UML_FILES.iter().find(|(p, _)| *p == "shapes.toml").unwrap();
+        let written = shapes
+            .lines()
+            .filter(|l| l.trim() == "[[template.part]]")
+            .count();
+        assert_eq!(parts, written);
+    }
+
+    #[test]
+    fn uml_has_class_activity_and_sequence_items() {
+        use crate::line::ArrowHead;
+        use crate::template::PartKind;
+        let libs = builtin_libraries();
+        let uml = libs.iter().find(|l| l.id == "uml").unwrap();
+        let names: Vec<&str> = uml
+            .items
+            .iter()
+            .map(|item| match item {
+                LibraryItem::Shape(i) => uml.shapes[*i].name.as_str(),
+                LibraryItem::Template(t) => t.name.as_str(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Class",
+                "Interface",
+                "Abstract Class",
+                "Enumeration",
+                "Object",
+                "Package",
+                "Note",
+                "Component",
+                "Actor",
+                "Association",
+                "Directed Association",
+                "Generalization",
+                "Realization",
+                "Dependency",
+                "Aggregation",
+                "Composition",
+                "Action",
+                "Initial Node",
+                "Activity Final",
+                "Flow Final",
+                "Decision / Merge",
+                "Fork / Join",
+                "Send Signal",
+                "Accept Event",
+                "Object Node",
+                "Swimlane",
+                "Control Flow",
+                "Lifeline",
+                "Actor Lifeline",
+                "Activation",
+                "Combined Fragment",
+                "Destruction",
+                "Synchronous Message",
+                "Asynchronous Message",
+                "Reply Message",
+            ]
+        );
+
+        // A class is three compartments, the name bold and centred.
+        let class = uml.template("class").unwrap();
+        assert_eq!(class.parts.len(), 3);
+        let name = class.parts[0].label.as_ref().unwrap();
+        assert!(name.bold && name.align == crate::text::HAlign::Center);
+        let members = class.parts[1].label.as_ref().unwrap();
+        assert_eq!(
+            (members.align, members.valign),
+            (crate::text::HAlign::Left, crate::shape::VAlign::Top)
+        );
+        assert!(
+            uml.template("abstract-class").unwrap().parts[0]
+                .label
+                .as_ref()
+                .unwrap()
+                .italic
+        );
+
+        let line_of = |id: &str| {
+            let t = uml.template(id).unwrap();
+            t.parts
+                .iter()
+                .find_map(|p| match &p.kind {
+                    PartKind::Line {
+                        start_head,
+                        end_head,
+                        ..
+                    } => Some((*start_head, *end_head, p.style.dash)),
+                    PartKind::Shape { .. } => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            line_of("generalization"),
+            (ArrowHead::None, ArrowHead::HollowTriangle, LineDash::Solid)
+        );
+        assert_eq!(
+            line_of("realization"),
+            (ArrowHead::None, ArrowHead::HollowTriangle, LineDash::Dashed)
+        );
+        assert_eq!(line_of("aggregation").0, ArrowHead::HollowDiamond);
+        assert_eq!(line_of("composition").0, ArrowHead::Diamond);
+        assert_eq!(line_of("synchronous-message").1, ArrowHead::Triangle);
+        assert_eq!(
+            line_of("reply-message"),
+            (ArrowHead::None, ArrowHead::Arrow, LineDash::Dashed)
+        );
+        // The lifeline's line part is dashed.
+        assert_eq!(line_of("lifeline").2, LineDash::Dashed);
+
+        // Solid marks use the ink colour, so they show on every theme.
+        assert_eq!(
+            uml.shape("initial-node").unwrap().style.fill.as_deref(),
+            Some(INK_COLOR)
+        );
+        assert_eq!(
+            uml.shape("fork-join").unwrap().style.fill.as_deref(),
+            Some(INK_COLOR)
+        );
+        let final_dot = &uml.template("activity-final").unwrap().parts[1];
+        assert_eq!(final_dot.style.fill.as_deref(), Some(INK_COLOR));
     }
 
     #[test]
@@ -2258,6 +2518,7 @@ max = 8
                 "basic-shapes",
                 "flowchart",
                 "wireframe",
+                "uml",
                 "first",
                 "alpha",
                 "zeta"
@@ -2309,7 +2570,14 @@ max = 8
         let ids: Vec<_> = registry.libraries().iter().map(|l| l.id.as_str()).collect();
         assert_eq!(
             ids,
-            ["basic-shapes", "flowchart", "wireframe", "good", "warns"]
+            [
+                "basic-shapes",
+                "flowchart",
+                "wireframe",
+                "uml",
+                "good",
+                "warns"
+            ]
         );
         assert_eq!(notices.len(), 4, "{notices:?}");
         assert!(notices
@@ -2810,7 +3078,7 @@ max = 100000
         );
         let mut libraries = vec![lib];
         libraries.extend(
-            BUILTIN_LIBRARY_FILES
+            [BASIC_SHAPES_FILES, FLOWCHART_FILES, WIREFRAME_FILES]
                 .iter()
                 .map(|files| load_library(&EmbeddedFiles(files), true).unwrap().0),
         );

@@ -1,0 +1,7 @@
+format = 2
+id = "uml"
+name = "UML"
+version = "1.0.0"
+author = "Mindweave"
+description = "UML class, activity and sequence diagram elements and relationships."
+icon = "component"
