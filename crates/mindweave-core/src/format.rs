@@ -2,7 +2,9 @@
 //! `version`. Version 4 adds `images`: each picture the document shows,
 //! stored once by id (see [`crate::image`]). Version 5 adds topic notes,
 //! equations, list items and links. Version 6 adds artboards and the
-//! artboard each shape belongs to (see [`crate::artboard`]).
+//! artboard each shape belongs to (see [`crate::artboard`]). Version 7
+//! adds the `"ink"` style colour and hollow arrowheads, which older builds
+//! would silently drop.
 
 use std::path::Path;
 
@@ -11,7 +13,7 @@ use thiserror::Error;
 use crate::document::Document;
 use crate::image::{collect_images, resolve_images, ImageStore};
 
-pub const FORMAT_VERSION: u32 = 6;
+pub const FORMAT_VERSION: u32 = 7;
 /// Top-level key of the stored pictures.
 const IMAGES_KEY: &str = "images";
 
@@ -94,7 +96,7 @@ mod tests {
     #[test]
     fn new_document_has_one_page_one_layer() {
         let d = Document::new();
-        assert_eq!(d.version, 6);
+        assert_eq!(d.version, 7);
         assert_eq!(d.pages.len(), 1);
         assert_eq!(d.pages[0].name, "Page 1");
         assert_eq!(d.pages[0].layers[0].name, "Layer 1");
@@ -157,17 +159,17 @@ mod tests {
         let s = fs::read_to_string(&path).unwrap();
         assert!(s.contains("\n  "));
         assert!(s.contains("\"pattern\": \"dots\""));
-        assert!(s.contains("\"version\": 6"));
+        assert!(s.contains("\"version\": 7"));
     }
 
     #[test]
     fn load_rejects_newer_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.mindweave");
-        fs::write(&path, r#"{"version":7,"pages":[],"active_page":0}"#).unwrap();
+        fs::write(&path, r#"{"version":8,"pages":[],"active_page":0}"#).unwrap();
         assert!(matches!(
             load(&path),
-            Err(FormatError::UnsupportedVersion(7))
+            Err(FormatError::UnsupportedVersion(8))
         ));
     }
 
@@ -329,9 +331,9 @@ mod tests {
         v["pages"][0]["layers"][0]["objects"] = serde_json::json!([]);
         fs::write(&a, v.to_string()).unwrap();
         let d = load(&a).unwrap();
-        assert_eq!(d.version, 6);
+        assert_eq!(d.version, 7);
         save(&d, &b).unwrap();
-        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 6"));
+        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 7"));
     }
 
     #[test]
@@ -346,7 +348,7 @@ mod tests {
         // A version 2 file (no labels or text boxes) loads unchanged.
         fs::write(&a, SHAPE_DOC).unwrap();
         let mut d = load(&a).unwrap();
-        assert_eq!(d.version, 6);
+        assert_eq!(d.version, 7);
         let objects = &mut d.pages[0].layers[0].objects;
         assert_eq!(objects[0].label, None);
         assert_eq!(objects[0].text_box, None);
@@ -372,7 +374,7 @@ mod tests {
 
         save(&d, &b).unwrap();
         let saved = fs::read_to_string(&b).unwrap();
-        assert!(saved.contains("\"version\": 6"));
+        assert!(saved.contains("\"version\": 7"));
         let back = load(&b).unwrap();
         assert_eq!(back, d);
         let shapes = &back.pages[0].layers[0].objects;
@@ -421,7 +423,7 @@ mod tests {
         save(&d, &path).unwrap();
         assert!(fs::read_to_string(&path)
             .unwrap()
-            .contains("\"version\": 6"));
+            .contains("\"version\": 7"));
         assert_eq!(load(&path).unwrap(), d);
     }
 
@@ -439,11 +441,11 @@ mod tests {
         let topic = d.pages[0].layers[0].objects[0].topic.as_ref().unwrap();
         assert_eq!((topic.note.as_ref(), topic.equation.as_ref()), (None, None));
         save(&d, &b).unwrap();
-        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 6"));
+        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 7"));
     }
 
     #[test]
-    fn v5_files_load_and_save_as_v6() {
+    fn v5_files_load_and_save_as_v7() {
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = (
             dir.path().join("a.mindweave"),
@@ -453,7 +455,7 @@ mod tests {
         v["version"] = 5.into();
         fs::write(&a, v.to_string()).unwrap();
         let d = load(&a).unwrap();
-        assert_eq!(d.version, 6);
+        assert_eq!(d.version, 7);
         let shape = &d.pages[0].layers[0].objects[0];
         assert_eq!(
             (shape.artboard, shape.artboard_props.as_ref()),
@@ -461,8 +463,46 @@ mod tests {
         );
         save(&d, &b).unwrap();
         let saved = fs::read_to_string(&b).unwrap();
-        assert!(saved.contains("\"version\": 6"));
+        assert!(saved.contains("\"version\": 7"));
         assert!(!saved.contains("artboard"));
+    }
+
+    #[test]
+    fn v6_files_load_and_save_as_v7() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (
+            dir.path().join("a.mindweave"),
+            dir.path().join("b.mindweave"),
+        );
+        let mut v = serde_json::to_value(doc_with_topic()).unwrap();
+        v["version"] = 6.into();
+        fs::write(&a, v.to_string()).unwrap();
+        let mut d = load(&a).unwrap();
+        assert_eq!(d.version, 7);
+        save(&d, &b).unwrap();
+        assert!(fs::read_to_string(&b).unwrap().contains("\"version\": 7"));
+        // Ink and hollow heads survive a save and load.
+        let shape = &mut d.pages[0].layers[0].objects[0];
+        shape.style.fill = Some(crate::INK_COLOR.to_string());
+        shape.style.stroke = Some(crate::INK_COLOR.to_string());
+        shape.line = Some(crate::LineProps {
+            start_head: crate::ArrowHead::HollowDiamond,
+            end_head: crate::ArrowHead::HollowTriangle,
+            ..crate::LineProps::default()
+        });
+        save(&d, &b).unwrap();
+        let back = load(&b).unwrap();
+        let shape = &back.pages[0].layers[0].objects[0];
+        assert_eq!(shape.style.fill.as_deref(), Some("ink"));
+        assert_eq!(shape.style.stroke.as_deref(), Some("ink"));
+        let props = shape.line.as_ref().unwrap();
+        assert_eq!(
+            (props.start_head, props.end_head),
+            (
+                crate::ArrowHead::HollowDiamond,
+                crate::ArrowHead::HollowTriangle
+            )
+        );
     }
 
     #[test]

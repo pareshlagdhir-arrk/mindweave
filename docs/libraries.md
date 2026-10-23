@@ -130,8 +130,8 @@ A shape needs exactly one of `primitive` and `svg`.
 
 | Field          | Type   | Default     | Meaning |
 |----------------|--------|-------------|---------|
-| `fill`         | string | `"auto"` | Fill colour as `"#RRGGBB"`, `"auto"` for the canvas colour of the current theme, or `"none"` for no fill. |
-| `stroke`       | string | `"auto"` | Outline colour as `"#RRGGBB"`, `"auto"` for the theme's text colour (white in dark themes, dark in light ones), or `"none"` for no outline. |
+| `fill`         | string | `"auto"` | Fill colour as `"#RRGGBB"`, `"auto"` for the canvas colour of the current theme, `"ink"` for the theme's text colour, or `"none"` for no fill. |
+| `stroke`       | string | `"auto"` | Outline colour as `"#RRGGBB"`, `"auto"` or `"ink"` for the theme's text colour (white in dark themes, dark in light ones), or `"none"` for no outline. |
 | `stroke_width` | number | `1.5`       | Outline width in canvas units, from 0 to 100. |
 | `opacity`      | number | `1.0`       | From 0 (invisible) to 1 (opaque). |
 

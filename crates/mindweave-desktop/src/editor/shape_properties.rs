@@ -13,7 +13,7 @@ use gpui_kit::*;
 use mindweave_core::geometry::{Frame, Rect};
 use mindweave_core::{
     resize, selection_bounds, translate, DocumentSession, Handle, LibraryRegistry, ParamDef, Shape,
-    AUTO_COLOR,
+    AUTO_COLOR, INK_COLOR,
 };
 use uuid::Uuid;
 
@@ -1049,15 +1049,18 @@ fn color_row(
     let field = editor.properties.shape.color(which);
     let value = which.of(summary);
     let auto = matches!(value, Value::Same(Some(hex)) if hex == AUTO_COLOR);
+    let ink = matches!(value, Value::Same(Some(hex)) if hex == INK_COLOR);
     let (label, set) = match value {
         Value::Same(Some(_)) if auto => ("Auto".to_string(), false),
+        Value::Same(Some(_)) if ink => ("Ink".to_string(), false),
         Value::Same(Some(hex)) => (hex.clone(), true),
         Value::Same(None) => ("None".to_string(), false),
         Value::Mixed => ("Mixed".to_string(), false),
     };
     let removable = *value != Value::Same(None);
+    // Room for the Auto, Ink and remove buttons.
     let remove = div()
-        .w(px(RESET_WIDTH * 2.))
+        .w(px(RESET_WIDTH * 3.))
         .flex()
         .justify_end()
         .when(!auto, |slot| {
@@ -1069,6 +1072,18 @@ fn color_row(
                     .tooltip("Use Theme Colour")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_style_color(which, Some(AUTO_COLOR.to_string()), cx);
+                    })),
+            )
+        })
+        .when(!ink, |slot| {
+            slot.child(
+                Button::new(("ink-style-color", which as usize))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::empty().path(lucide_icon_path("droplet", cx)))
+                    .tooltip("Use Ink (Theme Text Colour)")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_style_color(which, Some(INK_COLOR.to_string()), cx);
                     })),
             )
         })

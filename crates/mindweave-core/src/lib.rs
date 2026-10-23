@@ -34,8 +34,8 @@ pub use clipboard::{
     MAX_CLIPBOARD_SHAPES, MAX_PASTE_CHARS,
 };
 pub use color::{
-    auto_text_color, format_hex_color, is_auto_color, normalize_hex_color, normalize_style_color,
-    parse_hex_color, relative_luminance, AUTO_COLOR,
+    auto_text_color, format_hex_color, is_auto_color, is_ink_color, normalize_hex_color,
+    normalize_style_color, parse_hex_color, relative_luminance, AUTO_COLOR, INK_COLOR,
 };
 pub use document::{BackgroundPattern, CanvasSettings, Document, Layer, Page, Viewport};
 pub use files::{rename_document, validate_new_stem, RenameError, MAX_STEM_LEN};

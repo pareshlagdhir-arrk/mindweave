@@ -18,7 +18,8 @@ use super::text_layout::{
 use gpui_kit::*;
 use mindweave_core::geometry::{line_label_placement, Pt, Rect};
 use mindweave_core::{
-    auto_text_color, parse_hex_color, Mixed, RichText, RunStyle, Shape, VAlign, Viewport,
+    auto_text_color, is_ink_color, parse_hex_color, Mixed, RichText, RunStyle, Shape, VAlign,
+    Viewport,
 };
 use uuid::Uuid;
 
@@ -53,8 +54,8 @@ pub fn link_color(link: Hsla, primary: Hsla) -> Hsla {
 pub struct TextPaint<'a> {
     pub layouts: &'a mut TextLayoutCache,
     pub glyphs: &'a mut GlyphOutlines,
-    /// The canvas background (see [`canvas_background`]).
-    pub canvas: (u8, u8, u8),
+    /// What Auto text is drawn against (see [`backdrop`]).
+    pub canvas: Backdrop,
 }
 
 /// Rotated glyph outlines of a cached layout, tessellated in pixels
@@ -149,7 +150,7 @@ pub fn paint_shape_text(
             (-w / 2. - pad, h / 2. + pad),
         ]
         .map(|(x, y)| rotated(centre, (x * zoom, y * zoom), placement.angle));
-        let background = rgb_hsla(text.canvas).opacity(shape.style.opacity);
+        let background = rgb_hsla(text.canvas.canvas).opacity(shape.style.opacity);
         paint_polygon(window, &patch, background);
         let job = TextJob {
             id: shape.id,
@@ -310,10 +311,10 @@ pub fn text_frame(shape: &Shape, (w, h): (f32, f32)) -> TextFrame {
 }
 
 /// The colour of `shape`'s Auto text, with its opacity: contrasting with
-/// the canvas `canvas` for line labels, else with its fill.
-pub fn text_color(shape: &Shape, canvas: (u8, u8, u8)) -> Hsla {
+/// the canvas for line labels, else with its fill.
+pub fn text_color(shape: &Shape, canvas: Backdrop) -> Hsla {
     let background = if shape.is_line_like_label() {
-        canvas
+        canvas.canvas
     } else {
         text_background(shape.style.fill.as_deref(), canvas)
     };
@@ -324,7 +325,7 @@ pub fn text_color(shape: &Shape, canvas: (u8, u8, u8)) -> Hsla {
 /// label's colour when all its text shares one explicit colour, else its
 /// Auto text colour. The fit pass and painting both use it, so they share
 /// one render.
-pub fn equation_color(shape: &Shape, canvas: (u8, u8, u8)) -> Hsla {
+pub fn equation_color(shape: &Shape, canvas: Backdrop) -> Hsla {
     let auto = text_color(shape, canvas);
     let explicit = shape
         .label
@@ -873,6 +874,29 @@ pub fn canvas_background(page_background: Option<&str>, theme_background: Hsla) 
         .unwrap_or_else(|| hsla_to_rgb(theme_background))
 }
 
+/// What Auto text is drawn against: the canvas background, and the ink
+/// colour an `"ink"` fill is painted in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Backdrop {
+    /// The canvas background (see [`canvas_background`]).
+    pub canvas: (u8, u8, u8),
+    /// The theme's text colour, which `"ink"` stands for.
+    pub ink: (u8, u8, u8),
+}
+
+/// The backdrop of a page with background `page_background` in a theme
+/// with `theme_background` and text `theme_foreground`.
+pub fn backdrop(
+    page_background: Option<&str>,
+    theme_background: Hsla,
+    theme_foreground: Hsla,
+) -> Backdrop {
+    Backdrop {
+        canvas: canvas_background(page_background, theme_background),
+        ink: hsla_to_rgb(theme_foreground),
+    }
+}
+
 /// `color` as 8-bit RGB; alpha is dropped.
 fn hsla_to_rgb(color: Hsla) -> (u8, u8, u8) {
     let c = Rgba::from(color);
@@ -881,9 +905,13 @@ fn hsla_to_rgb(color: Hsla) -> (u8, u8, u8) {
 }
 
 /// What Auto-coloured text is drawn on: the object's `fill` (a shape's
-/// fill for labels, a text box's own fill), else the canvas background.
-pub fn text_background(fill: Option<&str>, canvas: (u8, u8, u8)) -> (u8, u8, u8) {
-    fill.and_then(parse_hex_color).unwrap_or(canvas)
+/// fill for labels, a text box's own fill; an `"ink"` fill is the ink
+/// colour), else the canvas background.
+pub fn text_background(fill: Option<&str>, canvas: Backdrop) -> (u8, u8, u8) {
+    if is_ink_color(fill) {
+        return canvas.ink;
+    }
+    fill.and_then(parse_hex_color).unwrap_or(canvas.canvas)
 }
 
 /// Where a label `text_height` tall starts inside a `w` × `h` frame, in the
@@ -904,8 +932,8 @@ pub fn label_origin(w: f32, h: f32, padding: f32, text_height: f32, valign: VAli
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        canvas_background, equation_color, label_origin, text_background, text_color, text_frame,
-        text_wrap,
+        backdrop, canvas_background, equation_color, label_origin, text_background, text_color,
+        text_frame, text_wrap, Backdrop,
     };
     use crate::editor::hex_to_hsla;
     use mindweave_core::geometry::Frame;
@@ -916,7 +944,10 @@ mod tests {
 
     #[test]
     fn equations_take_their_topics_one_text_colour() {
-        let canvas = (255, 255, 255);
+        let canvas = Backdrop {
+            canvas: (255, 255, 255),
+            ink: (0, 0, 0),
+        };
         let mut topic = Shape::new_topic(Frame {
             w: 120.,
             h: 40.,
@@ -951,13 +982,40 @@ mod tests {
         assert_eq!(dark, (0, 0, 0));
 
         // A label on a dark fill is white even on a light canvas.
-        let canvas = (255, 255, 255);
+        let canvas = Backdrop {
+            canvas: (255, 255, 255),
+            ink: (0, 0, 0),
+        };
         let bg = text_background(Some("#202020"), canvas);
         assert_eq!(bg, (0x20, 0x20, 0x20));
         assert_eq!(auto_text_color(bg), (255, 255, 255));
         // No fill (or an unreadable one): the canvas shows through.
-        assert_eq!(text_background(None, (0, 0, 0)), (0, 0, 0));
-        assert_eq!(text_background(Some("x"), canvas), canvas);
+        let dark = Backdrop {
+            canvas: (0, 0, 0),
+            ink: (255, 255, 255),
+        };
+        assert_eq!(text_background(None, dark), (0, 0, 0));
+        assert_eq!(text_background(Some("x"), canvas), (255, 255, 255));
+        assert_eq!(text_background(Some("auto"), canvas), (255, 255, 255));
+    }
+
+    #[test]
+    fn text_on_an_ink_fill_contrasts_with_the_ink() {
+        // Dark theme: ink is the bright foreground, so its text is black.
+        let dark = backdrop(None, gpui_kit::black(), gpui_kit::white());
+        assert_eq!((dark.canvas, dark.ink), ((0, 0, 0), (255, 255, 255)));
+        assert_eq!(text_background(Some("ink"), dark), (255, 255, 255));
+        assert_eq!(
+            auto_text_color(text_background(Some("ink"), dark)),
+            (0, 0, 0)
+        );
+        // Light theme: the other way round.
+        let light = backdrop(Some("#FFFFFF"), gpui_kit::white(), gpui_kit::black());
+        assert_eq!(text_background(Some("ink"), light), (0, 0, 0));
+        assert_eq!(
+            auto_text_color(text_background(Some("ink"), light)),
+            (255, 255, 255)
+        );
     }
 
     #[test]

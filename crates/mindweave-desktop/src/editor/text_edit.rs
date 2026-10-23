@@ -30,8 +30,7 @@ use uuid::Uuid;
 use super::mindmap_edit::normalized_link;
 use super::text_layout::TextLayout;
 use super::text_paint::{
-    canvas_background, paint_polygon, text_color, text_frame, text_wrap, TextFrame,
-    LINE_LABEL_PADDING,
+    backdrop, paint_polygon, text_color, text_frame, text_wrap, TextFrame, LINE_LABEL_PADDING,
 };
 use super::{EditorWindow, GestureOwner, SessionGesture};
 use crate::actions::*;
@@ -40,8 +39,9 @@ use crate::actions::*;
 pub const TEXT_PAYLOAD_MARKER: &str = "text";
 /// Rich-text payload version this build writes; it reads this and every
 /// older one. Version 2 added lists and links, which older builds would
-/// silently drop; version 3 goes with the artboards format.
-pub const TEXT_PAYLOAD_VERSION: u64 = 3;
+/// silently drop; version 3 goes with the artboards format, version 4
+/// with the ink and hollow arrowheads format.
+pub const TEXT_PAYLOAD_VERSION: u64 = 4;
 /// How long the caret stays on, then off.
 const CARET_BLINK: Duration = Duration::from_millis(500);
 /// Width of the painted caret, in pixels.
@@ -1652,9 +1652,10 @@ impl EditorWindow {
         };
         let theme = cx.theme();
         let (selection_color, caret_color) = (theme.selection, theme.caret);
-        let canvas = canvas_background(
+        let canvas = backdrop(
             self.session.page().canvas.background.as_deref(),
             theme.background,
+            theme.foreground,
         );
         let Some(shape) = self.session.find_shape(id) else {
             return;
@@ -2257,7 +2258,7 @@ mod tests {
         assert_eq!(plain_text, "n bold\nn");
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["mindweave"], "text");
-        assert_eq!(value["version"], 3);
+        assert_eq!(value["version"], 4);
         let rich = parse_text_payload(&payload).unwrap();
         assert_eq!(rich, text.slice(4..14));
 
@@ -2281,13 +2282,13 @@ mod tests {
             parse_text_payload(r#"{"mindweave":"shapes","version":2,"shapes":[]}"#),
             None
         );
-        let future = payload.replace("\"version\":3", "\"version\":4");
+        let future = payload.replace("\"version\":4", "\"version\":5");
         assert_ne!(future, payload);
         assert_eq!(parse_text_payload(&future), None);
-        // Payloads from before artboards, and before lists and links,
-        // still paste.
-        for v in ["\"version\":2", "\"version\":1"] {
-            let older = payload.replace("\"version\":3", v);
+        // Payloads from before ink, before artboards, and before lists
+        // and links, still paste.
+        for v in ["\"version\":3", "\"version\":2", "\"version\":1"] {
+            let older = payload.replace("\"version\":4", v);
             assert_eq!(parse_text_payload(&older).as_ref(), Some(&rich));
         }
         // A selection replaced by a paste, styles kept.
@@ -2349,7 +2350,7 @@ mod tests {
         assert_eq!(pasted(None, None), None);
         // Shapes this build cannot read are never pasted as their JSON:
         // from a newer Mindweave (refused with a notice), or too large.
-        let newer = shapes.replace("\"version\":5", "\"version\":99");
+        let newer = shapes.replace("\"version\":6", "\"version\":99");
         assert_ne!(newer, shapes);
         assert_eq!(pasted(None, Some(&newer)), Some(Pasted::Newer));
         let big = format!(

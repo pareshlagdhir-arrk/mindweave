@@ -46,15 +46,25 @@ pub enum ArrowHead {
     Triangle,
     Diamond,
     Circle,
+    /// A triangle outlined in the line's colour, filled with the canvas
+    /// colour.
+    #[serde(rename = "hollow-triangle")]
+    HollowTriangle,
+    /// A diamond outlined in the line's colour, filled with the canvas
+    /// colour.
+    #[serde(rename = "hollow-diamond")]
+    HollowDiamond,
 }
 
 impl ArrowHead {
-    pub const ALL: [ArrowHead; 5] = [
+    pub const ALL: [ArrowHead; 7] = [
         ArrowHead::None,
         ArrowHead::Arrow,
         ArrowHead::Triangle,
         ArrowHead::Diamond,
         ArrowHead::Circle,
+        ArrowHead::HollowTriangle,
+        ArrowHead::HollowDiamond,
     ];
 
     pub fn name(self) -> &'static str {
@@ -64,6 +74,8 @@ impl ArrowHead {
             ArrowHead::Triangle => "Triangle",
             ArrowHead::Diamond => "Diamond",
             ArrowHead::Circle => "Circle",
+            ArrowHead::HollowTriangle => "Hollow triangle",
+            ArrowHead::HollowDiamond => "Hollow diamond",
         }
     }
 }
@@ -563,13 +575,18 @@ fn head_inset(head: ArrowHead, len: f32, width: f32) -> f32 {
     match head {
         ArrowHead::None => 0.0,
         ArrowHead::Arrow => width / 2.0,
-        ArrowHead::Triangle | ArrowHead::Diamond => len * 0.8,
+        ArrowHead::Triangle
+        | ArrowHead::Diamond
+        | ArrowHead::HollowTriangle
+        | ArrowHead::HollowDiamond => len * 0.8,
         ArrowHead::Circle => len * 0.5,
     }
 }
 
 /// The filled sub-paths of `head` with its tip at `tip`, pointing along
-/// unit direction `dir`, `len` long, for a stroke `width` wide.
+/// unit direction `dir`, `len` long, for a stroke `width` wide. A hollow
+/// head is its filled form's outline filled with the canvas colour, then
+/// a ring `width` thick inside that outline in the stroke colour.
 fn head_paths(head: ArrowHead, tip: Pt, dir: Pt, len: f32, width: f32) -> Vec<SubPath> {
     let n = (-dir.1, dir.0);
     let at = |along: f32, side: f32| {
@@ -579,24 +596,42 @@ fn head_paths(head: ArrowHead, tip: Pt, dir: Pt, len: f32, width: f32) -> Vec<Su
         )
     };
     let half = len * 0.45;
-    let polygon = |pts: Vec<Pt>| {
-        let mut cmds: Vec<PathCmd> = pts.iter().map(|&p| PathCmd::LineTo(p)).collect();
-        cmds[0] = PathCmd::MoveTo(pts[0]);
-        cmds.push(PathCmd::Close);
-        SubPath {
-            cmds,
-            fill: FillRole::StrokeColor,
-        }
-    };
-    match head {
-        ArrowHead::None => Vec::new(),
-        ArrowHead::Triangle => vec![polygon(vec![tip, at(len, half), at(len, -half)])],
-        ArrowHead::Diamond => vec![polygon(vec![
+    let triangle = || vec![tip, at(len, half), at(len, -half)];
+    let diamond = || {
+        vec![
             tip,
             at(len * 0.8 / 2.0, half * 0.8),
             at(len * 0.8, 0.0),
             at(len * 0.8 / 2.0, -half * 0.8),
-        ])],
+        ]
+    };
+    let polygon = |pts: Vec<Pt>| SubPath {
+        cmds: polygon_cmds(&pts),
+        fill: FillRole::StrokeColor,
+    };
+    let hollow = |pts: Vec<Pt>| {
+        let outline = polygon_cmds(&pts);
+        let mut ring = outline.clone();
+        // Thick strokes keep a hole: at most most of the way to the middle.
+        let thickness = width.max(1.0).min(0.7 * inradius(&pts));
+        ring.extend(polygon_cmds(&inset_polygon(&pts, thickness)));
+        vec![
+            SubPath {
+                cmds: outline,
+                fill: FillRole::Canvas,
+            },
+            SubPath {
+                cmds: ring,
+                fill: FillRole::StrokeColor,
+            },
+        ]
+    };
+    match head {
+        ArrowHead::None => Vec::new(),
+        ArrowHead::Triangle => vec![polygon(triangle())],
+        ArrowHead::Diamond => vec![polygon(diamond())],
+        ArrowHead::HollowTriangle => hollow(triangle()),
+        ArrowHead::HollowDiamond => hollow(diamond()),
         ArrowHead::Circle => {
             let r = len * 0.25;
             let c = at(r, 0.0);
@@ -628,6 +663,41 @@ fn head_paths(head: ArrowHead, tip: Pt, dir: Pt, len: f32, width: f32) -> Vec<Su
                 .collect()
         }
     }
+}
+
+/// A closed polygon's commands: a move to the first point, lines to the
+/// rest, and a close.
+fn polygon_cmds(pts: &[Pt]) -> Vec<PathCmd> {
+    let mut cmds: Vec<PathCmd> = pts.iter().map(|&p| PathCmd::LineTo(p)).collect();
+    cmds[0] = PathCmd::MoveTo(pts[0]);
+    cmds.push(PathCmd::Close);
+    cmds
+}
+
+/// Twice the signed area of the polygon `pts` (last point not repeated):
+/// positive when it winds so that its inside is to the left of travel.
+fn signed_area2(pts: &[Pt]) -> f32 {
+    let n = pts.len();
+    (0..n)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            a.0 * b.1 - b.0 * a.1
+        })
+        .sum()
+}
+
+/// The radius of the largest circle in a polygon `pts` that has one
+/// touching every side (twice its area over its perimeter).
+fn inradius(pts: &[Pt]) -> f32 {
+    let n = pts.len();
+    let perimeter: f32 = (0..n).map(|i| dist(pts[i], pts[(i + 1) % n])).sum();
+    signed_area2(pts).abs() / perimeter.max(1e-6)
+}
+
+/// The convex polygon `pts` (last point not repeated) moved `d` inwards,
+/// whichever way it winds.
+fn inset_polygon(pts: &[Pt], d: f32) -> Vec<Pt> {
+    offset_closed(pts, if signed_area2(pts) > 0.0 { d } else { -d })
 }
 
 /// The polyline moved `d` to its left (y down: to the right of travel for
@@ -1203,6 +1273,105 @@ mod tests {
         assert!(g.paths[1..].iter().all(|p| p.fill == FillRole::StrokeColor));
         // The triangle's tip is the line's end.
         assert_eq!(g.paths[2].cmds[0], PathCmd::MoveTo((100.0, 0.0)));
+    }
+
+    #[test]
+    fn hollow_heads_trim_like_filled_ones() {
+        let frame = box_frame(100.0, 0.0);
+        for (filled, hollow) in [
+            (ArrowHead::Triangle, ArrowHead::HollowTriangle),
+            (ArrowHead::Diamond, ArrowHead::HollowDiamond),
+        ] {
+            let with = |head| {
+                let props = LineProps {
+                    start_head: head,
+                    end_head: head,
+                    ..LineProps::default()
+                };
+                line_geometry(&frame, &props, 2.0, false, &[])
+            };
+            let (f, h) = (with(filled), with(hollow));
+            // The line is cut back to the same place at both ends.
+            assert_eq!(h.paths[0], f.paths[0], "{hollow:?}");
+            // Each hollow head: its outline filled with the canvas colour,
+            // then a ring in the stroke colour around the same outline.
+            assert_eq!(h.paths.len(), 5, "{hollow:?}");
+            for (i, end) in [(1, 1), (3, 2)] {
+                let (inside, ring) = (&h.paths[i], &h.paths[i + 1]);
+                assert_eq!(inside.fill, FillRole::Canvas);
+                assert_eq!(inside.cmds, f.paths[end].cmds);
+                assert_eq!(ring.fill, FillRole::StrokeColor);
+                // The outer contour is the filled head; an inner one follows.
+                let n = f.paths[end].cmds.len();
+                assert_eq!(&ring.cmds[..n], &f.paths[end].cmds[..]);
+                assert_eq!(ring.cmds.len(), 2 * n);
+                assert!(matches!(ring.cmds[n], PathCmd::MoveTo(_)));
+            }
+            // The ring's inside is hollow: the head's middle is not in it,
+            // but its edge is.
+            let ring = Geometry {
+                paths: vec![h.paths[4].clone()],
+            };
+            let corners: Vec<Pt> = f.paths[2]
+                .cmds
+                .iter()
+                .filter_map(|c| match c {
+                    PathCmd::MoveTo(p) | PathCmd::LineTo(p) => Some(*p),
+                    _ => None,
+                })
+                .collect();
+            let k = corners.len() as f32;
+            let middle = corners
+                .iter()
+                .fold((0.0, 0.0), |m, p| (m.0 + p.0 / k, m.1 + p.1 / k));
+            assert!(!crate::geometry::hit_test(&ring, middle, 0.0));
+            assert!(crate::geometry::hit_test(&ring, (99.5, 0.0), 0.0));
+            // A very thick line's head still has a hole in its middle.
+            let thick = LineProps {
+                end_head: hollow,
+                ..LineProps::default()
+            };
+            let g = line_geometry(&frame, &thick, 30.0, false, &[]);
+            let ring = Geometry {
+                paths: vec![g.paths.last().unwrap().clone()],
+            };
+            let corners: Vec<Pt> = g.paths[g.paths.len() - 2]
+                .cmds
+                .iter()
+                .filter_map(|c| match c {
+                    PathCmd::MoveTo(p) | PathCmd::LineTo(p) => Some(*p),
+                    _ => None,
+                })
+                .collect();
+            let k = corners.len() as f32;
+            let middle = corners
+                .iter()
+                .fold((0.0, 0.0), |m, p| (m.0 + p.0 / k, m.1 + p.1 / k));
+            assert!(!crate::geometry::hit_test(&ring, middle, 0.0), "{hollow:?}");
+        }
+    }
+
+    #[test]
+    fn hollow_heads_round_trip() {
+        assert!(ArrowHead::ALL.contains(&ArrowHead::HollowTriangle));
+        assert!(ArrowHead::ALL.contains(&ArrowHead::HollowDiamond));
+        assert_eq!(ArrowHead::HollowTriangle.name(), "Hollow triangle");
+        assert_eq!(ArrowHead::HollowDiamond.name(), "Hollow diamond");
+        let props = LineProps {
+            start_head: ArrowHead::HollowDiamond,
+            end_head: ArrowHead::HollowTriangle,
+            ..LineProps::default()
+        };
+        let json = serde_json::to_value(&props).unwrap();
+        assert_eq!(json["start_head"], "hollow-diamond");
+        assert_eq!(json["end_head"], "hollow-triangle");
+        let back: LineProps = serde_json::from_value(json).unwrap();
+        assert_eq!(back, props);
+        // The existing names are unchanged.
+        assert_eq!(
+            serde_json::to_value(ArrowHead::Triangle).unwrap(),
+            "triangle"
+        );
     }
 
     #[test]

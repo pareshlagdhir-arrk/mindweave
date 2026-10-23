@@ -10,15 +10,15 @@ use mindweave_core::geometry::{
     bounds, primitive_geometry, to_canvas, FillRole, Frame, Geometry, PathCmd, Primitive, Pt, Rect,
 };
 use mindweave_core::{
-    double_outline, frame_aabb, handle_positions, is_auto_color, line_geometry, line_jumps,
-    map_decor, rotate_handle_position, rounded_polygon, Handle, LibraryRegistry, LineDash,
-    LineProps, Page, Shape, Style, Viewport,
+    double_outline, frame_aabb, handle_positions, is_auto_color, is_ink_color, line_geometry,
+    line_jumps, map_decor, rotate_handle_position, rounded_polygon, Handle, LibraryRegistry,
+    LineDash, LineProps, Page, Shape, Style, Viewport,
 };
 use uuid::Uuid;
 
 use super::hex_to_hsla;
 use super::images::{contrast_plate, hsla_luminance, svg_scale, ImageCache};
-use super::text_paint::{equation_color, paint_shape_text, TextPaint};
+use super::text_paint::{equation_color, paint_shape_text, Backdrop, TextPaint};
 use crate::equation::{equation_font_size, EquationCache};
 
 /// Outline colour of a placeholder.
@@ -358,33 +358,42 @@ pub fn placeholder_label(shape: &Shape) -> String {
     }
 }
 
-/// A style colour with the shape's opacity applied; "auto" is `auto`.
-fn style_color(hex: Option<&str>, auto: Hsla, opacity: f32) -> Option<Hsla> {
+/// A style colour with the shape's opacity applied; "auto" is `auto` and
+/// "ink" is `ink`.
+fn style_color(hex: Option<&str>, auto: Hsla, ink: Hsla, opacity: f32) -> Option<Hsla> {
     let color = if is_auto_color(hex) {
         Some(auto)
+    } else if is_ink_color(hex) {
+        Some(ink)
     } else {
         hex.and_then(hex_to_hsla)
     };
     color.map(|c| c.opacity(opacity))
 }
 
-/// The colours "auto" stands for on a page with background
-/// `page_background`: fills in the canvas colour, strokes in the theme's
-/// text colour (bright on dark themes, dark on light ones).
+/// The colours the theme-following style colours stand for on a page with
+/// background `page_background`: "auto" fills in the canvas colour,
+/// "auto" strokes and "ink" in the theme's text colour (bright on dark
+/// themes, dark on light ones).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AutoColors {
     pub fill: Hsla,
     pub stroke: Hsla,
+    pub ink: Hsla,
 }
 
 impl AutoColors {
     pub fn new(page_background: Option<&str>, cx: &App) -> Self {
         let theme = cx.theme();
+        Self::from_theme(page_background, theme.background, theme.foreground)
+    }
+
+    /// The colours for a theme with `background` and text `foreground`.
+    pub fn from_theme(page_background: Option<&str>, background: Hsla, foreground: Hsla) -> Self {
         AutoColors {
-            fill: page_background
-                .and_then(hex_to_hsla)
-                .unwrap_or(theme.background),
-            stroke: theme.foreground,
+            fill: page_background.and_then(hex_to_hsla).unwrap_or(background),
+            stroke: foreground,
+            ink: foreground,
         }
     }
 }
@@ -685,13 +694,13 @@ struct TopicExtras<'a> {
     images: &'a mut ImageCache,
     equations: &'a mut EquationCache,
     auto: AutoColors,
-    /// The canvas background (see `canvas_background`).
-    canvas: (u8, u8, u8),
+    /// What Auto text is drawn against (see `backdrop`).
+    canvas: Backdrop,
 }
 
 /// What topic `shape`'s equation is rendered from: its LaTeX, its
 /// topic's text colour and text size (as the fit pass renders it).
-fn equation_key(shape: &Shape, canvas: (u8, u8, u8)) -> Option<(&str, Hsla, f32)> {
+fn equation_key(shape: &Shape, canvas: Backdrop) -> Option<(&str, Hsla, f32)> {
     let eq = shape.topic.as_ref()?.equation.as_ref()?;
     let font_size = equation_font_size(shape.label.as_ref().map(|l| &l.text));
     Some((&eq.latex, equation_color(shape, canvas), font_size))
@@ -760,8 +769,8 @@ fn paint_topic_extras(
                 .ok();
         }
     }
-    let badge_color =
-        style_color(shape.style.stroke.as_deref(), auto.stroke, 1.).unwrap_or(auto.stroke);
+    let badge_color = style_color(shape.style.stroke.as_deref(), auto.stroke, auto.ink, 1.)
+        .unwrap_or(auto.stroke);
     for (rect, icon) in [(parts.badge, "link"), (parts.note, "note-lines")] {
         let Some(rect) = rect else { continue };
         window
@@ -866,9 +875,12 @@ impl<'a> ShapePainter<'a> {
         if outline.placeholder {
             // Placeholders ignore the shape's style, opacity included, so a
             // missing shape stays visible; only the preview factor applies.
-            if let Some(color) =
-                style_color(Some(PLACEHOLDER_COLOR), self.auto.stroke, self.opacity)
-            {
+            if let Some(color) = style_color(
+                Some(PLACEHOLDER_COLOR),
+                self.auto.stroke,
+                self.auto.ink,
+                self.opacity,
+            ) {
                 let mut builder = PathBuilder::stroke(px(1.)).dash_array(&PLACEHOLDER_DASH.map(px));
                 for sub in &outline.geometry.paths {
                     self.append(&mut builder, &sub.cmds);
@@ -878,12 +890,24 @@ impl<'a> ShapePainter<'a> {
             return paths;
         }
         let opacity = style.opacity * self.opacity;
-        let fill = style_color(style.fill.as_deref(), self.auto.fill, opacity);
-        let stroke_color = style_color(style.stroke.as_deref(), self.auto.stroke, opacity);
+        let fill = style_color(
+            style.fill.as_deref(),
+            self.auto.fill,
+            self.auto.ink,
+            opacity,
+        );
+        let stroke_color = style_color(
+            style.stroke.as_deref(),
+            self.auto.stroke,
+            self.auto.ink,
+            opacity,
+        );
         for sub in &outline.geometry.paths {
             let color = match sub.fill {
                 FillRole::Shape | FillRole::FillOnly => fill,
                 FillRole::StrokeColor => stroke_color,
+                // Inside a hollow arrowhead: hides the line beneath it.
+                FillRole::Canvas => Some(self.auto.fill.opacity(opacity)),
                 FillRole::None => None,
             };
             if let Some(color) = color {
@@ -898,13 +922,14 @@ impl<'a> ShapePainter<'a> {
             if let Some(dash) = outline.dash {
                 builder = builder.dash_array(&dash.map(|d| px((d * self.vp.zoom).max(1.))));
             }
-            // Arrowheads are already filled with the stroke colour.
-            for sub in outline
-                .geometry
-                .paths
-                .iter()
-                .filter(|s| !matches!(s.fill, FillRole::StrokeColor | FillRole::FillOnly))
-            {
+            // Arrowheads are already filled with the stroke colour, and
+            // hollow ones outlined by a filled ring.
+            for sub in outline.geometry.paths.iter().filter(|s| {
+                !matches!(
+                    s.fill,
+                    FillRole::StrokeColor | FillRole::FillOnly | FillRole::Canvas
+                )
+            }) {
                 self.append(&mut builder, &sub.cmds);
             }
             push_built(builder, color, &mut paths);
@@ -1183,14 +1208,46 @@ mod tests {
     #[test]
     fn auto_colours_follow_the_theme_and_hex_colours_do_not() {
         let auto = gpui_kit::hsla(0.5, 0.5, 0.9, 1.);
-        assert_eq!(super::style_color(Some("auto"), auto, 1.), Some(auto));
+        let ink = gpui_kit::hsla(0., 0., 0.1, 1.);
+        assert_eq!(super::style_color(Some("auto"), auto, ink, 1.), Some(auto));
         assert_eq!(
-            super::style_color(Some("auto"), auto, 0.5),
+            super::style_color(Some("auto"), auto, ink, 0.5),
             Some(auto.opacity(0.5))
         );
-        assert_eq!(super::style_color(None, auto, 1.), None);
-        let red = super::style_color(Some("#FF0000"), auto, 1.).unwrap();
+        assert_eq!(super::style_color(None, auto, ink, 1.), None);
+        let red = super::style_color(Some("#FF0000"), auto, ink, 1.).unwrap();
         assert_ne!(red, auto);
+    }
+
+    #[test]
+    fn ink_resolves_to_the_theme_foreground() {
+        let themes = [
+            // Dark: bright text on a dark canvas.
+            (
+                gpui_kit::hsla(0., 0., 0.1, 1.),
+                gpui_kit::hsla(0., 0., 0.95, 1.),
+            ),
+            // Light: dark text on a light canvas.
+            (
+                gpui_kit::hsla(0., 0., 0.98, 1.),
+                gpui_kit::hsla(0., 0., 0.1, 1.),
+            ),
+        ];
+        for (background, foreground) in themes {
+            let auto = super::AutoColors::from_theme(None, background, foreground);
+            assert_eq!(auto.ink, foreground);
+            // Ink is the foreground for fills and strokes alike, never the
+            // canvas colour an Auto fill takes.
+            let fill = super::style_color(Some("ink"), auto.fill, auto.ink, 1.);
+            let stroke = super::style_color(Some("ink"), auto.stroke, auto.ink, 0.5);
+            assert_eq!(fill, Some(foreground));
+            assert_eq!(stroke, Some(foreground.opacity(0.5)));
+            assert_ne!(fill, Some(auto.fill));
+            // A page background changes the canvas colour, not the ink.
+            let paged = super::AutoColors::from_theme(Some("#336699"), background, foreground);
+            assert_eq!(paged.ink, foreground);
+            assert_ne!(paged.fill, background);
+        }
     }
 
     #[test]

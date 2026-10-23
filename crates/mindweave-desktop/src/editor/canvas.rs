@@ -23,7 +23,7 @@ use super::shape_paint::{
     paint_selection, paint_shapes, AutoColors,
 };
 use super::text_paint::{
-    auto_color, canvas_background, equation_color, link_color, text_background, text_box_wrap,
+    auto_color, backdrop, equation_color, link_color, text_background, text_box_wrap, Backdrop,
     TextPaint, TEXT_BOX_PADDING,
 };
 use super::tool::Tool;
@@ -447,9 +447,10 @@ impl EditorWindow {
         cx: &mut Context<Self>,
     ) {
         let libs = cx.global::<Libraries>().0.clone();
-        let canvas = canvas_background(
+        let canvas = backdrop(
             self.session.page().canvas.background.as_deref(),
             cx.theme().background,
+            cx.theme().foreground,
         );
         let theme = cx.theme();
         let links = link_color(theme.link, theme.primary);
@@ -561,12 +562,7 @@ impl EditorWindow {
     /// Sizes come from layouts at zoom 1, so zooming changes nothing here.
     /// Topics' equations are rendered and their sizes stored first, so
     /// the same pass fits each topic to its equation.
-    fn layout_text_boxes(
-        &mut self,
-        window: &mut Window,
-        canvas: (u8, u8, u8),
-        cx: &mut Context<Self>,
-    ) {
+    fn layout_text_boxes(&mut self, window: &mut Window, canvas: Backdrop, cx: &mut Context<Self>) {
         let generation = self.session.layout_generation();
         self.measure_equations(canvas);
         let page = self.session.page();
@@ -638,7 +634,7 @@ impl EditorWindow {
     /// its text colour (as painting does, so the render is reused),
     /// and stores the sizes that changed; one that does not render is
     /// `(0, 0)`, shown as nothing.
-    fn measure_equations(&mut self, canvas: (u8, u8, u8)) {
+    fn measure_equations(&mut self, canvas: Backdrop) {
         let page = self.session.page();
         let mut sizes = Vec::new();
         for shape in page.layers.iter().flat_map(|l| &l.objects) {

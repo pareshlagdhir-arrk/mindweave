@@ -1,4 +1,5 @@
-//! `#RRGGBB` colour strings, as stored in canvas settings.
+//! `#RRGGBB` colour strings, as stored in canvas settings, and the
+//! theme-following style colours [`AUTO_COLOR`] and [`INK_COLOR`].
 
 /// Parses six hex digits, with or without a leading `#`, in any case.
 /// Surrounding whitespace is ignored.
@@ -27,11 +28,18 @@ pub fn normalize_hex_color(text: &str) -> Option<String> {
 /// stroke in the theme's text colour.
 pub const AUTO_COLOR: &str = "auto";
 
-/// A style colour (`#RRGGBB` or [`AUTO_COLOR`]) normalised, or `None` when
-/// it is neither.
+/// A shape colour in the theme's text colour (bright on dark themes, dark
+/// on light ones), for fill and stroke alike.
+pub const INK_COLOR: &str = "ink";
+
+/// A style colour (`#RRGGBB`, [`AUTO_COLOR`] or [`INK_COLOR`]) normalised,
+/// or `None` when it is none of these.
 pub fn normalize_style_color(text: &str) -> Option<String> {
-    if text.trim().eq_ignore_ascii_case(AUTO_COLOR) {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case(AUTO_COLOR) {
         Some(AUTO_COLOR.to_string())
+    } else if text.eq_ignore_ascii_case(INK_COLOR) {
+        Some(INK_COLOR.to_string())
     } else {
         normalize_hex_color(text)
     }
@@ -40,6 +48,11 @@ pub fn normalize_style_color(text: &str) -> Option<String> {
 /// Whether a style colour is [`AUTO_COLOR`].
 pub fn is_auto_color(color: Option<&str>) -> bool {
     color == Some(AUTO_COLOR)
+}
+
+/// Whether a style colour is [`INK_COLOR`].
+pub fn is_ink_color(color: Option<&str>) -> bool {
+    color == Some(INK_COLOR)
 }
 
 /// WCAG relative luminance of an sRGB colour, 0 (black) to 1 (white).
@@ -72,6 +85,19 @@ pub fn auto_text_color(background: (u8, u8, u8)) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ink_is_a_valid_style_colour() {
+        for text in ["ink", "INK", " Ink "] {
+            assert_eq!(normalize_style_color(text).as_deref(), Some(INK_COLOR));
+        }
+        assert!(is_ink_color(Some(INK_COLOR)));
+        assert!(!is_ink_color(Some(AUTO_COLOR)));
+        assert!(!is_ink_color(Some("#000000")));
+        assert!(!is_ink_color(None));
+        assert!(!is_auto_color(Some(INK_COLOR)));
+        assert_eq!(normalize_style_color("inky"), None);
+    }
 
     #[test]
     fn white_on_dark_black_on_light() {

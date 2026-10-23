@@ -65,7 +65,7 @@ use interaction::{Gesture, Press, NUDGE_FAR_STEP, NUDGE_STEP};
 use shape_paint::GeometryCache;
 use text_edit::{EditGeometry, TextCommand, TextEditUi, TextEditor};
 use text_layout::TextLayoutCache;
-use text_paint::{canvas_background, text_box_wrap, text_color, GlyphOutlines, TEXT_BOX_PADDING};
+use text_paint::{backdrop, text_box_wrap, text_color, GlyphOutlines, TEXT_BOX_PADDING};
 use tool::{Tool, ToolState, BASIC_SHAPES};
 use uuid::Uuid;
 
@@ -1085,9 +1085,10 @@ impl EditorWindow {
             PastePlan::Shapes(shapes) => self.add_and_select(shapes, window, cx),
             PastePlan::TextBox(mut shape) => {
                 if let Some(label) = &shape.label {
-                    let canvas = canvas_background(
+                    let canvas = backdrop(
                         self.session.page().canvas.background.as_deref(),
                         cx.theme().background,
+                        cx.theme().foreground,
                     );
                     let size = self.text_layouts.size(
                         window,
@@ -1751,10 +1752,10 @@ mod tests {
         };
         let payload = mindweave_core::to_clipboard(&[Shape::new_text_box((10., 10.))]);
         assert!(matches!(paste_plan(&payload, &view), PastePlan::Shapes(s) if s.len() == 1));
-        let newer = payload.replace("\"version\":5", "\"version\":99");
+        let newer = payload.replace("\"version\":6", "\"version\":99");
         assert_eq!(paste_plan(&newer, &view), PastePlan::Newer);
         let big = format!(
-            "{{\"mindweave\":\"shapes\",\"version\":5,\"pad\":\"{}\"}}",
+            "{{\"mindweave\":\"shapes\",\"version\":6,\"pad\":\"{}\"}}",
             "x".repeat(MAX_CLIPBOARD_BYTES)
         );
         assert_eq!(paste_plan(&big, &view), PastePlan::Nothing);
