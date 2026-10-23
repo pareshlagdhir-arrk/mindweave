@@ -23,6 +23,7 @@ mod shape_paint;
 mod shape_properties;
 mod status_bar;
 mod svg_shapes;
+mod task_properties;
 mod text_edit;
 mod text_layout;
 mod text_paint;
@@ -251,6 +252,7 @@ pub struct EditorWindow {
     icons: icons_panel::IconsPane,
     /// The Topic section's link field.
     topic_fields: topic_properties::TopicFields,
+    task_fields: task_properties::TaskFields,
     /// The Artboard section's name field.
     artboard_fields: artboard_properties::ArtboardFields,
     /// Text layouts of the active page's labels and text boxes.
@@ -309,6 +311,8 @@ impl EditorWindow {
         _subscriptions.push(icons_subscription);
         let (topic_fields, topic_subscription) = topic_properties::TopicFields::new(window, cx);
         _subscriptions.push(topic_subscription);
+        let (task_fields, task_subscriptions) = task_properties::TaskFields::new(window, cx);
+        _subscriptions.extend(task_subscriptions);
         let (artboard_fields, artboard_subscription) =
             artboard_properties::ArtboardFields::new(window, cx);
         _subscriptions.push(artboard_subscription);
@@ -338,6 +342,7 @@ impl EditorWindow {
             dot_tile: dot_tile::DotTile::default(),
             icons,
             topic_fields,
+            task_fields,
             artboard_fields,
             text_layouts: TextLayoutCache::default(),
             glyph_outlines: GlyphOutlines::default(),
@@ -1448,6 +1453,7 @@ impl Render for EditorWindow {
         self.sync_window_title(window);
         self.sync_properties(window, cx);
         self.sync_topic_fields(window, cx);
+        self.sync_task_fields(window, cx);
         self.sync_artboard_fields(window, cx);
         self.sync_equation_card(window, cx);
         self.sync_note_card(window, cx);
@@ -1791,10 +1797,10 @@ mod tests {
         };
         let payload = mindweave_core::to_clipboard(&[Shape::new_text_box((10., 10.))]);
         assert!(matches!(paste_plan(&payload, &view), PastePlan::Shapes(s) if s.len() == 1));
-        let newer = payload.replace("\"version\":6", "\"version\":99");
+        let newer = payload.replace("\"version\":7", "\"version\":99");
         assert_eq!(paste_plan(&newer, &view), PastePlan::Newer);
         let big = format!(
-            "{{\"mindweave\":\"shapes\",\"version\":6,\"pad\":\"{}\"}}",
+            "{{\"mindweave\":\"shapes\",\"version\":7,\"pad\":\"{}\"}}",
             "x".repeat(MAX_CLIPBOARD_BYTES)
         );
         assert_eq!(paste_plan(&big, &view), PastePlan::Nothing);

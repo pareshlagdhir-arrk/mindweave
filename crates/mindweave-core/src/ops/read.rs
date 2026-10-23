@@ -11,6 +11,7 @@ use crate::geometry::line_endpoints;
 use crate::line::LineDash;
 use crate::mindmap::Structure;
 use crate::shape::Shape;
+use crate::task::{task_views, TaskStatus};
 use crate::text::{HAlign, RichText};
 
 /// Longest text shown per object in a listing; [`Workspace::get_object`]
@@ -152,6 +153,29 @@ pub struct TopicInfo {
     pub equation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskInfo>,
+}
+
+/// A topic's task. For a parent task (one with subtasks) progress,
+/// status and dates are rolled up from its subtasks.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TaskInfo {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    pub progress: u8,
+    pub status: TaskStatus,
+    /// How many subtasks it has.
+    #[serde(skip_serializing_if = "no_subtasks")]
+    pub subtasks: usize,
+}
+
+fn no_subtasks(n: &usize) -> bool {
+    *n == 0
 }
 
 /// What makes an object a line.
@@ -347,6 +371,17 @@ impl Workspace {
                 note: t.note.as_ref().map(|n| shorten(n.plain(), max)),
                 equation: t.equation.as_ref().map(|e| e.latex.clone()),
                 link: t.link.clone(),
+                task: t.task.as_ref().and_then(|task| {
+                    let view = task_views(&self.doc().pages[page]).remove(&s.id)?;
+                    Some(TaskInfo {
+                        description: shorten(task.description.clone(), max),
+                        start: view.start,
+                        end: view.end,
+                        progress: view.progress,
+                        status: view.status,
+                        subtasks: view.subtasks,
+                    })
+                }),
             }
         });
         let line = s.line.as_ref().map(|l| {

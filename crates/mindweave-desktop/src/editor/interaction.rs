@@ -799,6 +799,13 @@ impl EditorWindow {
     ) {
         // A gesture whose mouse-up was missed ends as it would have.
         self.finish_gesture(None, modifiers, cx);
+        // A task's badge ticks it off (a parent task's is selected
+        // instead: it follows its subtasks).
+        if let Some(topic) = self.task_badge_at(at) {
+            if self.toggle_task_done(topic, cx) {
+                return;
+            }
+        }
         // A topic's note badge opens its note card.
         if let Some(topic) = self.note_badge_at(at) {
             self.open_note_card(topic, window, cx);

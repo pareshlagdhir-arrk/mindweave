@@ -293,6 +293,8 @@ struct Writer<'a> {
     opts: &'a ExportOptions<'a>,
     /// Clip path id by clipping artboard.
     clips: HashMap<Uuid, String>,
+    /// How each task topic on the page is shown.
+    tasks: HashMap<Uuid, crate::task::TaskView>,
 }
 
 impl Writer<'_> {
@@ -440,7 +442,57 @@ impl Writer<'_> {
         );
     }
 
-    /// A topic's picture and equation, unrotated (inside [`Self::rotated`]).
+    /// A task badge in `r` showing `view`: a ring with the progress as a
+    /// wedge, or a ticked disc when done.
+    fn task_badge(&mut self, r: Rect, view: &crate::task::TaskView) {
+        use crate::task::{task_pie, task_tick, TaskStatus};
+        let color = view.status.color();
+        let (cx, cy, rad) = (r.x + r.w / 2.0, r.y + r.h / 2.0, r.w / 2.0);
+        if view.status == TaskStatus::Done {
+            let _ = write!(
+                self.out,
+                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{color}\"/>",
+                n(cx),
+                n(cy),
+                n(rad)
+            );
+            let tick: Vec<String> = task_tick((r.x, r.y), r.w)
+                .iter()
+                .map(|(x, y)| format!("{},{}", n(*x), n(*y)))
+                .collect();
+            let _ = write!(
+                self.out,
+                "<polyline points=\"{}\" fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+                tick.join(" "),
+                n(r.w * 0.12)
+            );
+            return;
+        }
+        let stroke = r.w * 0.1;
+        let _ = write!(
+            self.out,
+            "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"{}\"/>",
+            n(cx),
+            n(cy),
+            n(rad - stroke / 2.0),
+            n(stroke)
+        );
+        let pie = task_pie((cx, cy), rad - stroke * 1.5, view.progress);
+        if !pie.is_empty() {
+            let pts: Vec<String> = pie
+                .iter()
+                .map(|(x, y)| format!("{},{}", n(*x), n(*y)))
+                .collect();
+            let _ = write!(
+                self.out,
+                "<polygon points=\"{}\" fill=\"{color}\"/>",
+                pts.join(" ")
+            );
+        }
+    }
+
+    /// A topic's picture, task badge and equation, unrotated (inside
+    /// [`Self::rotated`]).
     fn topic_extras(&mut self, shape: &Shape) {
         let Some(t) = &shape.topic else { return };
         let f = shape.frame;
@@ -452,6 +504,9 @@ impl Writer<'_> {
         };
         if let (Some(pic), Some(r)) = (&t.picture, parts.picture) {
             self.image(pic, at(r));
+        }
+        if let (Some(view), Some(r)) = (self.tasks.get(&shape.id).cloned(), parts.task) {
+            self.task_badge(at(r), &view);
         }
         let (Some(eq), Some(r)) = (&t.equation, parts.equation) else {
             return;
@@ -876,6 +931,7 @@ pub fn export_svg(
         palette,
         opts,
         clips: HashMap::new(),
+        tasks: crate::task::task_views(p),
     };
     for (i, s) in shapes.iter().filter(|s| s.is_artboard()).enumerate() {
         if s.artboard_props.as_ref().is_some_and(|a| a.clip) {

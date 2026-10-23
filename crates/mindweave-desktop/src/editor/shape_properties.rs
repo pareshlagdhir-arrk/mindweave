@@ -897,6 +897,7 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
     let line_section = line_properties::render(editor, cx);
     let outline_rows = line_properties::style_rows(editor, cx);
     let topic_section = super::topic_properties::render(editor, cx);
+    let task_section = super::task_properties::render(editor, cx);
     let artboard_section = artboard_properties::render(editor, cx);
     panel
         .child(section_label("Shape", cx))
@@ -906,6 +907,7 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
             panel.child(convert_button())
         })
         .children(topic_section)
+        .children(task_section)
         .children(artboard_section)
         .child(section_label("Transform", cx).mt(px(SECTION_GAP)))
         .child(pair(BoundsField::X, BoundsField::Y))

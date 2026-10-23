@@ -2350,7 +2350,7 @@ mod tests {
         assert_eq!(pasted(None, None), None);
         // Shapes this build cannot read are never pasted as their JSON:
         // from a newer Mindweave (refused with a notice), or too large.
-        let newer = shapes.replace("\"version\":6", "\"version\":99");
+        let newer = shapes.replace("\"version\":7", "\"version\":99");
         assert_ne!(newer, shapes);
         assert_eq!(pasted(None, Some(&newer)), Some(Pasted::Newer));
         let big = format!(

@@ -327,9 +327,12 @@ fn register_input(
                     // A double click (with any tool but Hand, which pans)
                     // opens a topic's equation card on its equation, else
                     // edits text: the first click did what it does.
-                    // The later clicks of a double click on a note badge
-                    // add nothing: the first opened or closed its card.
-                    if event.click_count >= 2 && editor.note_badge_at(at).is_some() {
+                    // The later clicks of a double click on a note or task
+                    // badge add nothing: the first opened or closed its
+                    // card, or ticked the task.
+                    let on_badge =
+                        editor.note_badge_at(at).is_some() || editor.task_badge_at(at).is_some();
+                    if event.click_count >= 2 && on_badge {
                         return;
                     }
                     // A double click on an artboard's name renames it.

@@ -1,13 +1,15 @@
 //! Mind map commands in the editor: adding central topics, subtopics,
 //! siblings and summaries, boundaries, moving a topic by dragging it onto
-//! another, and a topic's icon, image and link.
+//! another, a topic's icon, image and link, and tasks.
 
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
 use mindweave_core::mindmap::TopicParts;
-use mindweave_core::{fit_topic_picture, DocumentSession, ImageData, Shape, TOPIC_IMAGE_SIZE};
+use mindweave_core::{
+    fit_topic_picture, task_views, DocumentSession, ImageData, Shape, Task, TOPIC_IMAGE_SIZE,
+};
 use uuid::Uuid;
 
 use super::EditorWindow;
@@ -305,6 +307,84 @@ impl EditorWindow {
     /// The topic whose equation is at canvas point `at`.
     pub(super) fn equation_at(&self, at: Pt) -> Option<Uuid> {
         equation_at(&self.session, at)
+    }
+
+    /// The topic whose task badge is at canvas point `at`.
+    pub(super) fn task_badge_at(&self, at: Pt) -> Option<Uuid> {
+        topic_part_at(&self.session, at, |p| p.task, BADGE_SLACK).map(|s| s.id)
+    }
+
+    /// Ticks task `id` off, or back to not started, as one undo step;
+    /// returns whether it did. A parent task follows its subtasks and is
+    /// left as it is.
+    pub(super) fn toggle_task_done(&mut self, id: Uuid, cx: &mut Context<Self>) -> bool {
+        let views = task_views(self.session.page());
+        if views.get(&id).is_none_or(|v| v.is_parent()) {
+            return false;
+        }
+        self.update_session(
+            |s| {
+                s.update_shapes(&[id], |shape| {
+                    if let Some(task) = shape.topic.as_mut().and_then(|t| t.task.as_mut()) {
+                        task.toggle_done();
+                    }
+                })
+            },
+            cx,
+        );
+        true
+    }
+
+    /// Whether every selected topic is a task (and one is selected).
+    pub(super) fn selected_topics_are_tasks(&self) -> bool {
+        let ids = self.selected_topics();
+        !ids.is_empty()
+            && ids.iter().all(|id| {
+                self.session
+                    .find_shape(*id)
+                    .and_then(|s| s.topic.as_ref())
+                    .is_some_and(|t| t.task.is_some())
+            })
+    }
+
+    /// Makes the selected topics tasks, or plain topics again when they
+    /// all are, as one undo step.
+    pub(super) fn toggle_task(&mut self, cx: &mut Context<Self>) {
+        let ids = self.selected_topics();
+        if ids.is_empty() {
+            return;
+        }
+        let remove = self.selected_topics_are_tasks();
+        self.update_session(
+            |s| {
+                s.update_shapes(&ids, |shape| {
+                    if let Some(t) = shape.topic.as_mut() {
+                        if remove {
+                            t.task = None;
+                        } else if t.task.is_none() {
+                            t.task = Some(Task::default());
+                        }
+                    }
+                })
+            },
+            cx,
+        );
+    }
+
+    /// Changes the task of each selected task topic with `f`, as one undo
+    /// step.
+    pub(super) fn edit_tasks(&mut self, f: impl Fn(&mut Task), cx: &mut Context<Self>) {
+        let ids = self.selected_topics();
+        self.update_session(
+            |s| {
+                s.update_shapes(&ids, |shape| {
+                    if let Some(task) = shape.topic.as_mut().and_then(|t| t.task.as_mut()) {
+                        f(task);
+                    }
+                })
+            },
+            cx,
+        );
     }
 }
 

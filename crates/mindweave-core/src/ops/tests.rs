@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::library::{builtin_libraries, LibraryRegistry};
+use crate::task::TaskStatus;
 use crate::transform::frame_aabb;
 
 fn libs() -> Arc<LibraryRegistry> {
@@ -540,4 +541,95 @@ fn topics_cannot_be_resized_by_hand() {
     assert!(err.to_string().contains("size themselves"), "{err}");
     ws.set_frame(map, (50.0, 50.0), None).unwrap();
     assert_eq!(ws.shape(map).unwrap().frame.x, 50.0);
+}
+
+#[test]
+fn tasks_roll_up_and_bad_values_are_refused() {
+    let (_dir, path, mut ws) = new_ws("t.mindweave");
+    let map = ws.add_mind_map(None, "Launch", None, None).unwrap();
+    let task = |progress: Option<u8>, status: Option<&str>| {
+        Some(TaskEdit {
+            progress,
+            status: status.map(Into::into),
+            ..TaskEdit::default()
+        })
+    };
+    let ids = ws
+        .add_tree(
+            map,
+            &[TopicNode {
+                text: "Build".into(),
+                task: Some(TaskEdit {
+                    description: Some("The first release".into()),
+                    ..TaskEdit::default()
+                }),
+                children: vec![
+                    TopicNode {
+                        text: "API".into(),
+                        task: Some(TaskEdit {
+                            start: Some("2026-11-02".into()),
+                            end: Some("2026-11-20".into()),
+                            progress: Some(100),
+                            ..TaskEdit::default()
+                        }),
+                        ..TopicNode::default()
+                    },
+                    TopicNode {
+                        text: "UI".into(),
+                        task: task(None, Some("in-progress")),
+                        ..TopicNode::default()
+                    },
+                ],
+                ..TopicNode::default()
+            }],
+        )
+        .unwrap();
+    ws.save().unwrap();
+    let ws2 = reopen(&path);
+    let build = ws2.get_object(ids[0]).unwrap().topic.unwrap().task.unwrap();
+    assert_eq!(build.description, "The first release");
+    // (100 + 0) / 2; dates from the subtasks.
+    assert_eq!((build.progress, build.status), (50, TaskStatus::InProgress));
+    assert_eq!(build.subtasks, 2);
+    assert_eq!(build.start.as_deref(), Some("2026-11-02"));
+    let api = ws2.get_object(ids[1]).unwrap().topic.unwrap().task.unwrap();
+    assert_eq!(api.status, TaskStatus::Done);
+
+    let edit = |t: Option<TaskEdit>| TopicEdit {
+        task: t,
+        ..TopicEdit::default()
+    };
+    for bad in [
+        TaskEdit {
+            start: Some("2026-02-30".into()),
+            ..TaskEdit::default()
+        },
+        TaskEdit {
+            start: Some("2026-12-01".into()),
+            end: Some("2026-11-01".into()),
+            ..TaskEdit::default()
+        },
+        TaskEdit {
+            progress: Some(101),
+            ..TaskEdit::default()
+        },
+        TaskEdit {
+            status: Some("later".into()),
+            ..TaskEdit::default()
+        },
+    ] {
+        assert!(ws.set_topic(ids[2], &edit(Some(bad))).is_err());
+    }
+    ws.set_topic(
+        ids[2],
+        &edit(Some(TaskEdit {
+            remove: true,
+            ..TaskEdit::default()
+        })),
+    )
+    .unwrap();
+    let ui = ws.get_object(ids[2]).unwrap().topic.unwrap();
+    assert!(ui.task.is_none());
+    let build = ws.get_object(ids[0]).unwrap().topic.unwrap().task.unwrap();
+    assert_eq!((build.progress, build.subtasks), (100, 1));
 }

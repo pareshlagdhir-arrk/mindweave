@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::document::Page;
 use crate::geometry::{flatten, FillRole, Geometry, PathCmd, Pt, Rect, SubPath};
 use crate::image::ImageData;
+use crate::task::Task;
 use crate::text::RichText;
 
 /// Shape id of a topic in [`crate::shape::TEXT_LIBRARY`].
@@ -136,6 +137,9 @@ pub struct TopicProps {
     /// A LaTeX equation shown below the topic's text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equation: Option<Equation>,
+    /// The topic as a task (see [`crate::task`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<Task>,
     /// On a central topic: the map keeps its topics arranged (a dragged
     /// topic snaps back unless dropped on another topic). Off, topics stay
     /// where they are dropped.
@@ -207,6 +211,8 @@ pub struct TopicParts {
     pub note: Option<Rect>,
     /// The equation, below the text.
     pub equation: Option<Rect>,
+    /// The task badge, left of the text.
+    pub task: Option<Rect>,
 }
 
 impl TopicProps {
@@ -253,6 +259,15 @@ impl TopicProps {
             .max(0.0)
     }
 
+    /// Width reserved left of the text for the task badge, beyond the
+    /// text's own horizontal padding.
+    fn task_reserve(&self) -> f32 {
+        if self.task.is_none() {
+            return 0.0;
+        }
+        (TOPIC_PADDING + TOPIC_BADGE + TOPIC_GAP - self.text_padding().0).max(0.0)
+    }
+
     /// Height the equation adds below the text row: the gap above it and
     /// its own height, with the text's padding below it (as the row has).
     fn equation_extra(&self) -> f32 {
@@ -261,8 +276,8 @@ impl TopicProps {
 
     /// Where a topic `w × h` with these properties shows its picture (at
     /// the top, centred), its text below (or alone), its link and note
-    /// badges (right of the text, link rightmost) and its equation (below
-    /// the text, centred).
+    /// badges (right of the text, link rightmost), its task badge (left of
+    /// the text) and its equation (below the text, centred).
     pub fn parts(&self, w: f32, h: f32) -> TopicParts {
         let p = TOPIC_PADDING;
         let picture = self.picture_shown().map(|(pw, ph)| Rect {
@@ -300,18 +315,21 @@ impl TopicProps {
                 last
             })
         });
+        let task = self.task.as_ref().map(|_| badge_at(p));
         let right = self.badges_reserve(self.badge_count());
+        let left = self.task_reserve();
         TopicParts {
             text: Rect {
-                x: 0.0,
+                x: left,
                 y: row.y,
-                w: (w - right).max(1.0),
+                w: (w - right - left).max(1.0),
                 h: row.h,
             },
             picture,
             badge,
             note,
             equation,
+            task,
         }
     }
 
@@ -320,7 +338,7 @@ impl TopicProps {
     /// its picture, badges and equation.
     pub fn size_for_text(&self, (tw, th): (f32, f32)) -> (f32, f32) {
         let (px, py) = self.text_padding();
-        let row_w = tw + 2.0 * px + self.badges_reserve(self.badge_count());
+        let row_w = tw + 2.0 * px + self.badges_reserve(self.badge_count()) + self.task_reserve();
         let row_h = th + 2.0 * py;
         let (pw, ph) = self.picture_shown().unwrap_or((0.0, 0.0));
         let picture_h = if self.picture.is_some() {
@@ -355,6 +373,7 @@ impl TopicProps {
             link: None,
             note: None,
             equation: None,
+            task: None,
             auto_layout: true,
             offset: None,
         }

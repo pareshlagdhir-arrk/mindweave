@@ -371,6 +371,12 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
                     |this, window, cx| this.edit_selected_note(window, cx),
                 ),
             ];
+            let task: [(&'static str, &str, &'static str, Run); 1] = [(
+                "mm-task",
+                "square-check",
+                "Task: progress, dates and status; subtasks roll up",
+                |this, _, cx| this.toggle_task(cx),
+            )];
             let marks: [(&'static str, &str, &'static str, Run); 2] = [
                 (
                     "mm-summary",
@@ -395,11 +401,13 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
             };
             // Note and Equation work on exactly one topic.
             let one_topic = editor.selected_topic().is_some();
-            let (topics, content, marks) = (
+            let any_topic = !editor.selected_topics().is_empty();
+            let (topics, mut content, marks) = (
                 actions(&topics, true),
                 actions(&content, one_topic),
                 actions(&marks, true),
             );
+            content.extend(actions(&task, any_topic));
             let relationship = ToolButton {
                 id: "tool-relationship".into(),
                 tool: Tool::Relationship,

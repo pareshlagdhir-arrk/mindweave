@@ -1,4 +1,4 @@
-//! Mind maps: maps, topics, notes, equations, links, summaries,
+//! Mind maps: maps, topics, notes, equations, links, tasks, summaries,
 //! boundaries and relationships.
 
 use serde::Deserialize;
@@ -16,6 +16,7 @@ use crate::line::{
 use crate::mindmap::{BranchStyle, Structure};
 use crate::session::DocumentSession;
 use crate::shape::{Label, Shape};
+use crate::task::{is_date, Task, TaskStatus};
 use crate::text::{RichText, RunStyle};
 use crate::transform::frame_aabb;
 
@@ -49,7 +50,78 @@ pub struct TopicNode {
     /// LaTeX shown below the text.
     pub equation: Option<String>,
     pub link: Option<String>,
+    /// Makes the topic a task.
+    pub task: Option<TaskEdit>,
     pub children: Vec<TopicNode>,
+}
+
+/// Changes to a topic's task; `None` leaves a value as it is. Any change
+/// makes a plain topic a task; `remove` makes it a plain topic again.
+/// An empty description or date clears it.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TaskEdit {
+    pub remove: bool,
+    pub description: Option<String>,
+    /// `YYYY-MM-DD`.
+    pub start: Option<String>,
+    /// `YYYY-MM-DD`.
+    pub end: Option<String>,
+    /// 0 to 100; ignored by parent tasks, which roll up their subtasks'.
+    pub progress: Option<u8>,
+    /// `not-started`, `in-progress`, `blocked` or `done`.
+    pub status: Option<String>,
+}
+
+impl TaskEdit {
+    /// `task` (a new one when `None`) with this edit made, or `None` to
+    /// remove it; refuses bad dates, progress or status.
+    fn apply(&self, task: Option<Task>) -> OpResult<Option<Task>> {
+        if self.remove {
+            return Ok(None);
+        }
+        let mut task = task.unwrap_or_default();
+        if let Some(d) = &self.description {
+            check_text("task description", d)?;
+            task.description = d.trim().to_string();
+        }
+        let date = |what: &str, d: &Option<String>, now: Option<String>| match d.as_deref() {
+            None => Ok(now),
+            Some(d) if d.trim().is_empty() => Ok(None),
+            Some(d) if is_date(d.trim()) => Ok(Some(d.trim().to_string())),
+            Some(d) => Err(OpError::invalid(format!(
+                "The task's {what} date \"{d}\" is not a date written YYYY-MM-DD."
+            ))),
+        };
+        task.start = date("start", &self.start, task.start.take())?;
+        task.end = date("end", &self.end, task.end.take())?;
+        if let (Some(s), Some(e)) = (&task.start, &task.end) {
+            if s > e {
+                return Err(OpError::invalid(
+                    "The task's start date is after its end date.",
+                ));
+            }
+        }
+        if let Some(p) = self.progress {
+            if p > 100 {
+                return Err(OpError::invalid("A task's progress is 0 to 100."));
+            }
+            task.set_progress(p);
+        }
+        if let Some(s) = &self.status {
+            let status = TaskStatus::from_key(s).ok_or_else(|| {
+                OpError::invalid(format!(
+                    "Unknown task status \"{s}\"; use not-started, in-progress, blocked or done."
+                ))
+            })?;
+            match self.progress {
+                // Both given: keep the progress unless the status fixes it.
+                Some(_) => task.status = status,
+                None => task.set_status(status),
+            }
+        }
+        Ok(Some(task.normalized()))
+    }
 }
 
 /// Changes to a topic; `None` leaves a property as it is, and an empty
@@ -63,6 +135,7 @@ pub struct TopicEdit {
     pub note: Option<String>,
     pub equation: Option<String>,
     pub link: Option<String>,
+    pub task: Option<TaskEdit>,
 }
 
 /// A web or file link as the app stores it: without a scheme it is a
@@ -230,7 +303,11 @@ impl Workspace {
         let ids = self.add_topics(parent, &texts, TopicPosition::Child)?;
         for (id, node) in ids.into_iter().zip(nodes) {
             out.push(id);
-            if node.note.is_some() || node.equation.is_some() || node.link.is_some() {
+            if node.note.is_some()
+                || node.equation.is_some()
+                || node.link.is_some()
+                || node.task.is_some()
+            {
                 self.set_topic(
                     id,
                     &TopicEdit {
@@ -238,6 +315,7 @@ impl Workspace {
                         note: node.note.clone(),
                         equation: node.equation.clone(),
                         link: node.link.clone(),
+                        task: node.task.clone(),
                     },
                 )?;
             }
@@ -248,7 +326,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// Changes topic `id`'s text, note, equation or link (see
+    /// Changes topic `id`'s text, note, equation, link or task (see
     /// [`TopicEdit`]) as one step.
     pub fn set_topic(&mut self, id: Uuid, edit: &TopicEdit) -> OpResult<()> {
         let (page, layer) = self.topic_at(id, "set_topic")?;
@@ -270,6 +348,13 @@ impl Workspace {
             let l = l.trim();
             (!l.is_empty()).then(|| normalized_link(l))
         });
+        let task = match &edit.task {
+            Some(t) => {
+                let now = self.shape(id)?.topic.as_ref().and_then(|t| t.task.clone());
+                Some(t.apply(now)?)
+            }
+            None => None,
+        };
         self.on_layer(page, Some(layer), |s| {
             s.begin_gesture();
             if let Some(text) = &edit.text {
@@ -285,6 +370,13 @@ impl Workspace {
                 s.update_shapes(&[id], |shape| {
                     if let Some(t) = shape.topic.as_mut() {
                         t.link = link.clone();
+                    }
+                });
+            }
+            if let Some(task) = task {
+                s.update_shapes(&[id], |shape| {
+                    if let Some(t) = shape.topic.as_mut() {
+                        t.task = task.clone();
                     }
                 });
             }

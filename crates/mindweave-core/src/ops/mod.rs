@@ -40,10 +40,11 @@ pub use diagrams::{
 };
 pub use docs::{DocumentSummary, LayerSummary, PageSummary};
 pub use error::{OpError, OpResult};
-pub use mindmaps::{TopicEdit, TopicNode, TopicPosition};
+pub use mindmaps::{TaskEdit, TopicEdit, TopicNode, TopicPosition};
 pub use notes::{rich_text_from_markdown, rich_text_plain};
 pub use read::{
-    FrameInfo, LineInfo, ObjectFilter, ObjectInfo, ObjectKind, StyleInfo, TextStyleInfo, TopicInfo,
+    FrameInfo, LineInfo, ObjectFilter, ObjectInfo, ObjectKind, StyleInfo, TaskInfo, TextStyleInfo,
+    TopicInfo,
 };
 pub use validate::{validate, Problem, Severity};
 

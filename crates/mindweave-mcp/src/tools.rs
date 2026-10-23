@@ -183,6 +183,21 @@ fn region_props() -> Vec<(&'static str, Value)> {
     ]
 }
 
+fn task_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Makes the topic a task (topics added under a task are tasks too). A task with subtasks rolls up their progress (the average), status and dates; its own progress and status are ignored.",
+        "properties": {
+            "description": {"type": "string", "description": "What needs doing (empty clears it)"},
+            "start": {"type": "string", "description": "Start date, YYYY-MM-DD (empty clears it)"},
+            "end": {"type": "string", "description": "End date, YYYY-MM-DD (empty clears it)"},
+            "progress": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Percent done; 100 is done"},
+            "status": {"type": "string", "enum": ["not-started", "in-progress", "blocked", "done"], "description": "done sets progress to 100, not-started to 0"},
+            "remove": {"type": "boolean", "description": "true: make it a plain topic again"}
+        }
+    })
+}
+
 fn topic_node_schema() -> Value {
     json!({
         "type": "object",
@@ -191,6 +206,7 @@ fn topic_node_schema() -> Value {
             "note": {"type": "string", "description": "Note in simple Markdown"},
             "equation": {"type": "string", "description": "LaTeX"},
             "link": {"type": "string"},
+            "task": task_schema(),
             "children": {"type": "array", "items": {"type": "object"}, "description": "Child topics, same shape"}
         },
         "required": ["text"]
@@ -256,7 +272,7 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "get_object",
-        description: "Everything about one object: kind, frame, full text and text style, style, parameters, topic parent/children/note/equation/link, line ends, boundary or artboard members.",
+        description: "Everything about one object: kind, frame, full text and text style, style, parameters, topic parent/children/note/equation/link/task (rolled up for parent tasks), line ends, boundary or artboard members.",
         props: || vec![("id", id("The object"))],
         required: &["id"],
         needs_path: true,
@@ -295,7 +311,7 @@ const TOOLS: &[Tool] = &[
             ("x", num("Centre of the central topic (default: right of what is on the page)")),
             ("y", num("Centre of the central topic")),
             ("structure", one_of("Layout: map (branches both sides, default), logic (all to the right), org (downwards)", &["map", "logic", "org"])),
-            ("topics", json!({"type": "array", "items": topic_node_schema(), "description": "Main topics with their subtrees: {text, note?, equation?, link?, children?}"})),
+            ("topics", json!({"type": "array", "items": topic_node_schema(), "description": "Main topics with their subtrees: {text, note?, equation?, link?, task?, children?}"})),
         ],
         required: &["central_text"],
         needs_path: true,
@@ -307,7 +323,7 @@ const TOOLS: &[Tool] = &[
         props: || vec![
             ("topic_id", id("The topic to add to or beside")),
             ("texts", json!({"type": "array", "items": {"type": "string"}, "description": "Texts of the new topics"})),
-            ("tree", json!({"type": "array", "items": topic_node_schema(), "description": "Nested topics (children of topic_id): {text, note?, equation?, link?, children?}"})),
+            ("tree", json!({"type": "array", "items": topic_node_schema(), "description": "Nested topics (children of topic_id): {text, note?, equation?, link?, task?, children?}"})),
             ("position", one_of("Where the new topics go (default child)", &["child", "after", "before"])),
         ],
         required: &["topic_id"],
@@ -316,13 +332,14 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "set_topic",
-        description: "Change a topic's text, note, equation or link. An empty note, equation or link removes it.",
+        description: "Change a topic's text, note, equation, link or task. An empty note, equation or link removes it.",
         props: || vec![
             ("id", id("The topic")),
             ("text", s("New text")),
             ("note", s("Note in simple Markdown: one paragraph per line, `- ` bullets, `1. ` numbered items, two spaces per nesting level, **bold**, *italic*")),
             ("equation", s("LaTeX shown below the text, such as E = mc^2")),
             ("link", s("Web address or file link opened from the topic")),
+            ("task", task_schema()),
         ],
         required: &["id"],
         needs_path: true,
@@ -806,7 +823,7 @@ fn add_mind_map(ctx: &Context, a: &Args) -> ToolResult {
     let structure = a.str_opt("structure")?;
     let tree: Option<Vec<TopicNode>> = a.parse_opt(
         "topics",
-        "a list of {text, note?, equation?, link?, children?}",
+        "a list of {text, note?, equation?, link?, task?, children?}",
     )?;
     let page = a.usize_opt("page")?;
     let (map, topics) = ctx.edit(a, |ws| {
@@ -834,7 +851,7 @@ fn add_topics(ctx: &Context, a: &Args) -> ToolResult {
     let texts: Option<Vec<String>> = a.get("texts").map(|_| a.strings_req("texts")).transpose()?;
     let tree: Option<Vec<TopicNode>> = a.parse_opt(
         "tree",
-        "a list of {text, note?, equation?, link?, children?}",
+        "a list of {text, note?, equation?, link?, task?, children?}",
     )?;
     let ids = match (texts, tree) {
         (Some(texts), None) => ctx.edit(a, |ws| ws.add_topics(topic, &texts, position))?,
@@ -854,8 +871,9 @@ fn add_topics(ctx: &Context, a: &Args) -> ToolResult {
 
 fn set_topic(ctx: &Context, a: &Args) -> ToolResult {
     let id = a.id_req("id")?;
-    let edit: TopicEdit = serde_json::from_value(a.subset(&["text", "note", "equation", "link"]))
-        .map_err(|e| e.to_string())?;
+    let edit: TopicEdit =
+        serde_json::from_value(a.subset(&["text", "note", "equation", "link", "task"]))
+            .map_err(|e| e.to_string())?;
     ctx.edit(a, |ws| ws.set_topic(id, &edit))?;
     reply("Topic changed.", json!({"id": id}))
 }

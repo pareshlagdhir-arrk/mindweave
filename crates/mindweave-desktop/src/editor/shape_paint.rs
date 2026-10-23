@@ -13,8 +13,8 @@ use mindweave_core::geometry::{
 use mindweave_core::{
     double_outline, frame_aabb, handle_positions, is_auto_color, is_ink_color,
     line_geometry_min_ring, line_jumps, map_decor, rotate_handle_position, rounded_polygon,
-    scale_unit, ArrowHead, Handle, LibraryRegistry, LineDash, LineProps, Page, PathProps, Shape,
-    Style, Viewport,
+    scale_unit, task_pie, task_tick, task_views, ArrowHead, Handle, LibraryRegistry, LineDash,
+    LineProps, Page, PathProps, Shape, Style, TaskStatus, TaskView, Viewport,
 };
 use uuid::Uuid;
 
@@ -529,6 +529,7 @@ pub fn paint_shapes(
     images.begin_frame();
     // Computed once; each layer paints the decor of its own topics.
     let decor = page_map_decor(page);
+    let tasks = task_views(page);
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
         // Layers are stored top first.
         for layer in page.layers.iter().rev().filter(|l| l.visible) {
@@ -598,6 +599,7 @@ pub fn paint_shapes(
                                 equations: &mut *equations,
                                 auto,
                                 canvas: text.canvas,
+                                task: tasks.get(&shape.id),
                             };
                             paint_topic_extras(window, cx, bounds, vp, shape, extras);
                         }
@@ -804,6 +806,8 @@ struct TopicExtras<'a> {
     auto: AutoColors,
     /// What Auto text is drawn against (see `backdrop`).
     canvas: Backdrop,
+    /// How the topic's task is shown, if it is one.
+    task: Option<&'a TaskView>,
 }
 
 /// What topic `shape`'s equation is rendered from: its LaTeX, its
@@ -814,8 +818,54 @@ fn equation_key(shape: &Shape, canvas: Backdrop) -> Option<(&str, Hsla, f32)> {
     Some((&eq.latex, equation_color(shape, canvas), font_size))
 }
 
-/// Paints topic `shape`'s picture, equation and link and note badges in
-/// their places.
+/// Paints a task badge at `at` showing `view`: a ring with the progress
+/// as a wedge, or a ticked disc when done.
+fn paint_task_badge(window: &mut Window, at: Bounds<Pixels>, view: &TaskView) {
+    let color = hex_to_hsla(view.status.color()).unwrap_or(gpui_kit::blue());
+    let side = f32::from(at.size.width);
+    let (x, y) = (f32::from(at.origin.x), f32::from(at.origin.y));
+    let to_point = |(px_, py_): (f32, f32)| point(px(px_), px(py_));
+    if view.status == TaskStatus::Done {
+        window.paint_quad(fill(at, color).corner_radii(px(side / 2.)));
+        let mut tick = PathBuilder::stroke(px(side * 0.12));
+        for (i, p) in task_tick((x, y), side).into_iter().enumerate() {
+            if i == 0 {
+                tick.move_to(to_point(p));
+            } else {
+                tick.line_to(to_point(p));
+            }
+        }
+        if let Ok(path) = tick.build() {
+            window.paint_path(path, gpui_kit::white());
+        }
+        return;
+    }
+    let ring = side * 0.1;
+    window.paint_quad(
+        outline(at, color, BorderStyle::Solid)
+            .border_widths(px(ring))
+            .corner_radii(px(side / 2.)),
+    );
+    let pie = task_pie(
+        (x + side / 2., y + side / 2.),
+        side / 2. - ring * 1.5,
+        view.progress,
+    );
+    if let Some((first, rest)) = pie.split_first() {
+        let mut builder = PathBuilder::fill();
+        builder.move_to(to_point(*first));
+        for p in rest {
+            builder.line_to(to_point(*p));
+        }
+        builder.close();
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, color);
+        }
+    }
+}
+
+/// Paints topic `shape`'s picture, equation, task badge and link and note
+/// badges in their places.
 fn paint_topic_extras(
     window: &mut Window,
     cx: &mut App,
@@ -829,6 +879,7 @@ fn paint_topic_extras(
         equations,
         auto,
         canvas,
+        task,
     } = extras;
     let Some(t) = &shape.topic else { return };
     let f = &shape.frame;
@@ -876,6 +927,9 @@ fn paint_topic_extras(
                 .paint_image(bounds, at, Corners::default(), image, 0, false)
                 .ok();
         }
+    }
+    if let (Some(view), Some(rect)) = (task, parts.task) {
+        paint_task_badge(window, on_screen(&rect), view);
     }
     let badge_color = style_color(shape.style.stroke.as_deref(), auto.stroke, auto.ink, 1.)
         .unwrap_or(auto.stroke);

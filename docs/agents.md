@@ -19,7 +19,7 @@ tells agents how to use it well.
   `add_layer`, `set_active`. Reading: `list_objects`, `get_object`,
   `validate`, `list_libraries`, `list_artboard_presets`. Mind maps:
   `add_mind_map` (with a whole topic tree), `add_topics`, `set_topic`
-  (text, note, equation, link), `add_summary`, `add_boundary`,
+  (text, note, equation, link, task), `add_summary`, `add_boundary`,
   `add_relationship`, `set_structure`. Diagrams: `add_shape`, `add_text`,
   `connect`, `add_line`, `group`, `ungroup`, `set_style`, `set_text`,
   `set_name`, `move_objects`, `set_frame`, `delete_objects`, `arrange`.
@@ -35,8 +35,8 @@ tells agents how to use it well.
   file it measures the text and refits them, so sizes may shift slightly.
 - **Pictures are close, not identical.** Exported pictures follow the app
   closely enough to check layout; equations are rendered with the app's
-  LaTeX engine, link and note badges are not drawn, and fonts come from
-  the system.
+  LaTeX engine, task badges are drawn but link and note badges are not,
+  and fonts come from the system.
 - **Safety.** The server only touches the paths it is given, reads and
   writes only files ending in `.mindweave` (exports only `.png` or `.svg`;
   an existing file at an export's `out_path` is replaced, written through a

@@ -1019,6 +1019,8 @@ impl DocumentSession {
         }
         let map = props.map;
         let central = props.is_central();
+        // A topic added to a task is a subtask.
+        let task = props.task.as_ref().map(|_| crate::task::Task::default());
         let siblings: Vec<&Shape> = self
             .shapes_on_active_layer()
             .iter()
@@ -1064,7 +1066,10 @@ impl DocumentSession {
         };
         topic.style.fill = Some(crate::color::AUTO_COLOR.to_string());
         topic.groups = p.groups.clone();
-        topic.topic = Some(TopicProps::child(map, parent, order));
+        topic.topic = Some(TopicProps {
+            task,
+            ..TopicProps::child(map, parent, order)
+        });
         let id = topic.id;
         self.add_shapes(vec![topic]);
         Some(id)

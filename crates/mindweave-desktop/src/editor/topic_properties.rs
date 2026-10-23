@@ -18,7 +18,7 @@ use super::shape_properties::{common, Value, SECTION_GAP};
 use super::{section_label, EditorWindow};
 
 /// Width of a dropdown or the link field.
-const CONTROL_WIDTH: f32 = 120.;
+pub(super) const CONTROL_WIDTH: f32 = 120.;
 /// The branch choice that follows the parent.
 const SAME_AS_PARENT: &str = "Same as Parent";
 
@@ -124,7 +124,7 @@ fn all_topics(shapes: &[&Shape]) -> bool {
 
 /// A dropdown button showing `current` (or "Mixed") and offering
 /// `choices`; a pick runs `pick` with the choice.
-fn dropdown(
+pub(super) fn dropdown(
     id: &'static str,
     current: Option<String>,
     choices: Vec<String>,

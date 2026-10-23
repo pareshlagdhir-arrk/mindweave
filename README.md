@@ -15,6 +15,7 @@ It runs fully offline and stores each document as a single `.mindweave` file.
   - [The window](#the-window)
   - [Mind maps](#mind-maps)
   - [Notes on topics](#notes-on-topics)
+  - [Tasks](#tasks)
   - [Equations and chemical formulae](#equations-and-chemical-formulae)
   - [Shapes, lines and text](#shapes-lines-and-text)
   - [Images and icon packs](#images-and-icon-packs)
@@ -71,6 +72,15 @@ Any topic can hold a rich text note, in the style of XMind.
 - **Formatting:** the card's toolbar offers bold (**⌘B**), italic (**⌘I**), underline (**⌘U**), strikethrough, text colour, bulleted lists, numbered lists, and links. Inside a list, **Tab** and **Shift+Tab** change the level (three levels); **Enter** on an empty item ends the list.
 - **Links:** select text and press **⌘K** to add, edit or remove a link. **⌘-click** a link to open it; a plain click places the caret so that the link stays editable.
 - **Closing:** press **Escape**, click outside the card, or click the badge again. What you typed is kept. A note left empty is removed. Each editing session is a single undo step.
+
+### Tasks
+
+Any topic can be a task, in the style of XMind's tasks and to-dos combined.
+
+- **Make a task:** select one or more topics and click **Task** on the Mind Map tab, or turn on **Task** in the Properties panel. Click it again to make them plain topics.
+- **What a task holds:** a description, a start and an end date, progress (0 to 100 %) and a status (Not Started, In Progress, Blocked, Done). Edit them in the Task section of the Properties panel when one task is selected. Progress and status stay in step: 100 % is Done, Done is 100 %.
+- **The badge:** a task shows a badge left of its text: a ring that fills clockwise with its progress, coloured by status, or a green tick when done. Click the badge to tick a task off, or back to Not Started.
+- **Subtasks:** a topic added under a task is a task too. A task with subtasks is a parent task: its progress is the average of its subtasks', it is Done when they all are, Blocked when one is, and its dates run from the earliest start to the latest end. Its progress, status and dates are shown, not edited; only its description is its own. Plain topics among the subtopics are not counted.
 
 ### Equations and chemical formulae
 
@@ -226,6 +236,7 @@ crates/
     src/shape.rs           Shapes, labels, styles
     src/text.rs            Rich text: runs, paragraphs, lists, links, editing operations
     src/mindmap.rs         Topics, map layout, topic parts (picture, badges, equation)
+    src/task.rs            Tasks on topics and how parent tasks roll up
     src/session.rs         DocumentSession: edits, undo/redo, dirty state, saving
     src/format.rs          .mindweave load/save and format versioning
     src/library.rs         Shape library loading (built-in and user)
@@ -276,13 +287,16 @@ THIRD_PARTY_NOTICES.md   Licences of bundled third-party components
 
 ### File format
 
-A `.mindweave` file is pretty-printed JSON with a top-level `version` field. The current version is **5**:
+A `.mindweave` file is pretty-printed JSON with a top-level `version` field. The current version is **8**:
 
 | Version | Added |
 |---|---|
 | 1–3 | The document model as it grew: pages, layers, shapes, lines, labels and text boxes |
 | 4 | Stored pictures (`images`, each stored once by id) |
 | 5 | Topic notes, equations, list items and links in rich text |
+| 6 | Artboards and the artboard each shape belongs to |
+| 7 | The `"ink"` style colour and hollow arrowheads |
+| 8 | Tasks on topics |
 
 Files with an older version load unchanged and are saved as the current version. A file with a newer version is refused with the message "This file was made by a newer version of Mindweave", so that content an older build does not understand is never silently dropped. Clipboard payloads follow the same rule with their own version numbers.
 
