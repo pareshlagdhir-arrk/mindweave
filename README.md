@@ -140,7 +140,7 @@ Three themes are bundled: **Mindweave One Dark** (default), **Mindweave Graphite
 
 ### Keyboard shortcuts
 
-On Windows and Linux builds, read **⌘** as **Ctrl**.
+The shortcuts below are the macOS ones. Windows and Linux builds do not map **⌘** to **Ctrl** yet (see [Windows and Linux status](#windows-and-linux-status)).
 
 **Files and view**
 
@@ -218,9 +218,33 @@ You never start or stop the server yourself: the client starts it with a session
 
 ### Prerequisites
 
-- **Rust 1.95**, pinned in `rust-toolchain.toml` (rustup installs it automatically, with `rustfmt` and `clippy`).
-- **macOS** with the Xcode command-line tools (`xcode-select --install`). gpui renders with Metal.
-- No other system libraries are required: the LaTeX renderer, fonts and icons are compiled in.
+On every system: **Rust 1.95**, pinned in `rust-toolchain.toml` (install [rustup](https://rustup.rs); it fetches the pinned toolchain with `rustfmt` and `clippy` on the first `cargo` command). The LaTeX renderer, fonts and icons are compiled in.
+
+**macOS**
+
+- The Xcode command-line tools: `xcode-select --install`. gpui renders with Metal.
+
+**Windows** (10 or 11, x64)
+
+- [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) (or Visual Studio) with the **Desktop development with C++** workload, which provides the MSVC linker and the Windows SDK.
+- rustup with its default `x86_64-pc-windows-msvc` toolchain (not the GNU one).
+- gpui renders with DirectX 11; no other libraries are needed.
+- Long paths: if a build fails on a path length error, enable long paths (`git config --global core.longpaths true`, and the Windows "Enable Win32 long paths" policy) or clone into a short folder such as `C:\src\mindweave`.
+
+**Linux** (x64; Ubuntu 22.04 or later, or the equivalent packages elsewhere)
+
+- A C toolchain and the libraries gpui (X11, Wayland, Vulkan, fonts) and the file dialogs (GTK 3) build against. On Debian or Ubuntu:
+
+  ```sh
+  sudo apt-get install -y build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
+    libwayland-dev libvulkan-dev libx11-xcb-dev libxcb1-dev \
+    libfontconfig1-dev libfreetype6-dev libssl-dev libgtk-3-dev
+  ```
+
+  On Fedora: `sudo dnf install gcc pkgconf libxkbcommon-devel libxkbcommon-x11-devel wayland-devel vulkan-loader-devel libxcb-devel fontconfig-devel freetype-devel openssl-devel gtk3-devel`.
+- A GPU driver with Vulkan support (Mesa is fine). gpui runs on both Wayland and X11.
+
+CI builds and tests on all three systems (see [Continuous integration](#continuous-integration)); that list of Linux packages is the one CI installs.
 
 ### Build, run and test
 
@@ -233,7 +257,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-The binary is named `mindweave` (`target/debug/mindweave` or `target/release/mindweave`). Debug builds are noticeably slower when drawing; judge performance with `--release`.
+The binary is named `mindweave` (`target/debug/mindweave` or `target/release/mindweave`; `mindweave.exe` on Windows, in `target\debug\` or `target\release\`). Debug builds are noticeably slower when drawing; judge performance with `--release`. The commands are the same in PowerShell.
+
+### Windows and Linux status
+
+Mindweave is developed on macOS. It builds and passes its tests on Windows and Linux, but has not yet been tried there by hand, and these parts still need porting:
+
+- **Shortcuts** are bound to **⌘** (`cmd-…`), which Windows and Linux read as the Windows or Super key, not **Ctrl**.
+- **Menus**: the app uses the macOS menu bar; Windows and Linux have none, so menu commands are reachable only from the ribbon and shortcuts.
+- **Rotated text** is drawn from glyph outlines read on macOS only; elsewhere rotated labels are not drawn.
+- **App icon**: set at run time on macOS only; elsewhere it comes from packaging, which is not set up yet.
+
+Help with any of these is welcome; check the result by running the app on that system, not only CI.
 
 ### Repository layout
 
@@ -321,7 +356,7 @@ When you add a field to the format: make it optional with a serde default, raise
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request on macOS: format check, clippy with warnings as errors, the full test suite, and a release build. The unsigned release binary is uploaded as a build artefact.
+`.github/workflows/ci.yml` runs on every push and pull request on macOS, Windows and Linux (Ubuntu): format check, clippy with warnings as errors, the full test suite, and a release build of the app and the MCP server. The unsigned binaries are uploaded as build artefacts, one per system. You do not need a Windows or Linux machine for CI; GitHub provides them.
 
 ### Documentation
 

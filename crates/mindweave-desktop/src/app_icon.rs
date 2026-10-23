@@ -3,6 +3,9 @@
 
 /// The icon, a 1024 × 1024 PNG with a transparent margin (the source
 /// drawing is `assets/app-icon.svg`).
+// Shown only by macOS for now (other systems take the icon from the
+// package); its test runs everywhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app-icon.png");
 
 /// Shows [`APP_ICON_PNG`] as the app's Dock icon. Does nothing off the main

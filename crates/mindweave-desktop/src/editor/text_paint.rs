@@ -751,8 +751,10 @@ fn run_at(runs: &[TextRun], index: usize) -> Option<&TextRun> {
     })
 }
 
-/// One step of a glyph outline, in ems with y up.
+/// One step of a glyph outline, in ems with y up. Outlines are read on
+/// macOS only so far; elsewhere rotated text is not drawn from them.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum GlyphCmd {
     Move(Pt),
     Line(Pt),
