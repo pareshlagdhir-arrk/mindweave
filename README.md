@@ -78,7 +78,7 @@ Any topic can hold a rich text note, in the style of XMind.
 Any topic can be a task, in the style of XMind's tasks and to-dos combined.
 
 - **Make a task:** select one or more topics and click **Task** on the Mind Map tab, or turn on **Task** in the Properties panel. Click it again to make them plain topics.
-- **What a task holds:** a description, a start and an end date, progress (0 to 100 %) and a status (Not Started, In Progress, Blocked, Done). Edit them in the Task section of the Properties panel when one task is selected. Progress and status stay in step: 100 % is Done, Done is 100 %.
+- **What a task holds:** a rich-text description, a start and an end date, progress (0 to 100 %) and a status (Not Started, In Progress, Blocked, Done). Edit them in the Task section of the Properties panel when one task is selected; **Description → Add… / Edit…** opens the description in a card beside the topic, with the same formatting as notes (bold, italic, underline, colour, lists and links). Progress and status stay in step: 100 % is Done, Done is 100 %.
 - **The badge:** a task shows a badge left of its text: a ring that fills clockwise with its progress, coloured by status, or a green tick when done. Click the badge to tick a task off, or back to Not Started.
 - **Subtasks:** a topic added under a task is a task too. A task with subtasks is a parent task: its progress is the average of its subtasks', it is Done when they all are, Blocked when one is, and its dates run from the earliest start to the latest end. Its progress, status and dates are shown, not edited; only its description is its own. Plain topics among the subtopics are not counted.
 

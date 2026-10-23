@@ -52,6 +52,8 @@ const MARKED_UNDERLINE_PX: f32 = 1.5;
 pub const NOTE_TEXT_WIDTH: f32 = 296.;
 /// Mixed into a topic's id to key its note's layout apart from its label's.
 const NOTE_LAYOUT_KEY: u128 = 0x6e6f_7465;
+/// Mixed into a topic's id to key its task description's layout apart.
+const DESCRIPTION_LAYOUT_KEY: u128 = 0x7461_736b;
 
 /// What a text-editing session edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -60,14 +62,23 @@ pub enum EditTarget {
     Label(Uuid),
     /// The note of a topic.
     Note(Uuid),
+    /// The description of a topic's task. Edited in the note card, like a
+    /// note.
+    Description(Uuid),
 }
 
 impl EditTarget {
     /// The shape whose text is edited.
     pub fn id(&self) -> Uuid {
         match *self {
-            EditTarget::Label(id) | EditTarget::Note(id) => id,
+            EditTarget::Label(id) | EditTarget::Note(id) | EditTarget::Description(id) => id,
         }
+    }
+
+    /// Whether the note card shows it (a note or a task description),
+    /// laid out at zoom 1 in the card's pixels.
+    pub fn in_card(&self) -> bool {
+        matches!(self, EditTarget::Note(_) | EditTarget::Description(_))
     }
 
     /// The id its text is laid out under in the layout cache: a note's
@@ -76,6 +87,7 @@ impl EditTarget {
         match *self {
             EditTarget::Label(id) => id,
             EditTarget::Note(id) => Uuid::from_u128(id.as_u128() ^ NOTE_LAYOUT_KEY),
+            EditTarget::Description(id) => Uuid::from_u128(id.as_u128() ^ DESCRIPTION_LAYOUT_KEY),
         }
     }
 }
@@ -100,6 +112,14 @@ pub fn target_text(
             };
             Some((note, Some(NOTE_TEXT_WIDTH)))
         }
+        EditTarget::Description(_) => {
+            let task = shape.topic.as_ref()?.task.as_ref()?;
+            let text = match &task.description {
+                Some(text) => Cow::Borrowed(text),
+                None => Cow::Owned(RichText::new(RunStyle::default(), HAlign::Left)),
+            };
+            Some((text, Some(NOTE_TEXT_WIDTH)))
+        }
     }
 }
 
@@ -115,6 +135,11 @@ pub fn store_target_text(session: &mut DocumentSession, target: EditTarget, text
         EditTarget::Note(_) => {
             if let Some(topic) = shape.topic.as_mut() {
                 topic.note = Some(text.clone());
+            }
+        }
+        EditTarget::Description(_) => {
+            if let Some(task) = shape.topic.as_mut().and_then(|t| t.task.as_mut()) {
+                task.description = Some(text.clone());
             }
         }
     });
@@ -1036,6 +1061,10 @@ pub fn start_text_session(
         EditTarget::Label(_) => shape.label.is_none(),
         EditTarget::Note(_) if shape.topic.is_some() => false,
         EditTarget::Note(_) => return false,
+        EditTarget::Description(_) if shape.topic.as_ref().is_some_and(|t| t.task.is_some()) => {
+            false
+        }
+        EditTarget::Description(_) => return false,
     };
     let began = gesture.begin(session, GestureOwner::Text);
     // A new text box's session opened the gesture already.
@@ -1049,12 +1078,27 @@ pub fn start_text_session(
     true
 }
 
+/// Removes topic `id`'s task description when it is blank.
+fn clear_blank_description(session: &mut DocumentSession, id: Uuid) {
+    let blank = session
+        .find_shape(id)
+        .and_then(|s| s.topic.as_ref()?.task.as_ref()?.description.as_ref())
+        .is_some_and(|d| d.plain().trim().is_empty());
+    if blank {
+        session.update_shapes(&[id], |shape| {
+            if let Some(task) = shape.topic.as_mut().and_then(|t| t.task.as_mut()) {
+                task.description = None;
+            }
+        });
+    }
+}
+
 /// Whether `target`'s text counts as empty when its session ends or is
 /// saved: an empty label, or a note of only whitespace.
 fn blank(target: EditTarget, text: &RichText) -> bool {
     match target {
         EditTarget::Label(_) => text.is_empty(),
-        EditTarget::Note(_) => text.plain().trim().is_empty(),
+        EditTarget::Note(_) | EditTarget::Description(_) => text.plain().trim().is_empty(),
     }
 }
 
@@ -1089,6 +1133,7 @@ pub fn finish_text_session(
                 session.set_topic_note(id, None);
             }
         }
+        EditTarget::Description(_) => clear_blank_description(session, id),
     }
     gesture.end(session, GestureOwner::Text);
     session.find_shape(id).is_some()
@@ -1119,6 +1164,7 @@ pub fn save_text_session(
                     session.set_topic_note(id, None);
                 }
             }
+            EditTarget::Description(id) => clear_blank_description(session, id),
         }
     }
     gesture.end(session, GestureOwner::Text);
@@ -1323,8 +1369,9 @@ impl EditorWindow {
         let Some(edit) = self.text_edit.take() else {
             return;
         };
-        // The note card shows a note's session, so it closes with it.
-        if let EditTarget::Note(_) = edit.target {
+        // The note card shows a note's (or description's) session, so it
+        // closes with it.
+        if edit.target.in_card() {
             self.note_card = None;
             self.note_geometry = None;
         }
@@ -1476,7 +1523,7 @@ impl EditorWindow {
     /// [`EditorWindow::note_geometry`]).
     pub(super) fn edit_point(&self, local: (f32, f32)) -> Pt {
         match self.text_edit.as_ref().map(|e| e.target) {
-            Some(EditTarget::Note(_)) => local,
+            Some(t) if t.in_card() => local,
             _ => self.to_canvas(local),
         }
     }
@@ -1494,7 +1541,7 @@ impl EditorWindow {
             return;
         };
         let target = edit.target;
-        if !matches!(target, EditTarget::Note(_)) {
+        if !target.in_card() {
             return;
         }
         let theme = cx.theme();
@@ -1537,7 +1584,7 @@ impl EditorWindow {
                 let area = target_area(shape, size, &frame);
                 EditGeometry { frame, area }
             }
-            EditTarget::Note(_) => self.note_geometry?,
+            EditTarget::Note(_) | EditTarget::Description(_) => self.note_geometry?,
         };
         Some((geometry, layout))
     }
@@ -1706,7 +1753,7 @@ impl EditorWindow {
     /// note's geometry is in those pixels already (its card shows it).
     pub(super) fn range_bounds(&mut self, range: Range<usize>) -> Option<((f32, f32), (f32, f32))> {
         let vp = self.session.page().viewport;
-        let note = matches!(self.text_edit.as_ref()?.target, EditTarget::Note(_));
+        let note = self.text_edit.as_ref()?.target.in_card();
         let (geometry, layout) = self.edit_layout()?;
         let r = layout
             .selection_rects(range.clone())

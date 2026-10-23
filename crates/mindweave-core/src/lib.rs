@@ -88,9 +88,7 @@ pub use svg_import::{
     convert_picture, fit_import_to_frame, import_svg, is_svg_picture, place_import, SvgImport,
     SvgImportError, MAX_IMPORT_BYTES, MAX_IMPORT_OBJECTS,
 };
-pub use task::{
-    is_date, task_pie, task_tick, task_views, Task, TaskStatus, TaskView, MAX_TASK_DESCRIPTION,
-};
+pub use task::{is_date, task_pie, task_tick, task_views, Task, TaskStatus, TaskView};
 pub use template::{
     instantiate_line_template, instantiate_template, PartKind, PartLabel, TemplateDef,
     TemplatePart, MAX_TEMPLATE_PARTS,

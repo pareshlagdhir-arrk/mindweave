@@ -62,6 +62,7 @@ pub struct TopicNode {
 #[serde(default, deny_unknown_fields)]
 pub struct TaskEdit {
     pub remove: bool,
+    /// Simple Markdown, as a note takes.
     pub description: Option<String>,
     /// `YYYY-MM-DD`.
     pub start: Option<String>,
@@ -83,7 +84,8 @@ impl TaskEdit {
         let mut task = task.unwrap_or_default();
         if let Some(d) = &self.description {
             check_text("task description", d)?;
-            task.description = d.trim().to_string();
+            task.description = Some(notes::rich_text_from_markdown(d, &RunStyle::default()))
+                .filter(|t: &RichText| !t.plain().trim().is_empty());
         }
         let date = |what: &str, d: &Option<String>, now: Option<String>| match d.as_deref() {
             None => Ok(now),

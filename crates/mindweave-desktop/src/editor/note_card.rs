@@ -1,8 +1,10 @@
-//! The note card: a topic's note, edited in place in a card beside the
-//! topic. The card shows a text-editing session on the note
-//! ([`EditTarget::Note`]), so the canvas editor's keys, clipboard, input
-//! methods, links and undo work in it, and the session (open to close) is
-//! one undo step. A note left blank is removed when the card closes.
+//! The note card: a topic's note, or its task's description, edited in
+//! place in a card beside the topic. The card shows a text-editing session
+//! on the note ([`EditTarget::Note`]) or description
+//! ([`EditTarget::Description`]), so the canvas editor's keys, clipboard,
+//! input methods, links and undo work in it, and the session (open to
+//! close) is one undo step. A text left blank is removed when the card
+//! closes.
 //!
 //! The note is laid out at zoom 1 whatever the canvas zoom, and its
 //! geometry ([`EditorWindow::note_geometry`]) is in pixels from the
@@ -61,8 +63,10 @@ const TOOLTIP_TEXT_SIZE: f32 = 12.;
 
 /// The note card open on a topic.
 pub(super) struct NoteCard {
-    /// The topic whose note it edits.
+    /// The topic whose note or task description it edits.
     pub topic: Uuid,
+    /// What it edits: the topic's note or its task's description.
+    pub target: EditTarget,
     /// The height of the note's text, laid out, in pixels.
     text_height: f32,
     /// The card's height when it was last laid out, in pixels.
@@ -94,15 +98,15 @@ pub(super) fn outside_press(open: Uuid, badge: Option<Uuid>, clicks: usize) -> O
     }
 }
 
-/// Whether the note card open on `topic` stays open: its topic is on the
-/// active page's active layer and its note is the text being edited
+/// Whether the note card open on `target` stays open: its topic is on the
+/// active page's active layer and `target` is the text being edited
 /// (`editing`).
 pub(super) fn note_card_stays(
     session: &DocumentSession,
     editing: Option<EditTarget>,
-    topic: Uuid,
+    target: EditTarget,
 ) -> bool {
-    editing == Some(EditTarget::Note(topic)) && card_topic_present(session, topic)
+    editing == Some(target) && card_topic_present(session, target.id())
 }
 
 /// The note's first paragraph with any text, for its badge's tooltip:
@@ -145,19 +149,37 @@ impl EditorWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_text_card(EditTarget::Note(topic), window, cx);
+    }
+
+    /// Opens the card on the description of `topic`'s task, as
+    /// [`Self::open_note_card`] does on its note.
+    pub(super) fn open_description_card(
+        &mut self,
+        topic: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_text_card(EditTarget::Description(topic), window, cx);
+    }
+
+    /// Opens the card on `target`, a note or a task description.
+    fn open_text_card(&mut self, target: EditTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let topic = target.id();
         let editing = self.text_edit.as_ref().map(|e| e.target);
-        if self.note_card.as_ref().is_some_and(|c| c.topic == topic)
-            && editing == Some(EditTarget::Note(topic))
-        {
+        if self.note_card.as_ref().is_some_and(|c| c.target == target) && editing == Some(target) {
             self.focus_handle.focus(window, cx);
             return;
         }
+        // Another card's text ends its session first, as one undo step.
+        self.close_note_card(window, cx);
         self.hand_over_equation_card(window, cx);
-        self.begin_text_edit(EditTarget::Note(topic), window, cx);
+        self.begin_text_edit(target, window, cx);
         let editing = self.text_edit.as_ref().map(|e| e.target);
-        if editing == Some(EditTarget::Note(topic)) {
+        if editing == Some(target) {
             self.note_card = Some(NoteCard {
                 topic,
+                target,
                 text_height: 0.,
                 height: None,
                 scroll: ScrollHandle::new(),
@@ -174,10 +196,7 @@ impl EditorWindow {
         if self.note_card.is_none() {
             return;
         }
-        let editing_note = self
-            .text_edit
-            .as_ref()
-            .is_some_and(|e| matches!(e.target, EditTarget::Note(_)));
+        let editing_note = self.text_edit.as_ref().is_some_and(|e| e.target.in_card());
         if editing_note {
             self.end_text_edit(window, cx);
         }
@@ -199,7 +218,12 @@ impl EditorWindow {
         let Some(card) = self.note_card.as_ref() else {
             return false;
         };
-        match outside_press(card.topic, self.note_badge_at(at), clicks) {
+        // Only a note's card closes from its badge.
+        let badge = match card.target {
+            EditTarget::Note(_) => self.note_badge_at(at),
+            _ => None,
+        };
+        match outside_press(card.topic, badge, clicks) {
             OutsidePress::Keep => true,
             OutsidePress::Close => {
                 self.close_note_card(window, cx);
@@ -220,13 +244,12 @@ impl EditorWindow {
         let Some(card) = self.note_card.as_ref() else {
             return;
         };
-        let topic = card.topic;
+        let target = card.target;
         let editing = self.text_edit.as_ref().map(|e| e.target);
-        if !note_card_stays(&self.session, editing, topic) {
+        if !note_card_stays(&self.session, editing, target) {
             self.close_note_card(window, cx);
             return;
         }
-        let target = EditTarget::Note(topic);
         let Some((text, wrap)) = target_text(&self.session, target) else {
             return;
         };
@@ -301,7 +324,7 @@ impl EditorWindow {
         let Some(canvas) = self.canvas_bounds else {
             return;
         };
-        let target = EditTarget::Note(card.topic);
+        let target = card.target;
         let view = card.scroll.bounds();
         let local = |p: Point<Pixels>| {
             let p = p - canvas.origin;
@@ -385,7 +408,11 @@ impl EditorWindow {
         let at = self.cursor_canvas?;
         let pointer = self.pointer_local?;
         let topic = self.note_badge_at(at)?;
-        if self.note_card.as_ref().is_some_and(|c| c.topic == topic) {
+        if self
+            .note_card
+            .as_ref()
+            .is_some_and(|c| c.target == EditTarget::Note(topic))
+        {
             return None;
         }
         let note = self
@@ -507,6 +534,13 @@ impl EditorWindow {
                 "Link (⌘K)",
                 TextCommand::EditLink,
             ));
+        let title = matches!(card.target, EditTarget::Description(_)).then(|| {
+            div()
+                .flex_none()
+                .text_size(px(HINT_TEXT_SIZE))
+                .text_color(muted)
+                .child("Task description")
+        });
         let text_height = card.text_height;
         let text_area = div()
             .id("note-text")
@@ -567,6 +601,7 @@ impl EditorWindow {
                 .absolute()
                 .size_full(),
             )
+            .children(title)
             .child(bar)
             .child(text_area)
             .child(
@@ -631,18 +666,24 @@ mod tests {
     fn note_card_closes_when_its_topic_goes() {
         let (_dir, mut s) = session();
         let id = s.add_central_topic((0., 0.));
-        let note = Some(EditTarget::Note(id));
-        assert!(note_card_stays(&s, note, id));
+        let target = EditTarget::Note(id);
+        let note = Some(target);
+        assert!(note_card_stays(&s, note, target));
         // Its session ended (or another text is edited): it closes.
-        assert!(!note_card_stays(&s, None, id));
-        assert!(!note_card_stays(&s, Some(EditTarget::Label(id)), id));
+        assert!(!note_card_stays(&s, None, target));
+        assert!(!note_card_stays(&s, Some(EditTarget::Label(id)), target));
+        assert!(!note_card_stays(
+            &s,
+            Some(EditTarget::Description(id)),
+            target
+        ));
         s.delete_with_branches(&[id]);
-        assert!(!note_card_stays(&s, note, id));
+        assert!(!note_card_stays(&s, note, target));
         assert!(s.undo());
-        assert!(note_card_stays(&s, note, id));
+        assert!(note_card_stays(&s, note, target));
         // Another page does not show it either.
         s.add_page();
-        assert!(!note_card_stays(&s, note, id));
+        assert!(!note_card_stays(&s, note, target));
     }
 
     #[test]
@@ -665,5 +706,38 @@ mod tests {
         // No undo step either: undo takes the topic away.
         assert!(s.undo());
         assert!(s.find_shape(id).is_none());
+    }
+
+    #[test]
+    fn a_task_description_is_rich_text_and_a_blank_one_is_removed() {
+        let (_dir, mut s) = session();
+        let id = s.add_central_topic((0., 0.));
+        let target = EditTarget::Description(id);
+        let mut g = SessionGesture::default();
+        // Not a task yet: nothing to edit.
+        assert!(!start_text_session(&mut s, &mut g, target));
+        s.update_shapes(&[id], |shape| {
+            shape.topic.as_mut().unwrap().task = Some(mindweave_core::Task::default());
+        });
+        let task = |s: &DocumentSession| {
+            s.find_shape(id)
+                .unwrap()
+                .topic
+                .clone()
+                .unwrap()
+                .task
+                .unwrap()
+        };
+        assert!(start_text_session(&mut s, &mut g, target));
+        store_target_text(&mut s, target, &plain("Ship **it**"));
+        assert!(finish_text_session(&mut s, &mut g, target));
+        assert_eq!(task(&s).description.unwrap().plain(), "Ship **it**");
+        assert!(start_text_session(&mut s, &mut g, target));
+        store_target_text(&mut s, target, &plain("  "));
+        assert!(finish_text_session(&mut s, &mut g, target));
+        assert_eq!(task(&s).description, None);
+        // Each session is one undo step.
+        assert!(s.undo());
+        assert!(task(&s).description.is_some());
     }
 }

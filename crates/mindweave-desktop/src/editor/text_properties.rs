@@ -517,7 +517,7 @@ impl EditorWindow {
             Some(edit) => match edit.target {
                 EditTarget::Label(id) => summarize_editing(self.session.find_shape(id)?, edit),
                 // A note's formatting is the note card's, not this section's.
-                EditTarget::Note(_) => None,
+                EditTarget::Note(_) | EditTarget::Description(_) => None,
             },
             None => summarize_objects(&self.shapes_among(&self.selection)),
         }

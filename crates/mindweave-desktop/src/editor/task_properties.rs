@@ -1,13 +1,14 @@
 //! The Task section of the Properties sidebar, shown when every selected
 //! shape is a mind map topic: makes the topics tasks and, for one task,
-//! edits its description, dates, progress and status. A parent task (one
+//! edits its dates, progress and status, and opens its rich-text
+//! description in the note card. A parent task (one
 //! with subtasks) shows what its subtasks roll up to. Each change is one
 //! undo step.
 
 use chrono::NaiveDate;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{v_flex, ActiveTheme as _, Sizable as _};
@@ -15,6 +16,7 @@ use gpui_kit::*;
 use mindweave_core::{task_views, Task, TaskStatus, TaskView};
 use uuid::Uuid;
 
+use super::note_card::note_preview;
 use super::properties_panel::field_row;
 use super::shape_properties::SECTION_GAP;
 use super::topic_properties::{dropdown, CONTROL_WIDTH};
@@ -32,7 +34,6 @@ enum Which {
 
 /// The fields of the one selected task, and the task they show.
 pub struct TaskFields {
-    description: Entity<TextareaState>,
     start: Entity<DatePickerState>,
     end: Entity<DatePickerState>,
     progress: Entity<SliderState>,
@@ -43,11 +44,6 @@ pub struct TaskFields {
 
 impl TaskFields {
     pub fn new(window: &mut Window, cx: &mut Context<EditorWindow>) -> (Self, Vec<Subscription>) {
-        let description = cx.new(|cx| {
-            let mut state = TextareaState::new(window, cx).placeholder("What needs doing");
-            state.set_auto_grow(2, 6, cx);
-            state
-        });
         let date = |window: &mut Window, cx: &mut Context<EditorWindow>| {
             cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT))
         };
@@ -61,12 +57,6 @@ impl TaskFields {
                 .default_value(0.)
         });
         let subscriptions = vec![
-            cx.subscribe_in(&description, window, |this, input, event, _, cx| {
-                if matches!(event, InputEvent::Blur) {
-                    let value = input.read(cx).value().trim().to_string();
-                    this.set_task_description(value, cx);
-                }
-            }),
             cx.subscribe_in(&start, window, |this, _, event, _, cx| {
                 let DatePickerEvent::Change(value) = event;
                 this.set_task_date(Which::Start, value.start().map(|d| d.date()), cx);
@@ -86,7 +76,6 @@ impl TaskFields {
             }),
         ];
         let fields = TaskFields {
-            description,
             start,
             end,
             progress,
@@ -110,66 +99,25 @@ impl EditorWindow {
     }
 
     /// Shows the selected task in the fields when the selection or the
-    /// task changed (not while the description is being typed in).
+    /// task changed.
     pub(super) fn sync_task_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted = self.selected_task();
         if self.task_fields.shows == wanted {
             return;
         }
-        let fields = &self.task_fields;
-        let description = fields.description.clone();
-        let typing = description.read(cx).focus_handle(cx).is_focused(window);
-        // While a description is typed, the fields keep showing its task
-        // until it is saved on losing focus.
-        let id = |t: &Option<(Uuid, Task)>| t.as_ref().map(|(id, _)| *id);
-        if typing && id(&fields.shows) != id(&wanted) {
-            return;
-        }
-        let Some((_, task)) = wanted.clone() else {
-            self.task_fields.shows = None;
-            return;
-        };
-        if !typing {
-            description.update(cx, |state, cx| {
-                state.set_value(task.description.clone(), window, cx)
+        if let Some((_, task)) = &wanted {
+            let fields = &self.task_fields;
+            for (picker, date) in [(&fields.start, &task.start), (&fields.end, &task.end)] {
+                let date = parse_date(date.as_deref());
+                picker.update(cx, |state, cx| {
+                    state.set_date(Date::Single(date), window, cx)
+                });
+            }
+            fields.progress.update(cx, |state, cx| {
+                state.set_value(f32::from(task.progress), window, cx)
             });
         }
-        for (picker, date) in [(&fields.start, &task.start), (&fields.end, &task.end)] {
-            let date = parse_date(date.as_deref());
-            picker.update(cx, |state, cx| {
-                state.set_date(Date::Single(date), window, cx)
-            });
-        }
-        fields.progress.update(cx, |state, cx| {
-            state.set_value(f32::from(task.progress), window, cx)
-        });
         self.task_fields.shows = wanted;
-    }
-
-    /// Sets the description of the task the fields show (the selection
-    /// may have moved on before the field lost focus), if it changed.
-    fn set_task_description(&mut self, description: String, cx: &mut Context<Self>) {
-        let Some((id, _)) = self.task_fields.shows.clone() else {
-            return;
-        };
-        let now = self
-            .session
-            .find_shape(id)
-            .and_then(|s| s.topic.as_ref()?.task.as_ref())
-            .map(|t| t.description.clone());
-        if now.is_none_or(|d| d == description) {
-            return;
-        }
-        self.update_session(
-            |s| {
-                s.update_shapes(&[id], |shape| {
-                    if let Some(task) = shape.topic.as_mut().and_then(|t| t.task.as_mut()) {
-                        task.description = description.clone();
-                    }
-                })
-            },
-            cx,
-        );
     }
 
     /// Sets (or with `None` clears) the selected task's start or end date,
@@ -251,10 +199,31 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> O
             subtasks: 0,
         });
     let fields = &editor.task_fields;
+    let preview = task
+        .description
+        .as_ref()
+        .map(note_preview)
+        .filter(|p| !p.is_empty());
+    let has_description = preview.is_some();
     let description = v_flex()
         .gap(px(2.))
-        .child("Description")
-        .child(Textarea::new(&fields.description).small());
+        .child(field_row(
+            "Description",
+            Some("Rich text: bold, italic, lists and links, edited in a card beside the topic"),
+            Button::new("task-description")
+                .ghost()
+                .xsmall()
+                .label(if has_description { "Edit…" } else { "Add…" })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_description_card(id, window, cx)
+                })),
+        ))
+        .children(preview.map(|p| {
+            div()
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child(p)
+        }));
     let section = section.child(description);
     let section = if view.is_parent() {
         let subtasks = match view.subtasks {

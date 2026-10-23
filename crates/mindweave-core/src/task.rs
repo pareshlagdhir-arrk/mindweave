@@ -5,10 +5,11 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::document::Page;
+use crate::text::{HAlign, RichText, RunStyle};
 
 /// Where a task stands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -56,8 +57,13 @@ impl TaskStatus {
 /// What makes a topic a task.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Task {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub description: String,
+    /// What needs doing, as rich text (like a note).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "description_from"
+    )]
+    pub description: Option<RichText>,
     /// The start date, `YYYY-MM-DD`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<String>,
@@ -71,8 +77,25 @@ pub struct Task {
     pub status: TaskStatus,
 }
 
-/// Longest task description, in bytes.
-pub const MAX_TASK_DESCRIPTION: usize = 10_000;
+/// A description as rich text, or as plain text (as the first builds
+/// with tasks wrote it); blank is none.
+fn description_from<'de, D: Deserializer<'de>>(d: D) -> Result<Option<RichText>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Plain(String),
+        Rich(RichText),
+    }
+    Ok(match Option::<Stored>::deserialize(d)? {
+        Some(Stored::Plain(s)) if !s.trim().is_empty() => {
+            let mut text = RichText::new(RunStyle::default(), HAlign::Left);
+            text.insert(0, &s, &RunStyle::default());
+            Some(text)
+        }
+        Some(Stored::Rich(text)) if !text.plain().trim().is_empty() => Some(text),
+        _ => None,
+    })
+}
 
 impl Task {
     /// Sets the progress (clamped to 100) and keeps the status in step:
@@ -110,17 +133,11 @@ impl Task {
     }
 
     /// The task with its values made valid: progress at most 100, status
-    /// in step with it, bad dates dropped and the description bounded.
+    /// in step with it, bad dates and a blank description dropped.
     pub fn normalized(mut self) -> Task {
         self.start = self.start.filter(|d| is_date(d));
         self.end = self.end.filter(|d| is_date(d));
-        if self.description.len() > MAX_TASK_DESCRIPTION {
-            let mut cut = MAX_TASK_DESCRIPTION;
-            while !self.description.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            self.description.truncate(cut);
-        }
+        self.description = self.description.filter(|d| !d.plain().trim().is_empty());
         let status = self.status;
         self.progress = self.progress.min(100);
         match status {
@@ -337,6 +354,16 @@ mod tests {
         assert!((last.0 - 10.).abs() < 1e-3 && last.1.abs() < 1e-3);
         // Whole: no centre point.
         assert_ne!(task_pie((0., 0.), 10., 100)[0], (0., 0.));
+    }
+
+    #[test]
+    fn plain_and_rich_descriptions_load() {
+        let t: Task = serde_json::from_str(r#"{"description":"Ship it"}"#).unwrap();
+        assert_eq!(t.description.as_ref().unwrap().plain(), "Ship it");
+        let back: Task = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back, t);
+        let blank: Task = serde_json::from_str(r#"{"description":"  "}"#).unwrap();
+        assert_eq!(blank.description, None);
     }
 
     #[test]

@@ -38,7 +38,8 @@ returns the ids of what it created.
   `add_relationship` links two topics across branches; `equation` takes
   LaTeX (mhchem works for chemistry).
 - For plans and to-do lists, make topics tasks: `task` (in a tree node or
-  `set_topic`) takes `description`, `start`/`end` (`YYYY-MM-DD`),
+  `set_topic`) takes `description` (simple Markdown, like `note`),
+  `start`/`end` (`YYYY-MM-DD`),
   `progress` (0 to 100) and `status` (`not-started`, `in-progress`,
   `blocked`, `done`). Topics added under a task are tasks too. Set
   progress and status on the tasks without subtasks only: a parent task

@@ -374,7 +374,10 @@ impl Workspace {
                 task: t.task.as_ref().and_then(|task| {
                     let view = task_views(&self.doc().pages[page]).remove(&s.id)?;
                     Some(TaskInfo {
-                        description: shorten(task.description.clone(), max),
+                        description: task
+                            .description
+                            .as_ref()
+                            .map_or_else(String::new, |d| shorten(d.plain(), max)),
                         start: view.start,
                         end: view.end,
                         progress: view.progress,

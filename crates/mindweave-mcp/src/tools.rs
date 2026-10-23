@@ -188,7 +188,7 @@ fn task_schema() -> Value {
         "type": "object",
         "description": "Makes the topic a task (topics added under a task are tasks too). A task with subtasks rolls up their progress (the average), status and dates; its own progress and status are ignored.",
         "properties": {
-            "description": {"type": "string", "description": "What needs doing (empty clears it)"},
+            "description": {"type": "string", "description": "What needs doing, in simple Markdown like a note (empty clears it)"},
             "start": {"type": "string", "description": "Start date, YYYY-MM-DD (empty clears it)"},
             "end": {"type": "string", "description": "End date, YYYY-MM-DD (empty clears it)"},
             "progress": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Percent done; 100 is done"},
