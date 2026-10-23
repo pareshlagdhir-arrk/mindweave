@@ -1627,11 +1627,11 @@ fn placement_shape(gesture: &Gesture, libs: &LibraryRegistry) -> Option<Shape> {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        artboard_press, attaches_at, chrome_frame, handle_at, hit_shape, is_drag, is_line_like,
-        marquee_rect, marquee_selection, move_placement, moved_frames_of, placement_frame,
-        placement_shape, press_kind, press_selection, press_target, preview_shape, resize_cursor,
-        shape_geometry, text_box_widths_off, transformed, visible_handles, Gesture, HandleHit,
-        PressKind,
+        artboard_press, attaches_at, chrome_frame, dropped_shapes, handle_at, hit_shape, is_drag,
+        is_line_like, marquee_rect, marquee_selection, move_placement, moved_frames_of,
+        placement_frame, placement_shape, press_kind, press_selection, press_target, preview_shape,
+        resize_cursor, shape_geometry, text_box_widths_off, transformed, visible_handles, Gesture,
+        HandleHit, PressKind,
     };
     use gpui_kit::CursorStyle;
     use mindweave_core::geometry::Rect;
@@ -2450,5 +2450,29 @@ mod tests {
             ),
             (-100., -100., 400., 400.)
         );
+    }
+
+    #[test]
+    fn a_drop_decides_the_membership_of_what_the_gesture_moved() {
+        let libs = registry();
+        let def = libs.shape("basic-shapes", "line").unwrap();
+        let line = Shape::new(def, "basic-shapes", boxed(0., 0., 10., 0.));
+        let [a, b, topic] = ids();
+        let moving = Gesture::Moving {
+            start: (0., 0.),
+            originals: vec![(a, boxed(0., 0., 1., 1.)), (b, boxed(0., 0., 1., 1.))],
+        };
+        assert_eq!(dropped_shapes(&moving, &[topic]), vec![a, b]);
+        let end = Gesture::MovingEnd {
+            end: mindweave_core::LineEnd::End,
+            start: (0., 0.),
+            original: Box::new(line.clone()),
+        };
+        assert_eq!(dropped_shapes(&end, &[]), vec![line.id]);
+        let bend = Gesture::Bending {
+            start: (0., 0.),
+            original: Box::new(line),
+        };
+        assert!(dropped_shapes(&bend, &[a]).is_empty());
     }
 }

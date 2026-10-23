@@ -149,12 +149,7 @@ impl EditorWindow {
             window.push_notification(Notification::info("Select the topics to enclose."), cx);
             return;
         }
-        self.update_session(
-            |s| {
-                s.toggle_boundary(&topics);
-            },
-            cx,
-        );
+        self.update_session(|s| toggle_boundary_in(s, &topics), cx);
     }
 
     /// The topic at canvas point `at` a dragged topic `dragged` could move
@@ -377,12 +372,58 @@ pub fn normalized_link(link: &str) -> String {
     }
 }
 
+/// Draws or removes a boundary round `topics` as one undo step; a new
+/// boundary shares its map's artboard, in that step.
+pub(super) fn toggle_boundary_in(session: &mut DocumentSession, topics: &[Uuid]) {
+    if let Some(boundary) = session.toggle_boundary(topics) {
+        session.assign_membership(&[boundary]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{equation_at, link_badge_at, normalized_link, note_badge_at, one_topic};
+    use super::{
+        equation_at, link_badge_at, normalized_link, note_badge_at, one_topic, toggle_boundary_in,
+    };
+    use mindweave_core::geometry::Frame;
     use mindweave_core::geometry::Rect;
     use mindweave_core::mindmap::Equation;
     use mindweave_core::{DocumentSession, HAlign, RichText, Run, RunStyle, Shape};
+
+    #[test]
+    fn a_new_boundary_shares_its_maps_artboard_in_one_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("b.mindweave")).unwrap();
+        let board = Shape::new_artboard(
+            Frame {
+                x: -500.,
+                y: -500.,
+                w: 1000.,
+                h: 1000.,
+                ..Frame::default()
+            },
+            "Board",
+        );
+        let aid = board.id;
+        s.add_shapes(vec![board]);
+        let central = s.add_central_topic((0., 0.));
+        s.assign_membership(&[central]);
+        let sub = s.add_subtopic(central).unwrap();
+        s.assign_membership(&[sub]);
+        assert_eq!(s.find_shape(sub).unwrap().artboard, Some(aid));
+        let before: Vec<uuid::Uuid> = s.shapes_on_active_layer().iter().map(|x| x.id).collect();
+        toggle_boundary_in(&mut s, &[sub]);
+        let boundary = s
+            .shapes_on_active_layer()
+            .iter()
+            .find(|x| x.is_boundary())
+            .unwrap();
+        assert_eq!(boundary.artboard, Some(aid));
+        // One undo removes the boundary and leaves the rest.
+        assert!(s.undo());
+        let after: Vec<uuid::Uuid> = s.shapes_on_active_layer().iter().map(|x| x.id).collect();
+        assert_eq!(after, before);
+    }
 
     #[test]
     fn note_and_equation_need_exactly_one_topic() {
