@@ -71,9 +71,8 @@ binary (for example `/Users/me/.cargo/bin/mindweave-mcp`).
 
 ### Claude Code
 
-*Unverified (written from memory of the `claude mcp add` command; the
-`--` before the command and the `--scope user` option are the parts we
-are least sure of).*
+*Verified against the Claude Code MCP documentation.* stdio is the
+default transport; options such as `--scope` go before the server name.
 
 ```sh
 claude mcp add mindweave -- /path/to/mindweave-mcp
@@ -83,10 +82,12 @@ claude mcp add --scope user mindweave -- /path/to/mindweave-mcp
 
 ### Claude Desktop
 
-*Unverified (the `mcpServers` form is the widely used one; the menu path
-to the file may differ between versions).*
+*The `mcpServers` form is the documented one; the menu path to the file
+is unverified and may differ between versions.*
 
-In `claude_desktop_config.json` (Settings → Developer → Edit Config):
+In `claude_desktop_config.json` (on macOS in
+`~/Library/Application Support/Claude/`; Settings → Developer → Edit
+Config):
 
 ```json
 {
@@ -139,10 +140,10 @@ In `opencode.json` (project) or `~/.config/opencode/opencode.json`:
 
 ### Cursor
 
-*Unverified (the `mcpServers` form in `.cursor/mcp.json` is the one we
-know; the global file location is the part we are least sure of).*
+*Verified against cursor.com/docs/context/mcp.*
 
-In `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`:
+In `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (all workspaces).
+For the same server name, the project file wins over the global one:
 
 ```json
 {
@@ -168,12 +169,22 @@ JSON-RPC 2.0.
 The skill is a plain folder in the open Agent Skills format
 (`SKILL.md` with `name` and `description` frontmatter):
 
+The folder name must match the skill's `name` (`mindweave`). One location
+works for several clients: **`.agents/skills/mindweave`** in a repository
+(or `~/.agents/skills/mindweave` for your user) is read by both Codex and
+opencode.
+
 - **Claude Code** *(unverified)*: copy `skills/mindweave` to
   `~/.claude/skills/mindweave` (all projects) or `.claude/skills/mindweave`
   (one project).
-- **Clients with skills folders** (for example Codex and opencode)
-  *(unverified; we do not know their folder locations)*: copy the folder
-  where the client looks for skills; see its documentation.
+- **Codex** *(verified against the Codex skills documentation)*:
+  `$HOME/.agents/skills/mindweave` (user) or `.agents/skills/mindweave` in
+  the repository (Codex scans from the folder it was started in up to the
+  repository root).
+- **opencode** *(verified against opencode.ai/docs/skills)*:
+  `.opencode/skills/mindweave/SKILL.md` (project) or
+  `~/.config/opencode/skills/mindweave/SKILL.md` (global); opencode also
+  reads `.claude/skills/` and `.agents/skills/` folders.
 - **Any client:** add a line to the project's `AGENTS.md` (or `CLAUDE.md`)
   such as "When working with .mindweave files, follow
   skills/mindweave/SKILL.md", or paste the skill's body into the client's
