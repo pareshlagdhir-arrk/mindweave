@@ -271,13 +271,71 @@ fn skipping_pictures(count: &Arc<AtomicUsize>) -> ImageHrefResolver<'static> {
     }
 }
 
-/// The system's fonts, loaded once.
+/// Installed fonts tried, in order, for SVG's generic families: macOS's,
+/// Windows', then those common on Linux.
+const SANS_SERIF: &[&str] = &[
+    "Arial",
+    "Helvetica",
+    "Liberation Sans",
+    "DejaVu Sans",
+    "Noto Sans",
+    "Ubuntu",
+    "Cantarell",
+];
+const SERIF: &[&str] = &[
+    "Times New Roman",
+    "Times",
+    "Liberation Serif",
+    "DejaVu Serif",
+    "Noto Serif",
+];
+const MONOSPACE: &[&str] = &[
+    "Courier New",
+    "Menlo",
+    "Consolas",
+    "Liberation Mono",
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+];
+
+/// The first of `wanted` installed in `db`, else any installed family.
+fn installed_family(db: &fontdb::Database, wanted: &[&str]) -> Option<String> {
+    let has = |name: &str| {
+        db.faces()
+            .any(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
+    };
+    wanted
+        .iter()
+        .find(|name| has(name))
+        .map(|name| name.to_string())
+        .or_else(|| {
+            db.faces()
+                .find_map(|f| f.families.first().map(|(n, _)| n.clone()))
+        })
+}
+
+/// The system's fonts, loaded once, with SVG's generic families
+/// (`sans-serif` and the rest) set to fonts that are installed: usvg's
+/// defaults (Arial, Times New Roman, Courier New) are missing on most
+/// Linux systems, where text would find no font.
 fn system_fonts() -> Arc<fontdb::Database> {
     static FONTS: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
     FONTS
         .get_or_init(|| {
             let mut db = fontdb::Database::new();
             db.load_system_fonts();
+            let sans = installed_family(&db, SANS_SERIF);
+            if let Some(f) = &sans {
+                db.set_sans_serif_family(f.clone());
+                db.set_cursive_family(f.clone());
+                db.set_fantasy_family(f.clone());
+            }
+            if let Some(f) = installed_family(&db, SERIF).or(sans.clone()) {
+                db.set_serif_family(f);
+            }
+            if let Some(f) = installed_family(&db, MONOSPACE).or(sans) {
+                db.set_monospace_family(f);
+            }
             Arc::new(db)
         })
         .clone()
