@@ -1,0 +1,26 @@
+[package]
+name = "mindweave-mcp"
+description = "MCP server that lets AI agents build and edit Mindweave documents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mindweave-mcp"
+path = "src/main.rs"
+
+[dependencies]
+mindweave-core = { path = "../mindweave-core" }
+base64.workspace = true
+dirs.workspace = true
+ratex-layout.workspace = true
+ratex-parser.workspace = true
+ratex-svg.workspace = true
+ratex-types.workspace = true
+resvg.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
