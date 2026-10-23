@@ -1,4 +1,5 @@
 mod actions;
+mod app_icon;
 mod app_state;
 mod assets;
 mod dashboard;
@@ -18,6 +19,7 @@ fn main() {
     app.on_reopen(AppState::reopened);
     app.run(|cx| {
         gpui_kit::init(cx);
+        app_icon::set_dock_icon();
         themes::init_themes(cx);
         AppState::init(cx);
         cx.activate(true);

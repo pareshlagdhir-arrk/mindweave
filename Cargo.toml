@@ -29,6 +29,10 @@ zip = { version = "=2.2.0", default-features = false, features = ["deflate"] }
 # tile) as its frames.
 image = { version = "=0.25.10", default-features = false }
 # The version gpui uses: rotated text is drawn from its glyph outlines.
+# The versions gpui uses: the Dock icon is set through AppKit (macOS).
+objc2 = "=0.6.5"
+objc2-app-kit = "=0.3.2"
+objc2-foundation = "=0.3.2"
 font-kit = { package = "zed-font-kit", version = "=0.14.1-zed", default-features = false, features = ["source"] }
 # Equation rendering (LaTeX and mhchem to SVG with embedded glyphs).
 ratex-parser = "=0.1.15"

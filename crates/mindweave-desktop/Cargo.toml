@@ -24,6 +24,9 @@ uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 font-kit.workspace = true
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
