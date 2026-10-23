@@ -15,10 +15,15 @@ use mindweave_core::{
     bend_through, clamp_topic_picture, drag_create, handle_positions, line_frame, line_midpoint,
     marquee_selects, resize_with_text_boxes, rotate, rotate_handle_position, route_line,
     selection_bounds, translate, unit_members, whole_units_only, with_members, DocumentSession,
-    Handle, LibraryRegistry, LineEnd, Shape, ShapeDef, ShapeSource, CLICK_DRAG_THRESHOLD,
+    Handle, LibraryRegistry, LineEnd, Shape, ShapeDef, ShapeSource, ARTBOARD_SHAPE,
+    CLICK_DRAG_THRESHOLD, TEXT_LIBRARY,
 };
 use uuid::Uuid;
 
+use super::artboard_edit::{
+    add_with_membership, artboard_body_hit, clip_frames, clipped_away, settle_membership,
+    ARTBOARD_DEFAULT_SIZE, CUSTOM_ARTBOARD_NAME,
+};
 use super::shape_paint::{shape_geometry, CanvasGeometry};
 use super::text_edit::on_line_label;
 use super::tool::Tool;
@@ -148,6 +153,25 @@ pub enum PressKind {
     Marquee {
         additive: bool,
     },
+    /// Cmd pressed on an artboard's empty area: a marquee (Shift adds)
+    /// that selects the artboard instead if it ends as a click.
+    ArtboardMarquee {
+        artboard: Uuid,
+        additive: bool,
+    },
+}
+
+/// What a press [`press_target`] decided becomes when the shape pressed is
+/// an artboard (`artboard`, pressed on its empty area or name): Cmd turns
+/// its move into a marquee, Shift adding to the selection.
+pub fn artboard_press(kind: PressKind, artboard: bool, cmd: bool, shift: bool) -> PressKind {
+    match kind {
+        PressKind::Move(id) if artboard && cmd => PressKind::ArtboardMarquee {
+            artboard: id,
+            additive: shift,
+        },
+        other => other,
+    }
 }
 
 /// Decides what a press starts: a handle wins over shapes, a shape over
@@ -162,7 +186,8 @@ pub fn press_kind(handle: Option<HandleHit>, shape: Option<Uuid>, shift: bool) -
 }
 
 /// What a press at `p` starts, given the selection chrome (if anything is
-/// selected), the grab radius and rotate-handle offset in canvas units,
+/// selected), the grab radius and rotate-handle offset (`None`: no rotate
+/// handle) in canvas units,
 /// whether the chrome has only side handles (`width_only`, see
 /// [`visible_handles`]), and the shape hit there. Handles win, except that
 /// inside a selection smaller than two grab radii on both axes the shape
@@ -171,7 +196,7 @@ pub fn press_target(
     chrome: Option<&Frame>,
     p: Pt,
     grab: f32,
-    rotate_offset: f32,
+    rotate_offset: Option<f32>,
     width_only: bool,
     shape: Option<Uuid>,
     shift: bool,
@@ -294,22 +319,25 @@ pub fn visible_handles(frame: &Frame, grab: f32, width_only: bool) -> Vec<(Handl
 
 /// The handle of the chrome `frame` nearest to `p` within `grab` canvas
 /// units (of [`visible_handles`] with `width_only`); the rotate handle
-/// sits `rotate_offset` above the top edge.
+/// sits `rotate_offset` above the top edge (`None`: there is none).
 pub fn handle_at(
     frame: &Frame,
     p: Pt,
     grab: f32,
-    rotate_offset: f32,
+    rotate_offset: Option<f32>,
     width_only: bool,
 ) -> Option<HandleHit> {
     let dist = |q: Pt| (q.0 - p.0).hypot(q.1 - p.1);
+    let rotate = rotate_offset.map(|offset| {
+        (
+            HandleHit::Rotate,
+            dist(rotate_handle_position(frame, offset)),
+        )
+    });
     visible_handles(frame, grab, width_only)
         .into_iter()
         .map(|(h, q)| (HandleHit::Resize(h), dist(q)))
-        .chain([(
-            HandleHit::Rotate,
-            dist(rotate_handle_position(frame, rotate_offset)),
-        )])
+        .chain(rotate)
         .filter(|&(_, d)| d <= grab)
         // The first of equally near handles wins.
         .fold(None, |best: Option<(HandleHit, f32)>, (h, d)| match best {
@@ -409,22 +437,28 @@ pub fn outline_hit(outline: &CanvasGeometry, p: Pt, tolerance: f32) -> bool {
     }
 }
 
-/// The topmost unlocked shape of the active layer for which `hits(shape,
-/// tolerance)` holds; the tolerance grows by half the shape's stroke. A
+/// The topmost unlocked shape of the active layer, in paint order (its
+/// artboards beneath its other shapes), for which `hits(shape, tolerance)`
+/// holds at canvas point `at`; the tolerance grows by half the shape's
+/// stroke. A member's part clipped away by its artboard is not hit. A
 /// hidden active layer gives `None`.
 pub(super) fn hit_shape_with(
     session: &DocumentSession,
+    at: Pt,
     tolerance: f32,
     mut hits: impl FnMut(&Shape, f32) -> bool,
 ) -> Option<Uuid> {
     if !session.active_layer_selectable() {
         return None;
     }
-    session
-        .shapes_on_active_layer()
-        .iter()
-        .rev()
-        .filter(|s| !s.locked)
+    let shapes = session.shapes_on_active_layer();
+    let clips = clip_frames(shapes);
+    let top_first = shapes.iter().rev();
+    top_first
+        .clone()
+        .filter(|s| !s.is_artboard())
+        .chain(top_first.filter(|s| s.is_artboard()))
+        .filter(|s| !s.locked && !clipped_away(s, &clips, at))
         .find(|s| {
             let half_stroke = if s.style.stroke.is_some() {
                 s.style.stroke_width.max(0.) / 2.
@@ -464,6 +498,18 @@ pub fn placement_frame(
     )
 }
 
+/// What moving `selection` moves among `shapes` (the active layer), with
+/// its frames, back to front: the selected shapes and the members of
+/// selected artboards, each once.
+pub fn moved_frames_of(shapes: &[Shape], selection: &[Uuid]) -> Originals {
+    let ids: HashSet<Uuid> = with_members(shapes, selection).into_iter().collect();
+    shapes
+        .iter()
+        .filter(|s| ids.contains(&s.id))
+        .map(|s| (s.id, s.frame))
+        .collect()
+}
+
 impl EditorWindow {
     /// Left mouse-down at canvas point `at`: starts placing when a shape
     /// tool is active. A hidden active layer refuses with a notification.
@@ -480,9 +526,11 @@ impl EditorWindow {
             mindweave_core::LINE_LIBRARY.to_string(),
             mindweave_core::LINE_SHAPE.to_string(),
         );
+        let artboard = (TEXT_LIBRARY.to_string(), ARTBOARD_SHAPE.to_string());
         let (library, shape) = match &self.tools.tool {
             Tool::Shape { library, shape } => (library, shape),
             Tool::Relationship => (&line.0, &line.1),
+            Tool::Artboard => (&artboard.0, &artboard.1),
             _ => return,
         };
         self.placing_relationship = self.tools.tool == Tool::Relationship;
@@ -549,14 +597,15 @@ impl EditorWindow {
         };
         if std::mem::take(&mut self.placing_relationship) {
             relationship_style(&mut shape);
-        } else {
+        } else if !shape.is_artboard() {
             cx.global::<AppState>()
                 .settings
                 .apply_remembered_style(&mut shape);
         }
         attach_ends(&mut shape, ends);
         let id = shape.id;
-        self.update_session(|s| s.add_shapes(vec![shape]), cx);
+        // A shape placed inside an artboard joins it, in the same step.
+        self.update_session(|s| add_with_membership(s, vec![shape]), cx);
         self.selection = vec![id];
         self.tools.after_place();
         cx.notify();
@@ -727,11 +776,16 @@ impl EditorWindow {
             chrome.as_ref(),
             at,
             HANDLE_GRAB_PX / zoom,
-            ROTATE_HANDLE_OFFSET_PX / zoom,
+            self.chrome_rotates()
+                .then_some(ROTATE_HANDLE_OFFSET_PX / zoom),
             self.chrome_width_only(),
             shape,
             modifiers.shift,
         );
+        let on_artboard = shape
+            .and_then(|id| self.session.find_shape(id))
+            .is_some_and(Shape::is_artboard);
+        let kind = artboard_press(kind, on_artboard, modifiers.platform, modifiers.shift);
         self.press = Press {
             dragged: false,
             on_click: None,
@@ -743,6 +797,18 @@ impl EditorWindow {
                 current: at,
                 additive,
             },
+            PressKind::ArtboardMarquee { artboard, additive } => {
+                // A click (no drag) selects the artboard as a plain press
+                // on it would.
+                let (selection, on_click) =
+                    press_selection(&self.selection, &[artboard], modifiers.shift);
+                self.press.on_click = Some(on_click.unwrap_or(selection));
+                Gesture::Marquee {
+                    start: at,
+                    current: at,
+                    additive,
+                }
+            }
             PressKind::Move(id) => {
                 // Cmd+click picks one shape out of its group.
                 let unit = if modifiers.platform {
@@ -943,18 +1009,21 @@ impl EditorWindow {
                     let whole = whole_units_only(shapes, &added);
                     sel.retain(|id| before.contains(id) || whole.contains(id));
                     sel
+                } else if let Some(selection) = press.on_click {
+                    // A Cmd-click on an artboard selects it.
+                    selection
                 } else if additive {
                     std::mem::take(&mut self.selection)
                 } else {
                     Vec::new()
                 };
             }
-            Gesture::Moving { .. }
+            gesture @ (Gesture::Moving { .. }
             | Gesture::Resizing { .. }
             | Gesture::Rotating { .. }
             | Gesture::MovingEnd { .. }
             | Gesture::Bending { .. }
-            | Gesture::ResizingPicture { .. } => {
+            | Gesture::ResizingPicture { .. }) => {
                 if let (Some(from), Some(topic), true) = (
                     self.topic_drag_from.take(),
                     self.selection.first().copied(),
@@ -980,6 +1049,11 @@ impl EditorWindow {
                     }
                 }
                 self.attach_highlight = None;
+                if press.dragged {
+                    // Membership is decided on drop, in the gesture's step.
+                    let moved = dropped_shapes(&gesture, &self.selection);
+                    self.update_session(|s| settle_membership(s, &moved), cx);
+                }
                 self.session_gesture
                     .end(&mut self.session, GestureOwner::Pointer);
                 self.update_session(|_| {}, cx);
@@ -1007,6 +1081,9 @@ impl EditorWindow {
         };
         if let Some(frames) = transformed(&moved, (dx, dy), false, false) {
             self.apply_frames(frames, cx);
+            // Membership joins the nudge's step.
+            let ids = self.selection.clone();
+            self.update_session(|s| settle_membership(s, &ids), cx);
         }
     }
 
@@ -1019,6 +1096,11 @@ impl EditorWindow {
                 s.update_shapes(&ids, |shape| {
                     if let Some(f) = frames.get(&shape.id) {
                         shape.frame = *f;
+                        if shape.is_artboard() {
+                            // Artboards are never rotated or flipped.
+                            let f = &mut shape.frame;
+                            (f.rotation, f.flip_x, f.flip_y) = (0., false, false);
+                        }
                     }
                 })
             },
@@ -1151,13 +1233,7 @@ impl EditorWindow {
     /// What moving the selection moves, with its frames: the selected
     /// shapes and the members of selected artboards, each once.
     pub(super) fn moved_frames(&self) -> Originals {
-        let shapes = self.session.shapes_on_active_layer();
-        let ids: HashSet<Uuid> = with_members(shapes, &self.selection).into_iter().collect();
-        shapes
-            .iter()
-            .filter(|s| ids.contains(&s.id))
-            .map(|s| (s.id, s.frame))
-            .collect()
+        moved_frames_of(self.session.shapes_on_active_layer(), &self.selection)
     }
 
     /// The selection chrome's frame, if anything other than one line is
@@ -1176,9 +1252,15 @@ impl EditorWindow {
     pub(super) fn shape_at(&mut self, at: Pt, cx: &mut Context<Self>) -> Option<Uuid> {
         let libs = cx.global::<Libraries>().0.clone();
         let tolerance = HIT_TOLERANCE_PX / self.session.page().viewport.zoom;
+        if let Some(board) = self.artboard_name_at(at) {
+            return Some(board);
+        }
         let cache = &mut self.geometry_cache;
         let layouts = &mut self.text_layouts;
-        hit_shape_with(&self.session, tolerance, |shape, tol| {
+        hit_shape_with(&self.session, at, tolerance, |shape, tol| {
+            if shape.is_artboard() {
+                return artboard_body_hit(shape, at, tol);
+            }
             if outline_hit(cache.outline(shape, &libs), at, tol) {
                 return true;
             }
@@ -1203,7 +1285,7 @@ impl EditorWindow {
         let libs = cx.global::<Libraries>().0.clone();
         let tolerance = HIT_TOLERANCE_PX / self.session.page().viewport.zoom;
         let cache = &mut self.geometry_cache;
-        hit_shape_with(&self.session, tolerance, |shape, tol| {
+        hit_shape_with(&self.session, at, tolerance, |shape, tol| {
             !except.contains(&shape.id) && outline_hit(cache.outline(shape, &libs), at, tol)
         })
     }
@@ -1228,7 +1310,8 @@ impl EditorWindow {
                     &chrome,
                     at?,
                     HANDLE_GRAB_PX / zoom,
-                    ROTATE_HANDLE_OFFSET_PX / zoom,
+                    self.chrome_rotates()
+                        .then_some(ROTATE_HANDLE_OFFSET_PX / zoom),
                     self.chrome_width_only(),
                 )
             }
@@ -1250,7 +1333,7 @@ impl EditorWindow {
         let mut shape = preview_shape(&self.gesture, libs)?;
         if self.placing_relationship {
             relationship_style(&mut shape);
-        } else {
+        } else if !shape.is_artboard() {
             remembered.apply_remembered_style(&mut shape);
         }
         attach_ends(&mut shape, self.line_ends);
@@ -1308,7 +1391,7 @@ impl EditorWindow {
         let libs = cx.global::<Libraries>().0.clone();
         let band = ATTACH_EDGE_PX / self.session.page().viewport.zoom;
         let cache = &mut self.geometry_cache;
-        hit_shape_with(&self.session, band, |shape, band| {
+        hit_shape_with(&self.session, at, band, |shape, band| {
             !shape.is_line()
                 && Some(shape.id) != except
                 && attaches_at(cache.outline(shape, &libs), at, band)
@@ -1387,6 +1470,20 @@ impl EditorWindow {
     }
 }
 
+/// The shapes whose membership a dragged `gesture` decides on drop: the
+/// shapes it moved, resized or rotated, the line whose end it moved, or
+/// the dragged topic (`selection`); none for a bend or a topic's picture.
+fn dropped_shapes(gesture: &Gesture, selection: &[Uuid]) -> Vec<Uuid> {
+    match gesture {
+        Gesture::MovingEnd { original, .. } => vec![original.id],
+        Gesture::Bending { .. } | Gesture::ResizingPicture { .. } => Vec::new(),
+        _ => match gesture.originals() {
+            Some(o) => o.iter().map(|(id, _)| *id).collect(),
+            None => selection.to_vec(),
+        },
+    }
+}
+
 /// Gives a new line the look of a mind map relationship: a curved, dashed
 /// arrow in the theme's colour, removed with either topic it joins.
 fn relationship_style(shape: &mut Shape) {
@@ -1398,6 +1495,11 @@ fn relationship_style(shape: &mut Shape) {
         props.end_head = mindweave_core::ArrowHead::Arrow;
         props.relationship = true;
     }
+}
+
+/// Whether the tool placing `shape` of `library` draws artboards.
+fn is_artboard_tool(library: &str, shape: &str) -> bool {
+    library == TEXT_LIBRARY && shape == ARTBOARD_SHAPE
 }
 
 /// Whether the tool placing `shape` of `library` draws lines.
@@ -1451,7 +1553,10 @@ pub fn hit_shape(
     p: Pt,
     tolerance: f32,
 ) -> Option<Uuid> {
-    hit_shape_with(session, tolerance, |shape, tol| {
+    hit_shape_with(session, p, tolerance, |shape, tol| {
+        if shape.is_artboard() {
+            return artboard_body_hit(shape, p, tol);
+        }
         outline_hit(&shape_geometry(shape, libs), p, tol)
     })
 }
@@ -1501,8 +1606,19 @@ fn placement_shape(gesture: &Gesture, libs: &LibraryRegistry) -> Option<Shape> {
     else {
         return None;
     };
-    let def = libs.shape(library, shape)?;
     let end = dragged.then_some(*current);
+    if is_artboard_tool(library, shape) {
+        let frame = drag_create(
+            *start,
+            end,
+            ARTBOARD_DEFAULT_SIZE,
+            false,
+            *constrain,
+            *from_center,
+        );
+        return Some(Shape::new_artboard(frame, CUSTOM_ARTBOARD_NAME));
+    }
+    let def = libs.shape(library, shape)?;
     let frame = placement_frame(def, *start, end, *constrain, *from_center);
     Some(Shape::new(def, library, frame))
 }
@@ -1511,16 +1627,19 @@ fn placement_shape(gesture: &Gesture, libs: &LibraryRegistry) -> Option<Shape> {
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        attaches_at, chrome_frame, handle_at, hit_shape, is_drag, is_line_like, marquee_rect,
-        marquee_selection, move_placement, placement_frame, placement_shape, press_kind,
-        press_selection, press_target, preview_shape, resize_cursor, shape_geometry,
-        text_box_widths_off, transformed, visible_handles, Gesture, HandleHit, PressKind,
+        artboard_press, attaches_at, chrome_frame, handle_at, hit_shape, is_drag, is_line_like,
+        marquee_rect, marquee_selection, move_placement, moved_frames_of, placement_frame,
+        placement_shape, press_kind, press_selection, press_target, preview_shape, resize_cursor,
+        shape_geometry, text_box_widths_off, transformed, visible_handles, Gesture, HandleHit,
+        PressKind,
     };
     use gpui_kit::CursorStyle;
     use mindweave_core::geometry::Rect;
     use mindweave_core::geometry::{Frame, Pt};
     use mindweave_core::Handle;
-    use mindweave_core::{builtin_libraries, DocumentSession, LibraryRegistry, Shape};
+    use mindweave_core::{
+        builtin_libraries, DocumentSession, LibraryRegistry, Shape, ARTBOARD_SHAPE, TEXT_LIBRARY,
+    };
     use uuid::Uuid;
 
     fn registry() -> LibraryRegistry {
@@ -1939,19 +2058,19 @@ mod tests {
     fn handles_are_grabbed_within_their_radius() {
         let f = boxed(0., 0., 100., 50.);
         assert_eq!(
-            handle_at(&f, (101., 49.), 6., 12., false),
+            handle_at(&f, (101., 49.), 6., Some(12.), false),
             Some(HandleHit::Resize(Handle::SE))
         );
         assert_eq!(
-            handle_at(&f, (50., 2.), 6., 12., false),
+            handle_at(&f, (50., 2.), 6., Some(12.), false),
             Some(HandleHit::Resize(Handle::N))
         );
         assert_eq!(
-            handle_at(&f, (50., -11.), 6., 12., false),
+            handle_at(&f, (50., -11.), 6., Some(12.), false),
             Some(HandleHit::Rotate)
         );
-        assert_eq!(handle_at(&f, (50., 25.), 6., 12., false), None);
-        assert_eq!(handle_at(&f, (108., 50.), 6., 12., false), None);
+        assert_eq!(handle_at(&f, (50., 25.), 6., Some(12.), false), None);
+        assert_eq!(handle_at(&f, (108., 50.), 6., Some(12.), false), None);
     }
 
     #[test]
@@ -2052,7 +2171,7 @@ mod tests {
             8
         );
         // Nothing to grab in the middle of a flat line.
-        assert_eq!(handle_at(&flat, (50., 50.), 6., 12., false), None);
+        assert_eq!(handle_at(&flat, (50., 50.), 6., Some(12.), false), None);
     }
 
     #[test]
@@ -2060,12 +2179,28 @@ mod tests {
         let [line] = ids();
         let flat = boxed(0., 50., 100., 0.);
         assert_eq!(
-            press_target(Some(&flat), (50., 50.), 6., 12., false, Some(line), false),
+            press_target(
+                Some(&flat),
+                (50., 50.),
+                6.,
+                Some(12.),
+                false,
+                Some(line),
+                false
+            ),
             PressKind::Move(line)
         );
         // Its ends still resize.
         assert_eq!(
-            press_target(Some(&flat), (100., 50.), 6., 12., false, Some(line), false),
+            press_target(
+                Some(&flat),
+                (100., 50.),
+                6.,
+                Some(12.),
+                false,
+                Some(line),
+                false
+            ),
             PressKind::Resize(Handle::NE)
         );
     }
@@ -2136,13 +2271,13 @@ mod tests {
         assert_eq!(kept.len(), 2);
         assert!(kept.contains(&Handle::E) && kept.contains(&Handle::W));
         // Corners are not grabbed; the sides are.
-        assert_eq!(handle_at(&f, (100., 30.), 6., 12., true), None);
+        assert_eq!(handle_at(&f, (100., 30.), 6., Some(12.), true), None);
         assert_eq!(
-            handle_at(&f, (100., 15.), 6., 12., true),
+            handle_at(&f, (100., 15.), 6., Some(12.), true),
             Some(HandleHit::Resize(Handle::E))
         );
         assert_eq!(
-            handle_at(&f, (50., -12.), 6., 12., true),
+            handle_at(&f, (50., -12.), 6., Some(12.), true),
             Some(HandleHit::Rotate)
         );
         // Other shapes keep all eight.
@@ -2154,23 +2289,166 @@ mod tests {
         let [tiny] = ids();
         let f = boxed(0., 0., 8., 8.);
         assert_eq!(
-            press_target(Some(&f), (4., 4.), 6., 12., false, Some(tiny), false),
+            press_target(Some(&f), (4., 4.), 6., Some(12.), false, Some(tiny), false),
             PressKind::Move(tiny)
         );
         // Outside the body a corner still resizes.
         assert_eq!(
-            press_target(Some(&f), (10., 10.), 6., 12., false, None, false),
+            press_target(Some(&f), (10., 10.), 6., Some(12.), false, None, false),
             PressKind::Resize(Handle::SE)
         );
         // A larger shape keeps handles first.
         let big = boxed(0., 0., 100., 100.);
         assert_eq!(
-            press_target(Some(&big), (2., 2.), 6., 12., false, Some(tiny), false),
+            press_target(
+                Some(&big),
+                (2., 2.),
+                6.,
+                Some(12.),
+                false,
+                Some(tiny),
+                false
+            ),
             PressKind::Resize(Handle::NW)
         );
         assert_eq!(
-            press_target(None, (2., 2.), 6., 12., false, None, true),
+            press_target(None, (2., 2.), 6., Some(12.), false, None, true),
             PressKind::Marquee { additive: true }
+        );
+    }
+
+    fn artboard(x: f32, y: f32, w: f32, h: f32) -> Shape {
+        Shape::new_artboard(boxed(x, y, w, h), "Board")
+    }
+
+    #[test]
+    fn moving_an_artboard_and_one_of_its_members_moves_each_once() {
+        let libs = registry();
+        let def = libs.shape("basic-shapes", "rectangle").unwrap();
+        let a = artboard(0., 0., 100., 100.);
+        let mut m1 = Shape::new(def, "basic-shapes", boxed(10., 10., 20., 20.));
+        let mut m2 = Shape::new(def, "basic-shapes", boxed(50., 10., 20., 20.));
+        let other = Shape::new(def, "basic-shapes", boxed(300., 0., 20., 20.));
+        m1.artboard = Some(a.id);
+        m2.artboard = Some(a.id);
+        let shapes = vec![a.clone(), m1.clone(), m2.clone(), other];
+        let moved = moved_frames_of(&shapes, &[m1.id, a.id]);
+        let ids: Vec<Uuid> = moved.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![a.id, m1.id, m2.id]);
+        // A member alone moves alone.
+        let ids: Vec<Uuid> = moved_frames_of(&shapes, &[m2.id])
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(ids, vec![m2.id]);
+    }
+
+    #[test]
+    fn a_press_on_an_artboard_selects_it_and_cmd_draws_a_marquee() {
+        let [board, member] = ids();
+        // On the artboard's empty area: select and move it...
+        assert_eq!(
+            artboard_press(PressKind::Move(board), true, false, false),
+            PressKind::Move(board)
+        );
+        // ...with Cmd, a marquee that selects it if it ends as a click.
+        assert_eq!(
+            artboard_press(PressKind::Move(board), true, true, true),
+            PressKind::ArtboardMarquee {
+                artboard: board,
+                additive: true
+            }
+        );
+        // Cmd on a member still picks it out of its group.
+        assert_eq!(
+            artboard_press(PressKind::Move(member), false, true, false),
+            PressKind::Move(member)
+        );
+        // Handles keep winning.
+        let resize = PressKind::Resize(Handle::SE);
+        assert_eq!(artboard_press(resize, true, true, false), resize);
+    }
+
+    #[test]
+    fn members_are_hit_above_their_artboard_and_only_inside_it() {
+        let libs = registry();
+        let (_dir, mut s) = session();
+        let below = add(
+            &mut s,
+            &libs,
+            "basic-shapes",
+            "rectangle",
+            (200., 0., 100., 100.),
+        );
+        // Stored above the rectangle, but painted beneath every shape.
+        let a = artboard(0., 0., 250., 200.);
+        let board = a.id;
+        s.add_shapes(vec![a]);
+        let member = add(
+            &mut s,
+            &libs,
+            "basic-shapes",
+            "rectangle",
+            (20., 150., 100., 100.),
+        );
+        s.update_shapes(&[member], |m| m.artboard = Some(board));
+        assert_eq!(hit_shape(&s, &libs, (220., 50.), 1.), Some(below));
+        assert_eq!(hit_shape(&s, &libs, (50., 50.), 1.), Some(board));
+        assert_eq!(hit_shape(&s, &libs, (50., 180.), 1.), Some(member));
+        // The member's part below the artboard is clipped away.
+        assert_eq!(hit_shape(&s, &libs, (50., 230.), 1.), None);
+        // Without clipping it shows, and is hit, whole.
+        s.update_shapes(&[board], |b| {
+            b.artboard_props.as_mut().unwrap().clip = false
+        });
+        assert_eq!(hit_shape(&s, &libs, (50., 230.), 1.), Some(member));
+        // An artboard without a fill is still hit across its frame.
+        s.update_shapes(&[board], |b| b.style.fill = None);
+        assert_eq!(hit_shape(&s, &libs, (50., 50.), 1.), Some(board));
+    }
+
+    #[test]
+    fn without_a_rotate_handle_only_resize_handles_are_grabbed() {
+        let f = boxed(0., 0., 100., 50.);
+        assert_eq!(handle_at(&f, (50., -12.), 6., None, false), None);
+        assert_eq!(
+            handle_at(&f, (50., 0.), 6., None, false),
+            Some(HandleHit::Resize(Handle::N))
+        );
+    }
+
+    #[test]
+    fn the_artboard_tool_draws_or_places_a_named_artboard() {
+        let libs = registry();
+        let placing = |current: (f32, f32), constrain: bool, dragged: bool| Gesture::Placing {
+            start: (100., 100.),
+            current,
+            library: TEXT_LIBRARY.into(),
+            shape: ARTBOARD_SHAPE.into(),
+            constrain,
+            from_center: false,
+            dragged,
+        };
+        let drawn = placement_shape(&placing((400., 250.), false, true), &libs).unwrap();
+        assert!(drawn.is_artboard());
+        assert_eq!(drawn.name.as_deref(), Some("Artboard"));
+        assert_eq!(
+            (drawn.frame.x, drawn.frame.y, drawn.frame.w, drawn.frame.h),
+            (100., 100., 300., 150.)
+        );
+        // Shift keeps it square.
+        let square = placement_shape(&placing((400., 250.), true, true), &libs).unwrap();
+        assert_eq!((square.frame.w, square.frame.h), (300., 300.));
+        // A click places 400 x 400 centred on it.
+        let clicked = placement_shape(&placing((100., 100.), false, false), &libs).unwrap();
+        assert_eq!(
+            (
+                clicked.frame.x,
+                clicked.frame.y,
+                clicked.frame.w,
+                clicked.frame.h
+            ),
+            (-100., -100., 400., 400.)
         );
     }
 }

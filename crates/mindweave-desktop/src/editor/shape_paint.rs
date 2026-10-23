@@ -512,7 +512,8 @@ pub fn paint_shapes(
 /// Paints the names of the artboards on `page`'s visible layers above
 /// their top-left corners, at one size whatever the zoom: muted, or in
 /// the accent colour for those in `selection`. Painted after every shape, so no
-/// member covers a name.
+/// member covers a name. Returns the artboards whose names it painted,
+/// each with its name's width in pixels, for hit-testing.
 pub fn paint_artboard_names(
     window: &mut Window,
     cx: &mut App,
@@ -520,7 +521,8 @@ pub fn paint_artboard_names(
     page: &Page,
     vp: &Viewport,
     selection: &[Uuid],
-) {
+) -> Vec<(Uuid, f32)> {
+    let mut painted = Vec::new();
     let (muted, accent) = (cx.theme().muted_foreground, cx.theme().primary);
     let extent = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     let font = window.text_style().font();
@@ -565,8 +567,10 @@ pub fn paint_artboard_names(
             let origin = bounds.origin + point(px(r.x), px(r.y));
             line.paint(origin, px(r.h), TextAlign::Left, None, window, cx)
                 .ok();
+            painted.push((shape.id, r.w));
         }
     });
+    painted
 }
 
 /// Paints the branch lines and summary brackets of `page`'s mind maps,

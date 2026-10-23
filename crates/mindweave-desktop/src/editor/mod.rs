@@ -1,6 +1,7 @@
 //! The editor window for one document: ribbon, Layers panel, canvas, page
 //! tabs, Properties panel and status bar.
 
+mod artboard_edit;
 mod canvas;
 mod cards;
 mod color_palette;
@@ -53,8 +54,8 @@ use crate::actions::{
     Cancel, CloseWindow, Cut, Delete, Duplicate, EditEquation, EditLabel, EditNote, EditText,
     Group, NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp,
     NudgeUpFar, Paste, Redo, Save, SelectAll, SendBackward, SendToBack, ToggleBoundary,
-    ToggleIcons, ToggleLayers, ToggleLeftSidebar, ToggleProperties, ToolEllipse, ToolHand,
-    ToolLine, ToolPointer, ToolRectangle, ToolRelationship, ToolText, Undo, Ungroup,
+    ToggleIcons, ToggleLayers, ToggleLeftSidebar, ToggleProperties, ToolArtboard, ToolEllipse,
+    ToolHand, ToolLine, ToolPointer, ToolRectangle, ToolRelationship, ToolText, Undo, Ungroup,
     EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
 };
 use crate::app_state::AppState;
@@ -108,11 +109,13 @@ pub fn prompt_to_save(
     }
 }
 
-/// What an inline rename edits: a page, or a layer of the active page.
+/// What an inline rename edits: a page, a layer of the active page, or an
+/// artboard of the active layer (its name, over the canvas).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RenameTarget {
     Page(usize),
     Layer(usize),
+    Artboard(Uuid),
 }
 
 /// What a click on a page tab or layer row does.
@@ -233,6 +236,9 @@ pub struct EditorWindow {
     attach_highlight: Option<Uuid>,
     /// Canvas outlines of the shapes painted last frame.
     geometry_cache: GeometryCache,
+    /// The artboards whose names were painted last frame, with each
+    /// name's width in pixels, for hit-testing them.
+    artboard_names: Vec<(Uuid, f32)>,
     /// Pictures decoded for painting.
     image_cache: images::ImageCache,
     /// Topics' equations rendered for fitting and painting.
@@ -319,6 +325,7 @@ impl EditorWindow {
             topic_drag_from: None,
             attach_highlight: None,
             geometry_cache: GeometryCache::default(),
+            artboard_names: Vec::new(),
             image_cache: images::ImageCache::default(),
             equation_cache: crate::equation::EquationCache::default(),
             dot_tile: dot_tile::DotTile::default(),
@@ -503,6 +510,11 @@ impl EditorWindow {
         let name = match target {
             RenameTarget::Page(ix) => self.session.doc().pages.get(ix).map(|p| p.name.clone()),
             RenameTarget::Layer(ix) => self.session.page().layers.get(ix).map(|l| l.name.clone()),
+            RenameTarget::Artboard(id) => self
+                .session
+                .find_shape(id)
+                .filter(|s| s.is_artboard())
+                .map(|s| s.name.clone().unwrap_or_default()),
         };
         let Some(name) = name else {
             return;
@@ -544,6 +556,7 @@ impl EditorWindow {
                 |s| match rename.target {
                     RenameTarget::Page(ix) => s.rename_page(ix, &name),
                     RenameTarget::Layer(ix) => s.rename_layer(ix, &name),
+                    RenameTarget::Artboard(id) => artboard_edit::rename_artboard(s, id, &name),
                 },
                 cx,
             );
@@ -776,6 +789,10 @@ impl EditorWindow {
         self.select_tool(Tool::Text, window, cx);
     }
 
+    fn on_tool_artboard(&mut self, _: &ToolArtboard, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(Tool::Artboard, window, cx);
+    }
+
     fn on_tool_rectangle(
         &mut self,
         _: &ToolRectangle,
@@ -960,15 +977,17 @@ impl EditorWindow {
         );
     }
 
-    /// Adds `shapes` to the active layer as one undo step and selects
-    /// them. A hidden active layer refuses them, as it refuses placing.
+    /// Adds `shapes` to the active layer as one undo step, the loose ones
+    /// joining the artboard they land in, and selects them (an artboard
+    /// without its members). A hidden active layer refuses them, as it
+    /// refuses placing.
     fn add_and_select(&mut self, shapes: Vec<Shape>, window: &mut Window, cx: &mut Context<Self>) {
         if !self.session.active_layer_selectable() {
             window.push_notification(Notification::warning("Show the layer to draw on it."), cx);
             return;
         }
-        let selection = selectable_in_order(&shapes, true);
-        self.update_session(|s| s.add_shapes(shapes), cx);
+        let selection = artboard_edit::without_members(&shapes, selectable_in_order(&shapes, true));
+        self.update_session(|s| artboard_edit::add_with_membership(s, shapes), cx);
         self.selection = selection;
         cx.notify();
     }
@@ -1171,6 +1190,7 @@ impl EditorWindow {
             .children(self.render_note_card(cx))
             .children(self.render_note_tooltip(cx))
             .children(self.render_link_popover(cx))
+            .children(self.render_artboard_rename(cx))
             .on_drop(
                 cx.listener(|this, drag: &icons_panel::IconDrag, window, cx| {
                     // Dropped where the pointer is.
@@ -1481,6 +1501,7 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_tool_pointer))
             .on_action(cx.listener(Self::on_tool_hand))
             .on_action(cx.listener(Self::on_tool_text))
+            .on_action(cx.listener(Self::on_tool_artboard))
             .on_action(cx.listener(Self::on_edit_text))
             .on_action(cx.listener(Self::on_edit_label))
             .on_action(cx.listener(Self::on_add_subtopic))

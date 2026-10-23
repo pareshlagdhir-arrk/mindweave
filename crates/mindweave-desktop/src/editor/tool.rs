@@ -4,6 +4,8 @@
 pub const HOME_TAB: &str = "home";
 /// The ribbon tab holding the mind map tools.
 pub const MINDMAP_TAB: &str = "mindmap";
+/// The ribbon tab holding the artboard tool and presets.
+pub const ARTBOARD_TAB: &str = "artboard";
 /// The built-in library whose tools have their own keys.
 pub const BASIC_SHAPES: &str = "basic-shapes";
 /// Basic Shapes tools with a key of their own: shape id and key.
@@ -19,6 +21,9 @@ pub enum Tool {
     /// Draws a mind map relationship: a curved, dashed arrow between two
     /// topics.
     Relationship,
+    /// Draws an artboard of any size (Custom Artboard); a click places
+    /// one of the default size.
+    Artboard,
     /// Places shape `shape` of library `library`.
     Shape {
         library: String,
@@ -40,6 +45,7 @@ impl Tool {
         match self {
             Tool::Pointer | Tool::Hand | Tool::Text => HOME_TAB,
             Tool::Relationship => MINDMAP_TAB,
+            Tool::Artboard => ARTBOARD_TAB,
             Tool::Shape { library, .. } => library,
         }
     }
@@ -164,6 +170,18 @@ mod tests {
         assert_eq!(state.tab, BASIC_SHAPES);
         state.select(Tool::Hand, false);
         assert_eq!(state.tab, HOME_TAB);
+    }
+
+    #[test]
+    fn the_artboard_tool_shows_its_tab_and_returns_to_pointer() {
+        let mut state = ToolState::default();
+        state.select(Tool::Artboard, false);
+        assert_eq!(state.tab, ARTBOARD_TAB);
+        state.after_place();
+        assert_eq!(state.tool, Tool::Pointer);
+        state.select(Tool::Artboard, true);
+        state.after_place();
+        assert_eq!(state.tool, Tool::Artboard);
     }
 
     #[test]

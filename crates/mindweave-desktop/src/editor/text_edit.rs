@@ -1002,8 +1002,9 @@ pub fn enter_target(session: &DocumentSession, selection: &[Uuid]) -> Option<Uui
 }
 
 /// Opens a text-editing session's gesture and adds a new, empty text box
-/// with its top-left corner at `at` to the active layer inside it, so that
-/// leaving it empty leaves no undo step. Returns the box's id.
+/// with its top-left corner at `at` to the active layer inside it (a
+/// member of the artboard it lands in), so that leaving it empty leaves no
+/// undo step. Returns the box's id.
 pub fn start_new_text_box(
     session: &mut DocumentSession,
     gesture: &mut SessionGesture,
@@ -1014,6 +1015,7 @@ pub fn start_new_text_box(
     let shape = Shape::new_text_box(at);
     let id = shape.id;
     session.add_shapes(vec![shape]);
+    session.assign_membership(&[id]);
     id
 }
 
@@ -1276,12 +1278,16 @@ impl EditorWindow {
 
     /// A double click or Text-tool click at canvas point `at`: edits the
     /// text of the shape there (the caret at the click when it lands on
-    /// the text), else adds a new text box there.
+    /// the text), else (on empty canvas or an artboard's empty area) adds a
+    /// new text box there.
     pub(super) fn edit_text_at(&mut self, at: Pt, window: &mut Window, cx: &mut Context<Self>) {
         // A move begun by the first click whose mouse-up was missed is put
         // back before hit-testing.
         self.cancel_gesture(cx);
-        let hit = self.shape_at(at, cx);
+        // An artboard's empty area takes a new text box, not a label.
+        let hit = self
+            .shape_at(at, cx)
+            .filter(|id| !self.session.find_shape(*id).is_some_and(Shape::is_artboard));
         match text_target_at(hit, at) {
             TextTarget::NewBox(at) => self.begin_new_text_box(at, window, cx),
             TextTarget::Existing(id) => {
@@ -2641,7 +2647,7 @@ mod tests {
         s.add_shapes(vec![line]);
         // The label laid out 40 × 16, centred on the line.
         let hit = |s: &DocumentSession, at| {
-            hit_shape_with(s, 1., |shape, tol| {
+            hit_shape_with(s, at, 1., |shape, tol| {
                 outline_hit(&shape_geometry(shape, &libs), at, tol)
                     || on_line_label(shape, Some((40., 16.)), at)
             })

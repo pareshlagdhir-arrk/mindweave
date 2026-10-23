@@ -27,7 +27,7 @@ use super::text_paint::{
     TextPaint, TEXT_BOX_PADDING,
 };
 use super::tool::Tool;
-use super::{hex_to_hsla, EditorWindow};
+use super::{hex_to_hsla, EditorWindow, RenameTarget};
 use crate::actions::{ZoomIn, ZoomOut, ZoomReset};
 use crate::equation::equation_font_size;
 use crate::libraries::Libraries;
@@ -90,8 +90,10 @@ pub fn canvas(editor: Entity<EditorWindow>, page: &Page) -> impl IntoElement {
                     editor.pan_drag.is_some(),
                     editor.left_drag_pans(),
                     ibeam,
-                    matches!(editor.tools.tool, Tool::Shape { .. } | Tool::Relationship)
-                        || matches!(editor.gesture, Gesture::Placing { .. }),
+                    matches!(
+                        editor.tools.tool,
+                        Tool::Shape { .. } | Tool::Relationship | Tool::Artboard
+                    ) || matches!(editor.gesture, Gesture::Placing { .. }),
                     editor.tools.tool == Tool::Text,
                     pointer,
                 )
@@ -325,6 +327,15 @@ fn register_input(
                     if event.click_count >= 2 && editor.note_badge_at(at).is_some() {
                         return;
                     }
+                    // A double click on an artboard's name renames it.
+                    let board = (event.click_count == 2)
+                        .then(|| editor.artboard_name_at(at))
+                        .flatten();
+                    if let Some(board) = board {
+                        editor.cancel_gesture(cx);
+                        editor.begin_rename(RenameTarget::Artboard(board), window, cx);
+                        return;
+                    }
                     if event.click_count == 2 {
                         match editor.equation_at(at) {
                             Some(topic) => editor.open_equation_card(topic, window, cx),
@@ -336,7 +347,7 @@ fn register_input(
                         Tool::Pointer => {
                             editor.begin_pointer_press(at, event.modifiers, window, cx)
                         }
-                        Tool::Shape { .. } | Tool::Relationship => {
+                        Tool::Shape { .. } | Tool::Relationship | Tool::Artboard => {
                             editor.begin_placing(at, event.modifiers, window, cx)
                         }
                         Tool::Text => editor.place_text_box(at, window, cx),
@@ -465,7 +476,8 @@ impl EditorWindow {
             &mut self.equation_cache,
             &mut text,
         );
-        paint_artboard_names(window, cx, bounds, page, &viewport, &self.selection);
+        self.artboard_names =
+            paint_artboard_names(window, cx, bounds, page, &viewport, &self.selection);
         self.equation_cache.end_frame(window);
         self.paint_text_edit(bounds, window, cx);
         self.text_layouts.end_frame();
@@ -515,7 +527,7 @@ impl EditorWindow {
                 bounds,
                 &viewport,
                 &chrome,
-                handles.then_some(ROTATE_HANDLE_OFFSET_PX),
+                (handles && self.chrome_rotates()).then_some(ROTATE_HANDLE_OFFSET_PX),
                 &resize,
                 accent,
             );

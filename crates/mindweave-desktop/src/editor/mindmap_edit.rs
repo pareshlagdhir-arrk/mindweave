@@ -61,7 +61,15 @@ impl EditorWindow {
         let view = self.visible_canvas();
         let at = (view.x + view.w / 2., view.y + view.h / 2.);
         let mut id = None;
-        self.update_session(|s| id = Some(s.add_central_topic(at)), cx);
+        self.update_session(
+            |s| {
+                let central = s.add_central_topic(at);
+                // Added inside an artboard, the map joins it.
+                s.assign_membership(&[central]);
+                id = Some(central);
+            },
+            cx,
+        );
         if let Some(id) = id {
             self.select_and_name(id, window, cx);
         }
@@ -90,6 +98,10 @@ impl EditorWindow {
                     NewTopic::Sub => s.add_subtopic(topic),
                     NewTopic::After => s.add_sibling(topic, false),
                     NewTopic::Before => s.add_sibling(topic, true),
+                };
+                // The new topic shares its map's artboard.
+                if let Some(id) = added {
+                    s.assign_membership(&[id]);
                 }
             },
             cx,
@@ -108,7 +120,16 @@ impl EditorWindow {
         self.begin_edit_action(window, cx);
         let topics = self.selected_topics();
         let mut added = None;
-        self.update_session(|s| added = s.add_summary(&topics), cx);
+        self.update_session(
+            |s| {
+                added = s.add_summary(&topics);
+                // The summary shares its map's artboard.
+                if let Some(id) = added {
+                    s.assign_membership(&[id]);
+                }
+            },
+            cx,
+        );
         match added {
             Some(id) => self.select_and_name(id, window, cx),
             None => window.push_notification(
