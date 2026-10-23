@@ -410,15 +410,13 @@ pub fn paint_shapes(
     cache.begin_frame();
     cache.update_jumps(page);
     images.begin_frame();
+    // Computed once; each layer paints the decor of its own topics.
+    let decor = page_map_decor(page);
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
-        paint_map_decor(window, page, &painter);
         // Layers are stored top first.
         for layer in page.layers.iter().rev().filter(|l| l.visible) {
             let clips = artboard_clips(&layer.objects, vp, painter.extent());
-            // A layer's artboards lie beneath its other shapes.
-            let artboards = layer.objects.iter().filter(|s| s.is_artboard());
-            let others = layer.objects.iter().filter(|s| !s.is_artboard());
-            for shape in artboards.chain(others) {
+            let mut paint_shape = |window: &mut Window, shape: &Shape| {
                 // Members of a clipping artboard show inside it only; none
                 // of a member shows while its artboard is off the canvas.
                 let clip_rect = shape.artboard.and_then(|a| clips.get(&a));
@@ -502,6 +500,16 @@ pub fn paint_shapes(
                     }
                     paint_shape_text(window, cx, bounds, vp, shape, visible, text);
                 });
+            };
+            // A layer's artboards lie beneath its mind maps' branches and
+            // brackets, and those beneath its other shapes.
+            for shape in layer.objects.iter().filter(|s| s.is_artboard()) {
+                paint_shape(window, shape);
+            }
+            let here = layer_decor(&decor, &layer.objects);
+            paint_map_decor(window, bounds, &painter, &here, &clips);
+            for shape in layer.objects.iter().filter(|s| !s.is_artboard()) {
+                paint_shape(window, shape);
             }
         }
     });
@@ -573,9 +581,13 @@ pub fn paint_artboard_names(
     painted
 }
 
-/// Paints the branch lines and summary brackets of `page`'s mind maps,
-/// beneath every shape, each in the stroke of the topic it leads to.
-fn paint_map_decor(window: &mut Window, page: &Page, painter: &ShapePainter) {
+/// A branch line or summary bracket of a mind map: the topic it leads to
+/// (whose stroke colours it), and its geometry.
+type DecorItem<'a> = (&'a Shape, &'a Geometry);
+
+/// The branch lines and summary brackets of `page`'s mind maps, by the
+/// topic each leads to.
+fn page_map_decor(page: &Page) -> Vec<(Uuid, Geometry)> {
     let shapes: HashMap<Uuid, &Shape> = page
         .layers
         .iter()
@@ -584,19 +596,37 @@ fn paint_map_decor(window: &mut Window, page: &Page, painter: &ShapePainter) {
         .map(|s| (s.id, s))
         .collect();
     if shapes.is_empty() {
-        return;
+        return Vec::new();
     }
     let width = |id: Uuid| shapes.get(&id).map_or(2., |s| s.style.stroke_width.max(1.));
     let decor = map_decor(page, width);
-    let outline = |geometry: Geometry, dash: Option<[f32; 2]>| {
-        let aabb = bounds(&geometry).unwrap_or_default();
-        CanvasGeometry {
-            geometry,
-            aabb,
-            placeholder: false,
-            dash,
-        }
-    };
+    decor.branches.into_iter().chain(decor.brackets).collect()
+}
+
+/// The items of `decor` whose topics are among `objects` (one layer's),
+/// each with its topic, in `decor`'s order.
+fn layer_decor<'a>(decor: &'a [(Uuid, Geometry)], objects: &'a [Shape]) -> Vec<DecorItem<'a>> {
+    let topics: HashMap<Uuid, &Shape> = objects
+        .iter()
+        .filter(|s| s.topic.is_some())
+        .map(|s| (s.id, s))
+        .collect();
+    decor
+        .iter()
+        .filter_map(|(id, g)| Some((*topics.get(id)?, g)))
+        .collect()
+}
+
+/// Paints one layer's branch lines and summary brackets (`items`), each
+/// in the stroke of its topic and clipped by its topic's artboard
+/// (`clips`, see [`artboard_clips`]) the same as the topic.
+fn paint_map_decor(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    painter: &ShapePainter,
+    items: &[DecorItem],
+    clips: &HashMap<Uuid, Rect>,
+) {
     let line_style = |s: &Shape| Style {
         fill: None,
         stroke: s.style.stroke.clone(),
@@ -604,11 +634,26 @@ fn paint_map_decor(window: &mut Window, page: &Page, painter: &ShapePainter) {
         opacity: s.style.opacity,
         ..Style::default()
     };
-    for (id, g) in decor.branches.into_iter().chain(decor.brackets) {
-        let Some(s) = shapes.get(&id) else { continue };
-        let o = outline(g, None);
-        if painter.visible(&line_style(s), &o) {
-            painter.paint_paths(&painter.tessellate(&line_style(s), &o), window);
+    for (topic, geometry) in items {
+        let clip_rect = topic.artboard.and_then(|a| clips.get(&a));
+        if clip_rect.is_some_and(|r| r.w <= 0. || r.h <= 0.) {
+            continue;
+        }
+        let clip = clip_rect.map(|r| ContentMask {
+            bounds: Bounds::new(bounds.origin + point(px(r.x), px(r.y)), size_of(r.w, r.h)),
+        });
+        let aabb = mindweave_core::geometry::bounds(geometry).unwrap_or_default();
+        let outline = CanvasGeometry {
+            geometry: (*geometry).clone(),
+            aabb,
+            placeholder: false,
+            dash: None,
+        };
+        let style = line_style(topic);
+        if painter.visible(&style, &outline) {
+            window.with_content_mask(clip, |window| {
+                painter.paint_paths(&painter.tessellate(&style, &outline), window);
+            });
         }
     }
 }
@@ -1110,10 +1155,10 @@ fn push_built(builder: PathBuilder, color: Hsla, paths: &mut Vec<(Path<Pixels>, 
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        artboard_clips, name_label_rect, overlaps_canvas, placeholder_label, screen_rect,
-        screen_stroke_width, shape_geometry, GeometryCache,
+        artboard_clips, layer_decor, name_label_rect, overlaps_canvas, placeholder_label,
+        screen_rect, screen_stroke_width, shape_geometry, GeometryCache,
     };
-    use mindweave_core::geometry::{Frame, Rect};
+    use mindweave_core::geometry::{Frame, Geometry, Rect};
     use mindweave_core::{builtin_libraries, LibraryRegistry, LineDash, Shape, Viewport};
 
     fn registry() -> LibraryRegistry {
@@ -1333,5 +1378,31 @@ mod tests {
         let gone = clips[&away.id];
         assert!(gone.w <= 0. || gone.h <= 0.);
         assert!(!clips.contains_key(&open.id));
+    }
+
+    #[test]
+    fn each_layer_paints_the_decor_of_its_own_topics() {
+        let libs = registry();
+        let (a, b) = (
+            Shape::new_topic(frame(0., 0., 50., 20.)),
+            Shape::new_topic(frame(100., 0., 50., 20.)),
+        );
+        let plain = rectangle(&libs, frame(0., 50., 10., 10.));
+        let decor = vec![
+            (a.id, Geometry::default()),
+            (b.id, Geometry::default()),
+            (plain.id, Geometry::default()),
+        ];
+        let upper = vec![b.clone()];
+        let lower = vec![a.clone(), plain];
+        let ids = |objects: &[Shape]| -> Vec<_> {
+            layer_decor(&decor, objects)
+                .iter()
+                .map(|(t, _)| t.id)
+                .collect()
+        };
+        // Only topics carry decor, each on its own layer.
+        assert_eq!(ids(&lower), vec![a.id]);
+        assert_eq!(ids(&upper), vec![b.id]);
     }
 }

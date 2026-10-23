@@ -20,7 +20,7 @@ use uuid::Uuid;
 use super::properties_panel::{
     field_row, FIELD_GAP, NUMBER_INPUT_WIDTH, RESET_WIDTH, ROW_HEIGHT, SWATCH_SIZE,
 };
-use super::{artboard_properties, line_properties, text_properties};
+use super::{artboard_edit, artboard_properties, line_properties, text_properties};
 use super::{hex_to_hsla, hsla_to_hex, parse_number, section_label, EditorWindow, SMALL_TEXT_SIZE};
 use crate::actions::{BringForward, BringToFront, Group, SendBackward, SendToBack, Ungroup};
 use crate::libraries::{lucide_icon_path, Libraries};
@@ -387,6 +387,8 @@ fn shown_text(summary: Option<&Summary>, kind: &NumberKind) -> Option<String> {
 
 /// Sets `value` (typed into field `kind`) on the shapes with `ids` as one
 /// undo step. Values are clamped (and parameters snapped) to their range.
+/// A typed position carries an artboard's members with it, and the edited
+/// shapes' artboard membership is settled in the same step.
 pub(super) fn apply_number(
     session: &mut DocumentSession,
     ids: &[Uuid],
@@ -407,7 +409,35 @@ pub(super) fn apply_number(
                 .into_iter()
                 .zip(edit_bounds(&frames, *field, value))
                 .collect();
-            session.update_shapes(ids, |s| {
+            // An artboard's members travel with it: by how far its corner
+            // moved (a width or height leaves them where they are).
+            let shifts: HashMap<Uuid, (f32, f32)> = session
+                .shapes_on_active_layer()
+                .iter()
+                .filter(|s| s.is_artboard())
+                .filter_map(|s| {
+                    let f = edited.get(&s.id)?;
+                    let d = (f.x - s.frame.x, f.y - s.frame.y);
+                    (d != (0., 0.)).then_some((s.id, d))
+                })
+                .collect();
+            let members: Vec<Uuid> = session
+                .shapes_on_active_layer()
+                .iter()
+                .filter(|s| !edited.contains_key(&s.id))
+                .filter(|s| s.artboard.is_some_and(|a| shifts.contains_key(&a)))
+                .map(|s| s.id)
+                .collect();
+            let touched: Vec<Uuid> = ids.iter().copied().chain(members).collect();
+            session.update_shapes(&touched, |s| {
+                if let Some((dx, dy)) = s
+                    .artboard
+                    .filter(|_| !edited.contains_key(&s.id))
+                    .and_then(|a| shifts.get(&a))
+                {
+                    s.frame.x += dx;
+                    s.frame.y += dy;
+                }
                 if let Some(f) = edited.get(&s.id) {
                     // A text box given a width stops growing with its text.
                     if f.w != s.frame.w {
@@ -423,6 +453,12 @@ pub(super) fn apply_number(
                     s.frame = f;
                 }
             });
+            // Shapes typed across an artboard's edge join or leave it, in
+            // the same undo step.
+            let targets = artboard_edit::membership_targets(session.shapes_on_active_layer(), ids);
+            if !targets.is_empty() {
+                session.assign_membership(&targets);
+            }
         }
         NumberKind::Rotation => session.update_shapes(ids, |s| s.frame.rotation = value),
         NumberKind::StrokeWidth => {
@@ -1353,7 +1389,9 @@ mod tests {
         let libs = libs();
         let central = Shape::new_topic(frame(0., 0., 100., 40.));
         let mut child = Shape::new_topic(frame(0., 0., 100., 40.));
-        child.topic = Some(mindweave_core::TopicProps::child(central.id, central.id, 0.));
+        child.topic = Some(mindweave_core::TopicProps::child(
+            central.id, central.id, 0.,
+        ));
         let boundary = Shape::new_boundary(vec![central.id], None);
         let title = |shapes: &[&Shape]| summarize(shapes, &libs).unwrap().title;
         assert_eq!(title(&[&central]), "Central Topic");
@@ -1568,5 +1606,100 @@ mod tests {
             Some(String::new())
         );
         assert_eq!(text(None, NumberKind::Rotation), Some(String::new()));
+    }
+
+    #[test]
+    fn typing_an_artboards_position_moves_its_members_in_one_step() {
+        let libs = libs();
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("a.mindweave")).unwrap();
+        let board = Shape::new_artboard(frame(0.0, 0.0, 100.0, 100.0), "Board");
+        let mut member = shape(&libs, "rectangle", frame(10.0, 10.0, 20.0, 20.0));
+        member.artboard = Some(board.id);
+        let (bid, mid) = (board.id, member.id);
+        s.add_shapes(vec![board, member]);
+        let pos = |s: &DocumentSession, id| {
+            let f = s.find_shape(id).unwrap().frame;
+            (f.x, f.y)
+        };
+        let kind = |field| NumberKind::Bounds(field);
+        apply_number(&mut s, &[bid], &kind(BoundsField::X), 300.0, &libs);
+        apply_number(&mut s, &[bid], &kind(BoundsField::Y), 50.0, &libs);
+        assert_eq!(pos(&s, bid), (300.0, 50.0));
+        assert_eq!(pos(&s, mid), (310.0, 60.0));
+        assert_eq!(s.find_shape(mid).unwrap().artboard, Some(bid));
+        // One undo per field restores the frame and its member together.
+        assert!(s.undo());
+        assert_eq!(pos(&s, bid), (300.0, 0.0));
+        assert_eq!(pos(&s, mid), (310.0, 10.0));
+        assert!(s.undo());
+        assert_eq!(pos(&s, bid), (0.0, 0.0));
+        assert_eq!(pos(&s, mid), (10.0, 10.0));
+    }
+
+    #[test]
+    fn resizing_an_artboard_by_number_neither_captures_nor_scales() {
+        let libs = libs();
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("a.mindweave")).unwrap();
+        let board = Shape::new_artboard(frame(0.0, 0.0, 100.0, 100.0), "Board");
+        let mut member = shape(&libs, "rectangle", frame(10.0, 10.0, 20.0, 20.0));
+        member.artboard = Some(board.id);
+        let loose = shape(&libs, "rectangle", frame(150.0, 150.0, 20.0, 20.0));
+        let (bid, mid, lid) = (board.id, member.id, loose.id);
+        s.add_shapes(vec![board, member, loose]);
+        apply_number(
+            &mut s,
+            &[bid],
+            &NumberKind::Bounds(BoundsField::W),
+            400.0,
+            &libs,
+        );
+        apply_number(
+            &mut s,
+            &[bid],
+            &NumberKind::Bounds(BoundsField::H),
+            5.0,
+            &libs,
+        );
+        let get = |id| s.find_shape(id).unwrap().clone();
+        assert_eq!((get(bid).frame.w, get(bid).frame.h), (400.0, 5.0));
+        assert_eq!(get(mid).frame, frame(10.0, 10.0, 20.0, 20.0));
+        assert_eq!(get(mid).artboard, Some(bid));
+        assert_eq!(get(lid).artboard, None);
+    }
+
+    #[test]
+    fn typing_a_shapes_position_settles_its_membership() {
+        let libs = libs();
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("a.mindweave")).unwrap();
+        let board = Shape::new_artboard(frame(0.0, 0.0, 100.0, 100.0), "Board");
+        let r = shape(&libs, "rectangle", frame(300.0, 10.0, 20.0, 20.0));
+        let (bid, rid) = (board.id, r.id);
+        s.add_shapes(vec![board, r]);
+        let member = |s: &DocumentSession| s.find_shape(rid).unwrap().artboard;
+        apply_number(
+            &mut s,
+            &[rid],
+            &NumberKind::Bounds(BoundsField::X),
+            40.0,
+            &libs,
+        );
+        assert_eq!(member(&s), Some(bid));
+        // The move and the membership are one undo step.
+        assert!(s.undo());
+        assert_eq!(s.find_shape(rid).unwrap().frame.x, 300.0);
+        assert_eq!(member(&s), None);
+        assert!(s.redo());
+        assert_eq!(member(&s), Some(bid));
+        apply_number(
+            &mut s,
+            &[rid],
+            &NumberKind::Bounds(BoundsField::Y),
+            500.0,
+            &libs,
+        );
+        assert_eq!(member(&s), None);
     }
 }

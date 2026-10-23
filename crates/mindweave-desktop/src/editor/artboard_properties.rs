@@ -84,6 +84,17 @@ fn set_clip(session: &mut DocumentSession, ids: &[Uuid], clip: bool) {
     });
 }
 
+/// Whether the name field, showing `shows` (artboard and name), must show
+/// `wanted` instead: always for another artboard, even while it is being
+/// typed in, but a new name of the same artboard waits until it is not.
+fn needs_show(shows: Option<&(Uuid, String)>, wanted: &(Uuid, String), focused: bool) -> bool {
+    match shows {
+        Some((id, _)) if *id != wanted.0 => true,
+        Some(shown) => shown != wanted && !focused,
+        None => true,
+    }
+}
+
 /// The name field, and the artboard and name it shows.
 pub struct ArtboardFields {
     pub name: Entity<InputState>,
@@ -98,6 +109,11 @@ impl ArtboardFields {
         let subscription = cx.subscribe_in(&name, window, |this, input, event, window, cx| {
             if !matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                 return;
+            }
+            // Leaving the field lets it catch up with a name changed
+            // while it was being typed in.
+            if matches!(event, InputEvent::Blur) {
+                cx.notify();
             }
             let Some((id, shown)) = this.artboard_fields.shows.clone() else {
                 return;
@@ -136,7 +152,8 @@ impl EditorWindow {
     }
 
     /// Shows the selected artboard's name in the name field when the
-    /// selection or the name changed (not while it is being typed in).
+    /// selection or the name changed (see [`needs_show`]), so Enter always
+    /// renames the artboard the field shows.
     pub(super) fn sync_artboard_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted = match self.selected_artboards()[..] {
             [board] => Some((board.id, board.name.clone().unwrap_or_default())),
@@ -146,11 +163,9 @@ impl EditorWindow {
             self.artboard_fields.shows = None;
             return;
         };
-        if self.artboard_fields.shows.as_ref() == Some(&wanted) {
-            return;
-        }
         let input = self.artboard_fields.name.clone();
-        if input.read(cx).focus_handle(cx).is_focused(window) {
+        let focused = input.read(cx).focus_handle(cx).is_focused(window);
+        if !needs_show(self.artboard_fields.shows.as_ref(), &wanted, focused) {
             return;
         }
         input.update(cx, |state, cx| {
@@ -255,9 +270,10 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> O
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
-    use super::{preset_of, resize_artboards, set_clip, shown_preset};
+    use super::{needs_show, preset_of, resize_artboards, set_clip, shown_preset};
     use mindweave_core::geometry::Frame;
     use mindweave_core::{DocumentSession, Shape};
+    use uuid::Uuid;
 
     fn board(w: f32, h: f32, name: &str) -> Shape {
         let frame = Frame {
@@ -325,5 +341,20 @@ mod tests {
         assert!(!clips(&s));
         assert!(s.undo());
         assert!(clips(&s));
+    }
+
+    #[test]
+    fn the_name_field_follows_the_selected_artboard_even_while_focused() {
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let shown = (a, "A".to_string());
+        for focused in [false, true] {
+            // Nothing shown yet, or another artboard selected: show it.
+            assert!(needs_show(None, &shown, focused));
+            assert!(needs_show(Some(&shown), &(b, "B".into()), focused));
+            assert!(!needs_show(Some(&shown), &shown, focused));
+        }
+        // The same artboard renamed elsewhere: shown once not typing.
+        assert!(needs_show(Some(&shown), &(a, "A2".into()), false));
+        assert!(!needs_show(Some(&shown), &(a, "A2".into()), true));
     }
 }

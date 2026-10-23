@@ -772,6 +772,11 @@ impl DocumentSession {
     /// Called after the edit that placed or moved them, it joins that
     /// edit's undo step (or the open gesture) rather than making one of its
     /// own; artboards among `ids` are skipped.
+    ///
+    /// It amends the current step: call it only in the same edit as the
+    /// change that caused it (straight after that edit, or inside its
+    /// gesture). Called on its own, its change has no undo step of its own
+    /// and undoing the step before it also undoes unrelated work.
     pub fn assign_membership(&mut self, ids: &[Uuid]) {
         let objects = self.shapes_on_active_layer();
         let changes: std::collections::HashMap<Uuid, Option<Uuid>> =
@@ -782,6 +787,11 @@ impl DocumentSession {
         if changes.is_empty() {
             return;
         }
+        // There must be a step to amend: an open gesture or an edit.
+        debug_assert!(
+            self.gesture.is_some() || self.history.can_undo(),
+            "assign_membership must join the edit that caused it"
+        );
         // A new revision, but no history entry: the step before the edit
         // that caused this restores the old membership too.
         self.last_revision += 1;

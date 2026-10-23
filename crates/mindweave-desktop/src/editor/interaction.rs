@@ -498,6 +498,61 @@ pub fn placement_frame(
     )
 }
 
+/// Sets the frames of the shapes in `frames` on the active layer of
+/// `session`, as one undo step (or in the open gesture).
+fn set_frames(session: &mut DocumentSession, frames: Originals) {
+    let ids: Vec<Uuid> = frames.iter().map(|(id, _)| *id).collect();
+    let frames: HashMap<Uuid, Frame> = frames.into_iter().collect();
+    session.update_shapes(&ids, |shape| {
+        if let Some(f) = frames.get(&shape.id) {
+            shape.frame = *f;
+            if shape.is_artboard() {
+                // Artboards are never rotated or flipped.
+                let f = &mut shape.frame;
+                (f.rotation, f.flip_x, f.flip_y) = (0., false, false);
+            }
+        }
+    });
+}
+
+/// Moves `selection` (with the members of selected artboards) by
+/// `(dx, dy)` and settles the moved shapes' membership, as one undo step.
+pub fn nudge_shapes(session: &mut DocumentSession, selection: &[Uuid], dx: f32, dy: f32) {
+    let moved = Gesture::Moving {
+        start: (0., 0.),
+        originals: moved_frames_of(session.shapes_on_active_layer(), selection),
+    };
+    if let Some(frames) = transformed(&moved, (dx, dy), false, false) {
+        set_frames(session, frames);
+        // Membership joins the nudge's step.
+        settle_membership(session, selection);
+    }
+}
+
+/// The selected lines among `shapes` (the active layer) with an end
+/// attached to a shape that moving `selection` leaves behind, and the
+/// shapes that move: the selection with the members of selected
+/// artboards, so a line joining two members of a moved artboard stays
+/// attached.
+pub fn lines_to_detach(shapes: &[Shape], selection: &[Uuid]) -> (Vec<Uuid>, HashSet<Uuid>) {
+    let picked: HashSet<Uuid> = selection.iter().copied().collect();
+    let moved: HashSet<Uuid> = with_members(shapes, selection).into_iter().collect();
+    let ids = shapes
+        .iter()
+        .filter(|s| picked.contains(&s.id))
+        .filter(|s| {
+            s.line.as_ref().is_some_and(|l| {
+                [l.start, l.end]
+                    .into_iter()
+                    .flatten()
+                    .any(|t| !moved.contains(&t))
+            })
+        })
+        .map(|s| s.id)
+        .collect();
+    (ids, moved)
+}
+
 /// What moving `selection` moves among `shapes` (the active layer), with
 /// its frames, back to front: the selected shapes and the members of
 /// selected artboards, each once.
@@ -1075,37 +1130,13 @@ impl EditorWindow {
             return;
         }
         self.detach_moved_lines(cx);
-        let moved = Gesture::Moving {
-            start: (0., 0.),
-            originals: self.moved_frames(),
-        };
-        if let Some(frames) = transformed(&moved, (dx, dy), false, false) {
-            self.apply_frames(frames, cx);
-            // Membership joins the nudge's step.
-            let ids = self.selection.clone();
-            self.update_session(|s| settle_membership(s, &ids), cx);
-        }
+        let ids = self.selection.clone();
+        self.update_session(|s| nudge_shapes(s, &ids, dx, dy), cx);
     }
 
     /// Sets the frames of the shapes in `frames` (on the active layer).
     fn apply_frames(&mut self, frames: Originals, cx: &mut Context<Self>) {
-        let ids: Vec<Uuid> = frames.iter().map(|(id, _)| *id).collect();
-        let frames: HashMap<Uuid, Frame> = frames.into_iter().collect();
-        self.update_session(
-            |s| {
-                s.update_shapes(&ids, |shape| {
-                    if let Some(f) = frames.get(&shape.id) {
-                        shape.frame = *f;
-                        if shape.is_artboard() {
-                            // Artboards are never rotated or flipped.
-                            let f = &mut shape.frame;
-                            (f.rotation, f.flip_x, f.flip_y) = (0., false, false);
-                        }
-                    }
-                })
-            },
-            cx,
-        );
+        self.update_session(|s| set_frames(s, frames), cx);
     }
 
     /// Sets whether the text boxes in `widths` grow with their text.
@@ -1431,25 +1462,12 @@ impl EditorWindow {
         );
     }
 
-    /// Lets go the ends of selected lines attached to shapes that are not
-    /// selected, so moving a line on its own moves it off them.
+    /// Lets go the ends of selected lines attached to shapes that do not
+    /// move with them (see [`lines_to_detach`]), so moving a line on its
+    /// own moves it off them.
     fn detach_moved_lines(&mut self, cx: &mut Context<Self>) {
-        let selected: HashSet<Uuid> = self.selection.iter().copied().collect();
-        let ids: Vec<Uuid> = self
-            .session
-            .shapes_on_active_layer()
-            .iter()
-            .filter(|s| selected.contains(&s.id))
-            .filter(|s| {
-                s.line.as_ref().is_some_and(|l| {
-                    [l.start, l.end]
-                        .into_iter()
-                        .flatten()
-                        .any(|t| !selected.contains(&t))
-                })
-            })
-            .map(|s| s.id)
-            .collect();
+        let (ids, selected) =
+            lines_to_detach(self.session.shapes_on_active_layer(), &self.selection);
         if ids.is_empty() {
             return;
         }
@@ -1628,10 +1646,10 @@ mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
         artboard_press, attaches_at, chrome_frame, dropped_shapes, handle_at, hit_shape, is_drag,
-        is_line_like, marquee_rect, marquee_selection, move_placement, moved_frames_of,
-        placement_frame, placement_shape, press_kind, press_selection, press_target, preview_shape,
-        resize_cursor, shape_geometry, text_box_widths_off, transformed, visible_handles, Gesture,
-        HandleHit, PressKind,
+        is_line_like, lines_to_detach, marquee_rect, marquee_selection, move_placement,
+        moved_frames_of, nudge_shapes, placement_frame, placement_shape, press_kind,
+        press_selection, press_target, preview_shape, resize_cursor, shape_geometry,
+        text_box_widths_off, transformed, visible_handles, Gesture, HandleHit, PressKind,
     };
     use gpui_kit::CursorStyle;
     use mindweave_core::geometry::Rect;
@@ -2474,5 +2492,99 @@ mod tests {
             original: Box::new(line),
         };
         assert!(dropped_shapes(&bend, &[a]).is_empty());
+    }
+
+    #[test]
+    fn a_member_line_moved_with_its_artboard_stays_attached_to_members() {
+        let board = Shape::new_artboard(
+            Frame {
+                w: 200.,
+                h: 200.,
+                ..Frame::default()
+            },
+            "Board",
+        );
+        let libs = registry();
+        let def = libs.shape("basic-shapes", "rectangle").unwrap();
+        let member = |x: f32| {
+            let f = Frame {
+                x,
+                w: 10.,
+                h: 10.,
+                ..Frame::default()
+            };
+            let mut s = Shape::new(def, "basic-shapes", f);
+            s.artboard = Some(board.id);
+            s
+        };
+        let (a, b, mut outside) = (member(10.), member(100.), member(300.));
+        outside.artboard = None;
+        let line = |end: Uuid| {
+            let mut l = member(20.);
+            l.line = Some(mindweave_core::LineProps {
+                start: Some(a.id),
+                end: Some(end),
+                ..Default::default()
+            });
+            l
+        };
+        let (inner, outer) = (line(b.id), line(outside.id));
+        let shapes = vec![
+            board.clone(),
+            a.clone(),
+            b.clone(),
+            outside,
+            inner.clone(),
+            outer.clone(),
+        ];
+        // Moved with the artboard, a line between two members keeps both
+        // ends; one reaching a shape left behind lets that end go.
+        let (ids, moved) = lines_to_detach(&shapes, &[board.id, inner.id, outer.id]);
+        assert_eq!(ids, vec![outer.id]);
+        assert!(moved.contains(&a.id) && moved.contains(&b.id));
+        // Moved on its own, a line lets go of both members.
+        assert_eq!(lines_to_detach(&shapes, &[inner.id]).0, vec![inner.id]);
+    }
+
+    #[test]
+    fn a_nudge_across_an_artboard_edge_settles_membership_in_its_step() {
+        let libs = registry();
+        let def = libs.shape("basic-shapes", "rectangle").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("a.mindweave")).unwrap();
+        let board = Shape::new_artboard(
+            Frame {
+                w: 100.,
+                h: 100.,
+                ..Frame::default()
+            },
+            "Board",
+        );
+        let f = Frame {
+            x: 95.,
+            y: 10.,
+            w: 10.,
+            h: 10.,
+            ..Frame::default()
+        };
+        let r = Shape::new(def, "basic-shapes", f);
+        let (bid, rid) = (board.id, r.id);
+        s.add_shapes(vec![board, r]);
+        let member = |s: &DocumentSession| s.find_shape(rid).unwrap().artboard;
+        // Nudged in, past the edge, it joins; one undo takes both back.
+        nudge_shapes(&mut s, &[rid], -10., 0.);
+        assert_eq!(member(&s), Some(bid));
+        assert!(s.undo());
+        assert_eq!(s.find_shape(rid).unwrap().frame.x, 95.);
+        assert_eq!(member(&s), None);
+        assert!(s.redo());
+        // Nudged out, it leaves.
+        nudge_shapes(&mut s, &[rid], 20., 0.);
+        assert_eq!(member(&s), None);
+        // Nudging the artboard carries its member and keeps it.
+        nudge_shapes(&mut s, &[rid], -20., 0.);
+        nudge_shapes(&mut s, &[bid], 0., 300.);
+        assert_eq!(member(&s), Some(bid));
+        assert_eq!(s.find_shape(rid).unwrap().frame.y, 310.);
     }
 }
