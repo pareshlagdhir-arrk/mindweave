@@ -352,12 +352,13 @@ impl Shape {
         s.normalized()
     }
 
-    /// A new path shape outlined by `path` in `frame`, painted in `style`.
+    /// A new path shape outlined by `path` in `frame`, painted in `style`,
+    /// with an empty label like other shapes get when first edited.
     pub fn new_path(path: PathProps, frame: Frame, style: Style) -> Shape {
         let mut s = Shape::new_text_box((frame.x, frame.y));
         s.shape = PATH_SHAPE.to_string();
         s.frame = frame;
-        s.label = None;
+        s.label = Some(Label::new_shape_label());
         s.text_box = None;
         s.style = style;
         s.path = Some(path);

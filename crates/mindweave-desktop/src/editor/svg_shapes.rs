@@ -37,14 +37,13 @@ fn place_files(imports: Vec<SvgImport>, view: &Rect) -> Vec<Shape> {
     out
 }
 
-/// The warning for `skipped` elements left out, if any.
+/// The warning for `skipped` elements left out (pictures, text no font
+/// could show), if any.
 fn skipped_notice(skipped: usize) -> Option<String> {
     match skipped {
         0 => None,
-        1 => Some("1 element (a picture) could not be imported as a shape.".into()),
-        n => Some(format!(
-            "{n} elements (pictures) could not be imported as shapes."
-        )),
+        1 => Some("1 element could not be imported.".into()),
+        n => Some(format!("{n} elements could not be imported.")),
     }
 }
 
@@ -142,7 +141,13 @@ mod tests {
     #[test]
     fn left_out_elements_are_counted_in_the_notice() {
         assert_eq!(skipped_notice(0), None);
-        assert!(skipped_notice(1).unwrap().starts_with("1 element "));
-        assert!(skipped_notice(3).unwrap().starts_with("3 elements "));
+        assert_eq!(
+            skipped_notice(1).as_deref(),
+            Some("1 element could not be imported.")
+        );
+        assert_eq!(
+            skipped_notice(3).as_deref(),
+            Some("3 elements could not be imported.")
+        );
     }
 }

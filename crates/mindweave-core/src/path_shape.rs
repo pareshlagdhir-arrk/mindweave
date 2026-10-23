@@ -29,6 +29,12 @@ impl PathProps {
     /// The outline in the local box `0..w × 0..h`; empty when the path
     /// data holds nothing usable (see [`crate::svg`] for what is refused).
     pub fn local_geometry(&self, w: f32, h: f32) -> Geometry {
+        scale_unit(&self.unit_geometry(), w, h)
+    }
+
+    /// The outline in the unit box, parsed from the path data: what
+    /// [`scale_unit`] fits to a frame, so it can be parsed once.
+    pub fn unit_geometry(&self) -> Geometry {
         if !path_is_reasonable(&self.d) {
             return Geometry::default();
         }
@@ -41,10 +47,9 @@ impl PathProps {
         } else {
             FillRole::NonZero
         };
-        let unit = Geometry {
+        Geometry {
             paths: vec![SubPath { cmds, fill }],
-        };
-        map_points(&unit, |(x, y)| (x * w, y * h))
+        }
     }
 
     /// The path data of `cmds` (canvas coordinates) relative to `bounds`,
@@ -82,6 +87,12 @@ impl PathProps {
         }
         PathProps { d, even_odd }
     }
+}
+
+/// A unit-box outline (see [`PathProps::unit_geometry`]) stretched to the
+/// local box `0..w × 0..h`.
+pub fn scale_unit(unit: &Geometry, w: f32, h: f32) -> Geometry {
+    map_points(unit, |(x, y)| (x * w, y * h))
 }
 
 /// `v` rounded to [`PATH_PRECISION`], written as briefly as it reads back.

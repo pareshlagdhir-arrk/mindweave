@@ -68,7 +68,7 @@ pub use mindmap::{
     BOUNDARY_SHAPE, BRANCH_COLORS, TOPIC_ICON_SIZE, TOPIC_IMAGE_SIZE, TOPIC_PADDING, TOPIC_SHAPE,
     TOPIC_TEXT_MAX,
 };
-pub use path_shape::{PathProps, PATH_SHAPE};
+pub use path_shape::{scale_unit, PathProps, PATH_SHAPE};
 pub use session::DocumentSession;
 pub use settings::{
     load_settings, save_settings, settings_path, AppSettings, RecentFile, WindowSize, MAX_RECENT,

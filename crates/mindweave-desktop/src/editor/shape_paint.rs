@@ -3,6 +3,7 @@
 //! whose library or shape is not installed.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
@@ -12,7 +13,8 @@ use mindweave_core::geometry::{
 use mindweave_core::{
     double_outline, frame_aabb, handle_positions, is_auto_color, is_ink_color,
     line_geometry_min_ring, line_jumps, map_decor, rotate_handle_position, rounded_polygon,
-    ArrowHead, Handle, LibraryRegistry, LineDash, LineProps, Page, Shape, Style, Viewport,
+    scale_unit, ArrowHead, Handle, LibraryRegistry, LineDash, LineProps, Page, PathProps, Shape,
+    Style, Viewport,
 };
 use uuid::Uuid;
 
@@ -76,6 +78,23 @@ pub fn shape_geometry_with(
     jumps: &[f32],
     min_ring: f32,
 ) -> CanvasGeometry {
+    let unit = shape
+        .path
+        .as_ref()
+        .filter(|_| shape.is_path())
+        .map(PathProps::unit_geometry);
+    outline_of(shape, libs, jumps, min_ring, unit.as_ref())
+}
+
+/// [`shape_geometry_with`], a path shape's outline stretched from `unit`,
+/// its already parsed unit-box outline.
+fn outline_of(
+    shape: &Shape,
+    libs: &LibraryRegistry,
+    jumps: &[f32],
+    min_ring: f32,
+    unit: Option<&Geometry>,
+) -> CanvasGeometry {
     let f = &shape.frame;
     let style = &shape.style;
     let line = shape.line.as_ref().filter(|_| shape.is_line());
@@ -94,8 +113,9 @@ pub fn shape_geometry_with(
     } else if shape.is_artboard() {
         let g = primitive_geometry(Primitive::Rect, f.w, f.h, &|k| shape.param(k));
         (g, false)
-    } else if let Some(p) = shape.path.as_ref().filter(|_| shape.is_path()) {
-        (p.local_geometry(f.w, f.h), false)
+    } else if shape.is_path() {
+        let g = unit.map_or_else(Geometry::default, |u| scale_unit(u, f.w, f.h));
+        (g, false)
     } else if let Some(t) = &shape.topic {
         let radius = if t.is_central() { 12. } else { 6. };
         let g = primitive_geometry(Primitive::Rect, f.w, f.h, &|k| {
@@ -181,8 +201,8 @@ impl CacheEntry {
     }
 }
 
-/// Besides the frame and library shape, an outline depends on a line's
-/// properties and jumps, the stroke width (heads, double outlines, dash
+/// Besides the frame and library shape, an outline depends on a path
+/// shape's path data, a line's properties and jumps, the stroke width (heads, double outlines, dash
 /// lengths), whether the outline is double and its dash pattern, and for
 /// a line with a hollow head, the zoom's ring floor.
 #[derive(Clone, Debug, PartialEq)]
@@ -194,12 +214,16 @@ struct GeomKey {
     double: bool,
     dash: LineDash,
     jumps: Vec<f32>,
+    /// A path shape's [`path_key`]; 0 for other shapes.
+    path: u64,
     /// See [`ring_floor`]; `0` unless the shape is a line with a hollow
     /// head, so zooming rebuilds no other outline.
     min_ring: f32,
 }
 
-fn geom_key(s: &Shape, jumps: &[f32], ring_floor: f32) -> GeomKey {
+/// The [`GeomKey`] of `s`, whose [`path_key`] is `path` (0 when it is no
+/// path shape).
+fn geom_key(s: &Shape, jumps: &[f32], ring_floor: f32, path: u64) -> GeomKey {
     let hollow = s.line.as_ref().is_some_and(|l| {
         [l.start_head, l.end_head]
             .iter()
@@ -212,13 +236,15 @@ fn geom_key(s: &Shape, jumps: &[f32], ring_floor: f32) -> GeomKey {
         double: s.style.double,
         dash: s.style.dash,
         jumps: jumps.to_vec(),
+        path,
         min_ring: if hollow { ring_floor } else { 0. },
     }
 }
 
 /// Canvas outlines of shapes, by shape id, reused across frames while the
-/// shape's frame, parameters and library shape stay the same. A path
-/// shape's outline is never edited, so its path data is not compared.
+/// shape's frame, parameters and library shape stay the same. Path
+/// shapes' unit-box outlines are parsed once per path data and only
+/// stretched when their frames change.
 #[derive(Default)]
 pub struct GeometryCache {
     entries: HashMap<Uuid, CacheEntry>,
@@ -229,6 +255,9 @@ pub struct GeometryCache {
     jumps_of: u64,
     /// The [`ring_floor`] at the zoom last painted at.
     ring_floor: f32,
+    /// Parsed path shape outlines by [`path_key`], and the frame each was
+    /// last used in.
+    units: HashMap<u64, (Arc<Geometry>, u64)>,
 }
 
 impl GeometryCache {
@@ -258,6 +287,7 @@ impl GeometryCache {
     pub fn end_frame(&mut self) {
         let frame = self.frame;
         self.entries.retain(|_, e| e.used == frame);
+        self.units.retain(|_, (_, used)| *used == frame);
     }
 
     /// The canvas outline of `shape`, built on a miss or a change. Hit
@@ -268,25 +298,49 @@ impl GeometryCache {
 
     fn entry(&mut self, shape: &Shape, libs: &LibraryRegistry) -> &mut CacheEntry {
         let frame = self.frame;
+        let (path, unit) = self.unit(shape).unzip();
         let jumps = self.jumps.get(&shape.id).map_or(&[][..], Vec::as_slice);
-        let key = geom_key(shape, jumps, self.ring_floor);
+        let key = geom_key(shape, jumps, self.ring_floor, path.unwrap_or(0));
         let entry = self
             .entries
             .entry(shape.id)
             .and_modify(|e| {
                 if !e.matches(shape) || e.key != key {
-                    *e = new_entry(shape, libs, jumps, key.clone(), frame);
+                    *e = new_entry(shape, libs, jumps, key.clone(), unit.as_deref(), frame);
                 }
             })
-            .or_insert_with(|| new_entry(shape, libs, jumps, key, frame));
+            .or_insert_with(|| new_entry(shape, libs, jumps, key, unit.as_deref(), frame));
         entry.used = frame;
         entry
+    }
+
+    /// The [`path_key`] and parsed unit-box outline of path shape
+    /// `shape`, parsed on a miss; `None` for other shapes.
+    fn unit(&mut self, shape: &Shape) -> Option<(u64, Arc<Geometry>)> {
+        let path = shape.path.as_ref().filter(|_| shape.is_path())?;
+        let frame = self.frame;
+        let key = path_key(path);
+        let (unit, used) = self
+            .units
+            .entry(key)
+            .or_insert_with(|| (Arc::new(path.unit_geometry()), frame));
+        *used = frame;
+        Some((key, unit.clone()))
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
     }
+}
+
+/// A hash of a path shape's outline: its path data and fill rule.
+fn path_key(path: &PathProps) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.d.hash(&mut h);
+    path.even_odd.hash(&mut h);
+    h.finish()
 }
 
 /// A hash of everything about `page`'s lines that decides where they
@@ -315,6 +369,7 @@ fn new_entry(
     libs: &LibraryRegistry,
     jumps: &[f32],
     key: GeomKey,
+    unit: Option<&Geometry>,
     used: u64,
 ) -> CacheEntry {
     let min_ring = key.min_ring;
@@ -324,7 +379,7 @@ fn new_entry(
         frame: shape.frame,
         params: shape.params.clone(),
         key,
-        outline: shape_geometry_with(shape, libs, jumps, min_ring),
+        outline: outline_of(shape, libs, jumps, min_ring, unit),
         tessellation: None,
         used,
     }
@@ -1433,6 +1488,41 @@ mod tests {
     }
 
     #[test]
+    fn path_outlines_are_parsed_once_and_stretched_to_new_frames() {
+        use mindweave_core::{PathProps, Style};
+        let libs = registry();
+        let path = PathProps {
+            d: "M 0 0 L 1 0 L 1 1 Z".into(),
+            even_odd: false,
+        };
+        let mut a = Shape::new_path(path.clone(), frame(0., 0., 10., 10.), Style::default());
+        let mut b = Shape::new_path(path, frame(50., 0., 10., 10.), Style::default());
+        let mut cache = GeometryCache::default();
+        cache.begin_frame();
+        cache.outline(&a, &libs);
+        cache.outline(&b, &libs);
+        let parsed = cache.unit(&a).unwrap().1;
+        cache.end_frame();
+        // Two shapes, one outline parsed.
+        assert_eq!(cache.units.len(), 1);
+
+        a.frame.w = 30.;
+        cache.begin_frame();
+        assert_eq!(cache.outline(&a, &libs).aabb.w, 30.);
+        assert_eq!(cache.outline(&a, &libs), &shape_geometry(&a, &libs));
+        assert!(std::sync::Arc::ptr_eq(&cache.unit(&a).unwrap().1, &parsed));
+        cache.end_frame();
+
+        // New path data is parsed and shown at once.
+        b.path.as_mut().unwrap().d = "M 0 0 L 1 1".into();
+        cache.begin_frame();
+        assert_eq!(cache.outline(&b, &libs), &shape_geometry(&b, &libs));
+        assert!(!std::sync::Arc::ptr_eq(&cache.unit(&b).unwrap().1, &parsed));
+        cache.end_frame();
+        assert_eq!(cache.units.len(), 1, "unused outlines are dropped");
+    }
+
+    #[test]
     fn hollow_heads_keep_the_ring_floor_of_the_zoom() {
         use mindweave_core::{line_frame, ArrowHead, LineProps};
         let libs = registry();
@@ -1453,14 +1543,14 @@ mod tests {
         // Close up the ring is the line's width, as without a floor.
         assert_eq!(cache.outline(&line, &libs), &shape_geometry(&line, &libs));
         let near = cache.outline(&line, &libs).clone();
-        let rect_near = geom_key(&rect, &[], cache.ring_floor);
+        let rect_near = geom_key(&rect, &[], cache.ring_floor, 0);
         // Far out it is rebuilt at the floor: thicker than the line.
         cache.set_zoom(0.05);
         let far = cache.outline(&line, &libs).clone();
         assert_ne!(far, near);
         assert_eq!(far, shape_geometry_with(&line, &libs, &[], 10.));
         // Other shapes are not rebuilt for the zoom.
-        assert_eq!(geom_key(&rect, &[], cache.ring_floor), rect_near);
+        assert_eq!(geom_key(&rect, &[], cache.ring_floor, 0), rect_near);
     }
 
     #[test]

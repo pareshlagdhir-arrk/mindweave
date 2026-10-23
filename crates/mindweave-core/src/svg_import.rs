@@ -2,8 +2,11 @@
 //! becomes a path shape, each text a text box (see [`import_svg`]); then
 //! [`place_import`] fits them to the view as one group.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+
+use roxmltree::NodeId;
 
 use thiserror::Error;
 use usvg::tiny_skia_path::{self, PathSegment};
@@ -23,6 +26,26 @@ use crate::transform::selection_bounds;
 pub const MAX_IMPORT_BYTES: usize = 10 * 1024 * 1024;
 /// Most objects one import creates.
 pub const MAX_IMPORT_OBJECTS: usize = 5_000;
+/// Most elements an SVG may expand to (its `<use>` copies included)
+/// before conversion; more is refused before any work is done.
+const MAX_EXPANDED_ELEMENTS: u64 = 10 * MAX_IMPORT_OBJECTS as u64;
+/// Most path data and text (bytes) an SVG may expand to.
+const MAX_EXPANDED_DATA: u64 = 20 * 1024 * 1024;
+/// Longest chain of `<use>` references followed.
+const MAX_USE_DEPTH: usize = 256;
+/// Elements whose content is drawn only where referenced.
+const NOT_RENDERED: [&str; 10] = [
+    "defs",
+    "symbol",
+    "clipPath",
+    "mask",
+    "pattern",
+    "marker",
+    "linearGradient",
+    "radialGradient",
+    "filter",
+    "style",
+];
 /// The share of the view an import is fitted to.
 const FIT_SHARE: f32 = 0.8;
 /// Room a text box keeps round its text (the desktop's text box padding),
@@ -34,7 +57,8 @@ const TEXT_INSET: f32 = 4.0;
 #[derive(Clone, Debug, PartialEq)]
 pub struct SvgImport {
     pub shapes: Vec<Shape>,
-    /// Elements left out: embedded or linked pictures.
+    /// Elements left out: embedded or linked pictures, and text no font
+    /// could lay out.
     pub skipped: usize,
 }
 
@@ -45,6 +69,10 @@ pub enum SvgImportError {
     TooLarge,
     #[error("The SVG has more than 5,000 elements to import.")]
     TooManyObjects,
+    #[error(
+        "The SVG is too complex to import: its elements expand to too many shapes or too much path data."
+    )]
+    TooComplex,
     #[error("The file is not an SVG Mindweave can read: {0}")]
     Invalid(String),
 }
@@ -53,7 +81,9 @@ pub enum SvgImportError {
 /// path (basic shapes included, `<use>` copies resolved, transforms
 /// applied) becomes a path shape, each text a text box. Pictures are left
 /// out and counted; nothing is read from other files. Text is laid out
-/// with the system's fonts; text no installed font can show is lost.
+/// with the system's fonts; text no installed font can show is left out
+/// and counted. Files whose `<use>` copies would expand past the limits
+/// are refused before any copy is made.
 pub fn import_svg(bytes: &[u8]) -> Result<SvgImport, SvgImportError> {
     if bytes.len() > MAX_IMPORT_BYTES {
         return Err(SvgImportError::TooLarge);
@@ -66,6 +96,8 @@ pub fn import_svg(bytes: &[u8]) -> Result<SvgImport, SvgImportError> {
             "elements are nested too deeply".into(),
         ));
     }
+    // usvg expands every `<use>` first: weigh the copies before that.
+    let expected = expanded_weight(src)?;
     let pictures = Arc::new(AtomicUsize::new(0));
     let opt = usvg::Options {
         image_href_resolver: skipping_pictures(&pictures),
@@ -74,13 +106,147 @@ pub fn import_svg(bytes: &[u8]) -> Result<SvgImport, SvgImportError> {
     };
     let tree =
         usvg::Tree::from_str(src, &opt).map_err(|e| SvgImportError::Invalid(e.to_string()))?;
-    let mut shapes = Vec::new();
-    let mut skipped = 0;
-    collect(tree.root(), 1.0, &mut shapes, &mut skipped)?;
+    let mut walk = Walk::default();
+    collect(tree.root(), 1.0, &mut walk)?;
+    // Text no font could lay out never reaches the tree.
+    let lost_texts = (expected.texts as usize).saturating_sub(walk.texts);
     Ok(SvgImport {
-        shapes,
-        skipped: skipped + pictures.load(Ordering::Relaxed),
+        shapes: walk.shapes,
+        skipped: walk.skipped + lost_texts + pictures.load(Ordering::Relaxed),
     })
+}
+
+/// What an SVG expands to once its `<use>` copies are made.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Weight {
+    /// Elements, copies included.
+    elements: u64,
+    /// Bytes of path data (`d`, `points`) and text.
+    data: u64,
+    /// Texts drawn.
+    texts: u64,
+}
+
+impl Weight {
+    fn add(&mut self, other: Weight, rendered: bool) {
+        self.elements = self.elements.saturating_add(other.elements);
+        self.data = self.data.saturating_add(other.data);
+        if rendered {
+            self.texts = self.texts.saturating_add(other.texts);
+        }
+    }
+
+    fn too_heavy(&self) -> bool {
+        self.elements > MAX_EXPANDED_ELEMENTS || self.data > MAX_EXPANDED_DATA
+    }
+}
+
+/// The [`Weight`] of SVG `src`, worked out on the XML before usvg makes
+/// any copies; [`SvgImportError::TooComplex`] when over the limits.
+fn expanded_weight(src: &str) -> Result<Weight, SvgImportError> {
+    let opt = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..roxmltree::ParsingOptions::default()
+    };
+    let doc = roxmltree::Document::parse_with_options(src, opt)
+        .map_err(|e| SvgImportError::Invalid(e.to_string()))?;
+    let ids: HashMap<&str, roxmltree::Node> = doc
+        .descendants()
+        .filter(|n| n.is_element())
+        .filter_map(|n| Some((n.attribute("id")?, n)))
+        .collect();
+    let mut weigh = Weigher {
+        ids,
+        memo: HashMap::new(),
+        visiting: HashSet::new(),
+    };
+    let w = weigh.weight(doc.root_element(), 0)?;
+    if w.too_heavy() {
+        return Err(SvgImportError::TooComplex);
+    }
+    Ok(w)
+}
+
+/// Works out element weights, each once, following `<use>` references.
+struct Weigher<'a, 'i> {
+    ids: HashMap<&'a str, roxmltree::Node<'a, 'i>>,
+    memo: HashMap<NodeId, Weight>,
+    /// Elements being weighed: a reference back to one is a cycle, which
+    /// usvg leaves out.
+    visiting: HashSet<NodeId>,
+}
+
+impl<'a, 'i> Weigher<'a, 'i> {
+    /// The weight of `node` and what it draws; `depth` counts nesting and
+    /// `<use>` references followed.
+    fn weight(
+        &mut self,
+        node: roxmltree::Node<'a, 'i>,
+        depth: usize,
+    ) -> Result<Weight, SvgImportError> {
+        if let Some(w) = self.memo.get(&node.id()) {
+            return Ok(*w);
+        }
+        if depth > MAX_USE_DEPTH {
+            return Err(SvgImportError::TooComplex);
+        }
+        if !self.visiting.insert(node.id()) {
+            return Ok(Weight::default());
+        }
+        let name = node.tag_name().name();
+        let mut w = Weight {
+            elements: 1,
+            data: ["d", "points"]
+                .iter()
+                .filter_map(|a| node.attribute(*a))
+                .map(|v| v.len() as u64)
+                .sum(),
+            texts: u64::from(name == "text" && node.attribute("display") != Some("none")),
+        };
+        for child in node.children() {
+            if child.is_text() {
+                w.data = w
+                    .data
+                    .saturating_add(child.text().map_or(0, str::len) as u64);
+            } else if child.is_element() {
+                let rendered = !NOT_RENDERED.contains(&child.tag_name().name())
+                    && child.attribute("display") != Some("none");
+                // A text's texts are itself.
+                let rendered = rendered && name != "text";
+                w.add(self.weight(child, depth + 1)?, rendered);
+            }
+            if w.too_heavy() {
+                return Err(SvgImportError::TooComplex);
+            }
+        }
+        if name == "use" {
+            let href = node
+                .attribute("href")
+                .or_else(|| node.attribute(("http://www.w3.org/1999/xlink", "href")));
+            let target = href
+                .and_then(|h| h.strip_prefix('#'))
+                .and_then(|id| self.ids.get(id).copied());
+            if let Some(target) = target {
+                w.add(self.weight(target, depth + 1)?, true);
+            }
+        }
+        self.visiting.remove(&node.id());
+        if w.too_heavy() {
+            return Err(SvgImportError::TooComplex);
+        }
+        self.memo.insert(node.id(), w);
+        Ok(w)
+    }
+}
+
+/// What walking a converted tree gives.
+#[derive(Default)]
+struct Walk {
+    shapes: Vec<Shape>,
+    /// Pictures and texts left out.
+    skipped: usize,
+    /// Texts met, imported or blank.
+    texts: usize,
 }
 
 /// An image reference resolver that loads nothing and counts the
@@ -111,23 +277,24 @@ fn system_fonts() -> Arc<fontdb::Database> {
         .clone()
 }
 
-/// Appends the shapes of `group`'s children, back to front, to `out`;
-/// `opacity` is the product of the enclosing groups' opacities. Pictures
-/// are counted in `skipped`.
-fn collect(
-    group: &usvg::Group,
-    opacity: f32,
-    out: &mut Vec<Shape>,
-    skipped: &mut usize,
-) -> Result<(), SvgImportError> {
+/// Adds the shapes of `group`'s children, back to front, to `walk`;
+/// `opacity` is the product of the enclosing groups' opacities.
+fn collect(group: &usvg::Group, opacity: f32, walk: &mut Walk) -> Result<(), SvgImportError> {
     for node in group.children() {
         match node {
-            Node::Group(g) => collect(g, opacity * g.opacity().get(), out, skipped)?,
-            Node::Path(p) => out.extend(path_shape(p, opacity)),
-            Node::Text(t) => out.extend(text_box(t, opacity)),
-            Node::Image(_) => *skipped += 1,
+            Node::Group(g) => collect(g, opacity * g.opacity().get(), walk)?,
+            Node::Path(p) => walk.shapes.extend(path_shape(p, opacity)),
+            Node::Text(t) => {
+                walk.texts += 1;
+                match text_box(t, opacity) {
+                    Some(TextOutcome::Box(s)) => walk.shapes.push(*s),
+                    Some(TextOutcome::Blank) => {}
+                    None => walk.skipped += 1,
+                }
+            }
+            Node::Image(_) => walk.skipped += 1,
         }
-        if out.len() > MAX_IMPORT_OBJECTS {
+        if walk.shapes.len() > MAX_IMPORT_OBJECTS {
             return Err(SvgImportError::TooManyObjects);
         }
     }
@@ -211,13 +378,25 @@ fn path_shape(path: &usvg::Path, opacity: f32) -> Option<Shape> {
         },
         double: false,
     };
-    Some(Shape::new_path(props, Frame::from_rect(&bounds), style))
+    let width = style.stroke_width;
+    let mut shape = Shape::new_path(props, Frame::from_rect(&bounds), style);
+    // Unclamped: [`place_import`] clamps it once scaled.
+    shape.style.stroke_width = width;
+    Some(shape)
+}
+
+/// What a text gives.
+enum TextOutcome {
+    Box(Box<Shape>),
+    /// Nothing to show.
+    Blank,
 }
 
 /// The text box of `text`: its plain text (a new line wherever a chunk
-/// starts lower down) in its first span's style, over its laid-out
-/// bounds, or above its anchor point when it has none.
-fn text_box(text: &usvg::Text, opacity: f32) -> Option<Shape> {
+/// starts lower down) in its first span's style (its fill, or else its
+/// stroke, colour and opacity), over its laid-out bounds, or above its
+/// anchor point when it has none. `None` when it cannot be read.
+fn text_box(text: &usvg::Text, opacity: f32) -> Option<TextOutcome> {
     let chunks = text.chunks();
     let mut plain = String::new();
     let mut line_y = None;
@@ -229,12 +408,17 @@ fn text_box(text: &usvg::Text, opacity: f32) -> Option<Shape> {
         plain.push_str(chunk.text());
     }
     if plain.trim().is_empty() {
-        return None;
+        return Some(TextOutcome::Blank);
     }
     let first = chunks.first()?;
     let span = first.spans().first()?;
     let t = text.abs_transform();
     let font = span.font();
+    let (color, paint_opacity) = match (span.fill(), span.stroke()) {
+        (Some(f), _) => (paint_color(f.paint()), f.opacity().get()),
+        (None, Some(s)) => (paint_color(s.paint()), s.opacity().get()),
+        (None, None) => (None, 1.0),
+    };
     let style = RunStyle {
         font: font.families().iter().find_map(|f| match f {
             FontFamily::Named(name) => Some(name.clone()),
@@ -243,7 +427,7 @@ fn text_box(text: &usvg::Text, opacity: f32) -> Option<Shape> {
         size: span.font_size().get() * transform_scale(t),
         bold: font.weight() >= 600,
         italic: font.style() != FontStyle::Normal,
-        color: span.fill().and_then(|f| paint_color(f.paint())),
+        color,
         ..RunStyle::default()
     };
     let align = match first.anchor() {
@@ -262,17 +446,18 @@ fn text_box(text: &usvg::Text, opacity: f32) -> Option<Shape> {
     let mut shape = Shape::new_text_box((x - TEXT_INSET, y - TEXT_INSET));
     // Its laid-out size until the editor measures the text.
     (shape.frame.w, shape.frame.h) = (w + 2.0 * TEXT_INSET, h + 2.0 * TEXT_INSET);
-    shape.style.opacity = opacity;
+    shape.style.opacity = opacity * paint_opacity;
     let mut rich = RichText::new(style.clone(), align);
     rich.insert(0, &plain, &style);
     shape.label.as_mut()?.text = rich;
     shape.normalize();
-    Some(shape)
+    Some(TextOutcome::Box(Box::new(shape)))
 }
 
 /// `shapes` (from [`import_svg`]) centred in `view`, scaled down to fit
 /// 80% of it when larger (never up), in one new group when there are
-/// several. Stroke widths and font sizes scale with them.
+/// several. Stroke widths and text boxes' font sizes scale with them, and
+/// are then clamped.
 pub fn place_import(mut shapes: Vec<Shape>, view: &Rect) -> Vec<Shape> {
     let frames: Vec<Frame> = shapes.iter().map(|s| s.frame).collect();
     let Some(b) = selection_bounds(&frames) else {
@@ -296,7 +481,8 @@ pub fn place_import(mut shapes: Vec<Shape>, view: &Rect) -> Vec<Shape> {
         f.w *= scale;
         f.h *= scale;
         s.style.stroke_width *= scale;
-        if let Some(label) = &mut s.label {
+        let text_box = s.is_text_box();
+        if let Some(label) = s.label.as_mut().filter(|_| text_box) {
             scale_font_sizes(&mut label.text, scale);
         }
         s.groups.extend(group);
@@ -530,5 +716,92 @@ mod tests {
             "{f:?}"
         );
         assert!(place_import(Vec::new(), &view).is_empty());
+    }
+
+    /// `levels` groups, each holding `fan` copies of the one below, over
+    /// `leaf`, all used once.
+    fn fan_out(leaf: &str, levels: usize, fan: usize) -> String {
+        let mut defs = format!(r#"<g id="l0">{leaf}</g>"#);
+        for i in 1..=levels {
+            let uses = format!(r##"<use href="#l{}"/>"##, i - 1).repeat(fan);
+            defs.push_str(&format!(r#"<g id="l{i}">{uses}</g>"#));
+        }
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><defs>{defs}</defs><use href="#l{levels}"/></svg>"##
+        )
+    }
+
+    #[test]
+    fn exponential_use_copies_are_refused_before_conversion() {
+        let start = std::time::Instant::now();
+        let src = fan_out(r#"<rect width="1" height="1"/>"#, 6, 10);
+        assert_eq!(import_svg(src.as_bytes()), Err(SvgImportError::TooComplex));
+        assert!(start.elapsed().as_secs() < 2);
+        // Few elements, but a long path copied a hundred times.
+        let d = "M0 0 L1 1 ".repeat(30_000);
+        let src = fan_out(&format!(r#"<path d="{d}" fill="red"/>"#), 2, 10);
+        assert_eq!(import_svg(src.as_bytes()), Err(SvgImportError::TooComplex));
+        // A modest fan-out imports; a reference cycle is harmless.
+        let src = fan_out(r#"<rect width="1" height="1"/>"#, 2, 3);
+        assert_eq!(import_svg(src.as_bytes()).unwrap().shapes.len(), 9);
+        let cycle = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <g id="a"><rect width="1" height="1"/><use href="#a"/></g></svg>"##;
+        assert!(import_svg(cycle.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn texts_are_counted_through_their_copies() {
+        let src = fan_out(r#"<text>Hi</text>"#, 2, 3);
+        let w = expanded_weight(&src).unwrap();
+        assert_eq!(w.texts, 9);
+        // Text in definitions or hidden is not drawn.
+        let w = expanded_weight(
+            r#"<svg><defs><text>a</text></defs><text display="none">b</text><text>c</text></svg>"#,
+        )
+        .unwrap();
+        assert_eq!(w.texts, 1);
+        // All drawn text was imported: nothing skipped.
+        assert_eq!(import_svg(src.as_bytes()).unwrap().skipped, 0);
+    }
+
+    #[test]
+    fn stroke_widths_are_clamped_after_scaling() {
+        let out = import(
+            r#"<rect width="1000" height="1000" fill="red" stroke="black" stroke-width="250"/>"#,
+        );
+        let view = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 125.0,
+            h: 125.0,
+        };
+        let placed = place_import(out.shapes, &view);
+        assert!(close(placed[0].style.stroke_width, 25.0));
+        // A path shape's empty label keeps its size.
+        let label = placed[0].label.as_ref().unwrap();
+        assert_eq!(label.text.style_at(0).size, crate::text::LABEL_FONT_SIZE);
+    }
+
+    #[test]
+    fn text_takes_its_fill_opacity_or_its_stroke_colour() {
+        let out = import(
+            r##"<g opacity="0.5"><text y="20" fill="red" fill-opacity="0.5">A</text></g>
+            <text y="60" fill="none" stroke="#00ff00" stroke-opacity="0.4">B</text>"##,
+        );
+        let (a, b) = (&out.shapes[0], &out.shapes[1]);
+        assert!(close(a.style.opacity, 0.25), "{}", a.style.opacity);
+        let color = |s: &Shape| s.label.as_ref().unwrap().text.style_at(0).color;
+        assert_eq!(color(a).as_deref(), Some("#FF0000"));
+        assert_eq!(color(b).as_deref(), Some("#00FF00"));
+        assert!(close(b.style.opacity, 0.4));
+    }
+
+    #[test]
+    fn path_shapes_have_an_empty_shape_label() {
+        let out = import(r#"<rect width="5" height="5"/>"#);
+        assert_eq!(
+            out.shapes[0].label,
+            Some(crate::shape::Label::new_shape_label())
+        );
     }
 }
