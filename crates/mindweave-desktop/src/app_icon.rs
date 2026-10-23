@@ -1,7 +1,8 @@
 //! The app's icon. While the app runs it is set as the Dock icon (macOS);
 //! a packaged app also carries it in its bundle (`assets/app-icon.icns`).
 
-/// The icon, a 512 × 512 PNG.
+/// The icon, a 1024 × 1024 PNG with a transparent margin (the source
+/// drawing is `assets/app-icon.svg`).
 pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app-icon.png");
 
 /// Shows [`APP_ICON_PNG`] as the app's Dock icon. Does nothing off the main
