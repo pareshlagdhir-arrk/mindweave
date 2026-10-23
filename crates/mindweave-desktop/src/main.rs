@@ -8,6 +8,7 @@ mod equation;
 mod icon_library;
 mod libraries;
 mod menu_bar;
+mod settings_window;
 mod theme_picker;
 mod themes;
 

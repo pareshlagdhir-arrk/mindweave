@@ -253,29 +253,6 @@ impl EditorWindow {
     }
 }
 
-/// Asks whether to uninstall icon set `name`, and does so on a yes.
-fn confirm_uninstall(name: SharedString, window: &mut Window, cx: &mut App) {
-    let answer = window.prompt(
-        PromptLevel::Warning,
-        &format!("Uninstall the “{name}” icons?"),
-        Some(
-            "The set is moved to the Trash. Icons already placed in documents stay \
-             where they are.",
-        ),
-        &["Uninstall", "Cancel"],
-        cx,
-    );
-    let handle = window.window_handle();
-    cx.spawn(async move |cx| {
-        if answer.await == Ok(0) {
-            handle
-                .update(cx, |_, window, cx| icon_library::remove(&name, window, cx))
-                .ok();
-        }
-    })
-    .detach();
-}
-
 /// A set's header: a chevron and its name, which fold it away or open
 /// it, its icon count, and its Uninstall button.
 fn header_row(
@@ -333,7 +310,7 @@ fn header_row(
                 .tooltip("Uninstall Icon Set…")
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
-                    confirm_uninstall(remove_set.clone(), window, cx);
+                    icon_library::confirm_remove(remove_set.clone(), window, cx);
                 }),
         )
         .on_click(move |_, _, cx| {
@@ -443,7 +420,7 @@ fn icons_row(
 
 /// The pane.
 pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoElement {
-    let sets = cx.global::<IconLibrary>().0.clone();
+    let sets = cx.global::<IconLibrary>().shown.clone();
     let muted = cx.theme().muted_foreground;
 
     let import_menu = Button::new("import-icons")
@@ -479,13 +456,16 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
     };
 
     if sets.is_empty() {
+        let text = if cx.global::<IconLibrary>().all.is_empty() {
+            "No icons yet. Use + to import a folder or .zip of SVG or PNG icons, \
+             such as the AWS, Google Cloud or Material icon packs."
+        } else {
+            "Every icon set is hidden. Show them again in Settings."
+        };
         return v_flex()
             .size_full()
             .child(header)
-            .child(note(
-                "No icons yet. Use + to import a folder or .zip of SVG or PNG icons, \
-                 such as the AWS, Google Cloud or Material icon packs.",
-            ))
+            .child(note(text))
             .into_any_element();
     }
 

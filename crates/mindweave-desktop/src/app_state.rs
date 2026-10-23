@@ -14,11 +14,14 @@ use mindweave_core::{
     FormatError, Shape, WindowSize,
 };
 
-use crate::actions::{self, NewFile, OpenFile, Quit, ShowDashboard, ToggleThemePicker};
+use crate::actions::{
+    self, NewFile, OpenFile, Quit, ShowDashboard, ShowSettings, ToggleThemePicker,
+};
 use crate::dashboard::{file_stem, Dashboard};
 use crate::editor::{prompt_to_save, EditorWindow, SaveChoice};
 use crate::libraries;
 use crate::menu_bar::{native_menus, WindowKind};
+use crate::settings_window::SettingsWindow;
 use crate::theme_picker::open_theme_picker;
 use crate::themes::apply_theme;
 
@@ -30,6 +33,10 @@ const DEFAULT_EDITOR_SIZE: WindowSize = WindowSize {
 const DEFAULT_DASHBOARD_SIZE: WindowSize = WindowSize {
     width: 1200.,
     height: 800.,
+};
+const SETTINGS_SIZE: WindowSize = WindowSize {
+    width: 820.,
+    height: 560.,
 };
 const MIN_WINDOW_SIZE: WindowSize = WindowSize {
     width: 640.,
@@ -61,6 +68,8 @@ pub struct AppState {
     /// Open editors keyed by canonical document path.
     editors: HashMap<PathBuf, AppWindow<EditorWindow>>,
     dashboard: Option<AppWindow<Dashboard>>,
+    /// The Settings window, while open; there is at most one.
+    settings_window: Option<AppWindow<SettingsWindow>>,
     /// Set once quitting is confirmed, so closing windows does not reopen
     /// the dashboard.
     quitting: bool,
@@ -84,6 +93,7 @@ impl AppState {
             settings_path,
             editors: HashMap::new(),
             dashboard: None,
+            settings_window: None,
             quitting: false,
             quit_prompting: false,
         });
@@ -96,6 +106,7 @@ impl AppState {
         // that update a window.
         cx.on_action(|_: &ShowDashboard, cx| cx.defer(Self::show_dashboard));
         cx.on_action(|_: &ToggleThemePicker, cx| cx.defer(toggle_theme_picker));
+        cx.on_action(|_: &ShowSettings, cx| cx.defer(Self::show_settings));
         cx.set_menus(native_menus(cx));
 
         cx.on_window_closed(|cx, id| Self::window_closed(id, cx))
@@ -366,6 +377,27 @@ impl AppState {
         cx.global_mut::<AppState>().dashboard = opened;
     }
 
+    /// Brings the Settings window to the front, opening it if needed.
+    pub fn show_settings(cx: &mut App) {
+        if let Some(settings) = &cx.global::<AppState>().settings_window {
+            activate(settings.handle, cx);
+            return;
+        }
+        let opened = open_app_window("Settings".into(), SETTINGS_SIZE, cx, SettingsWindow::new);
+        cx.global_mut::<AppState>().settings_window = opened;
+    }
+
+    /// Hands `registry`, the libraries loaded again, to every open
+    /// document.
+    pub fn set_libraries(registry: std::sync::Arc<mindweave_core::LibraryRegistry>, cx: &mut App) {
+        let editors: Vec<_> = cx.global::<AppState>().editors.values().cloned().collect();
+        for editor in editors {
+            if let Some(view) = editor.view.upgrade() {
+                view.update(cx, |editor, cx| editor.set_libraries(registry.clone(), cx));
+            }
+        }
+    }
+
     /// Stores `window`'s size as the size for new windows of `kind`.
     pub fn remember_window_size(kind: WindowKind, window: &Window, cx: &mut App) {
         let size = window.window_bounds().get_bounds().size;
@@ -390,6 +422,14 @@ impl AppState {
             .is_some_and(|d| d.handle.window_id() == id)
         {
             state.dashboard = None;
+            return;
+        }
+        if state
+            .settings_window
+            .as_ref()
+            .is_some_and(|s| s.handle.window_id() == id)
+        {
+            state.settings_window = None;
             return;
         }
         let closed = state
@@ -624,7 +664,7 @@ fn forget_recent(path: &Path, cx: &mut App) {
 
 /// Moves `path` to the Trash. On macOS this asks the file manager directly
 /// rather than scripting Finder, which needs Automation permission.
-fn move_to_trash(path: &Path) -> Result<(), trash::Error> {
+pub(crate) fn move_to_trash(path: &Path) -> Result<(), trash::Error> {
     #[cfg(target_os = "macos")]
     {
         use trash::macos::{DeleteMethod, TrashContextExtMacos as _};

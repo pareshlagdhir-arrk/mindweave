@@ -54,6 +54,14 @@ pub struct AppSettings {
     /// lines (their ends are never attached).
     pub line_style: Option<Style>,
     pub line_props: Option<LineProps>,
+    /// Ids of the shape libraries hidden from the ribbon and the More
+    /// gallery; their shapes in documents still draw.
+    pub disabled_libraries: Vec<String>,
+    /// Library ids in the order the user gave them; libraries not listed
+    /// follow in their default order (see [`crate::apply_order`]).
+    pub library_order: Vec<String>,
+    /// Folder names of the icon sets hidden from the Icons pane.
+    pub hidden_icon_sets: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -72,6 +80,9 @@ impl Default for AppSettings {
             shape_style: None,
             line_style: None,
             line_props: None,
+            disabled_libraries: Vec::new(),
+            library_order: Vec::new(),
+            hidden_icon_sets: Vec::new(),
         }
     }
 }
@@ -248,6 +259,61 @@ impl AppSettings {
         self.recent_fonts.retain(|f| f != family);
         self.recent_fonts.insert(0, family.to_string());
         self.recent_fonts.truncate(MAX_RECENT_FONTS);
+    }
+
+    /// Whether library `id` is shown in the ribbon and the More gallery.
+    pub fn library_enabled(&self, id: &str) -> bool {
+        !self.disabled_libraries.iter().any(|d| d == id)
+    }
+
+    /// Shows library `id` in the ribbon, or hides it.
+    pub fn set_library_enabled(&mut self, id: &str, enabled: bool) {
+        self.disabled_libraries.retain(|d| d != id);
+        if !enabled {
+            self.disabled_libraries.push(id.to_string());
+        }
+    }
+
+    /// Moves library `id` one place up (towards the front) or down in
+    /// `current`, the library ids as they are ordered now, and keeps the
+    /// result as the user's order. An id not in `current`, or already at
+    /// that end, changes nothing.
+    pub fn move_library(&mut self, current: &[String], id: &str, up: bool) {
+        let Some(ix) = current.iter().position(|c| c == id) else {
+            return;
+        };
+        let other = if up { ix.checked_sub(1) } else { Some(ix + 1) };
+        let Some(other) = other.filter(|&o| o < current.len()) else {
+            return;
+        };
+        let mut order = current.to_vec();
+        order.swap(ix, other);
+        self.library_order = order;
+    }
+
+    /// Forgets library `id`, uninstalled: drops it from the user's order
+    /// and the disabled libraries.
+    pub fn forget_library(&mut self, id: &str) {
+        self.library_order.retain(|o| o != id);
+        self.disabled_libraries.retain(|d| d != id);
+    }
+
+    /// Whether icon set `name` is shown in the Icons pane.
+    pub fn icon_set_shown(&self, name: &str) -> bool {
+        !self.hidden_icon_sets.iter().any(|h| h == name)
+    }
+
+    /// Shows icon set `name` in the Icons pane, or hides it.
+    pub fn set_icon_set_shown(&mut self, name: &str, shown: bool) {
+        self.hidden_icon_sets.retain(|h| h != name);
+        if !shown {
+            self.hidden_icon_sets.push(name.to_string());
+        }
+    }
+
+    /// Forgets icon set `name`, uninstalled.
+    pub fn forget_icon_set(&mut self, name: &str) {
+        self.hidden_icon_sets.retain(|h| h != name);
     }
 
     pub fn recent_existing(&self) -> Vec<&RecentFile> {
@@ -559,6 +625,75 @@ mod tests {
         assert!(s.icons_shown() && s.layers_shown());
         s.toggle_layers();
         assert!(!s.layers_shown() && s.icons_shown());
+    }
+
+    #[test]
+    fn libraries_enable_disable_and_move() {
+        let mut s = AppSettings::default();
+        assert!(s.library_enabled("flowchart"));
+        s.set_library_enabled("flowchart", false);
+        s.set_library_enabled("flowchart", false);
+        assert_eq!(s.disabled_libraries, ["flowchart"]);
+        assert!(!s.library_enabled("flowchart"));
+        s.set_library_enabled("flowchart", true);
+        assert!(s.library_enabled("flowchart") && s.disabled_libraries.is_empty());
+
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let current = ids(&["a", "b", "c"]);
+        s.move_library(&current, "c", true);
+        assert_eq!(s.library_order, ids(&["a", "c", "b"]));
+        s.move_library(&current, "a", false);
+        assert_eq!(s.library_order, ids(&["b", "a", "c"]));
+        // At an end, or unknown: nothing changes.
+        let before = s.library_order.clone();
+        s.move_library(&current, "a", true);
+        s.move_library(&current, "c", false);
+        s.move_library(&current, "zzz", true);
+        assert_eq!(s.library_order, before);
+    }
+
+    #[test]
+    fn uninstalling_forgets_order_and_disabled_state() {
+        let mut s = AppSettings {
+            library_order: vec!["aws".into(), "uml".into()],
+            disabled_libraries: vec!["aws".into(), "gcp".into()],
+            hidden_icon_sets: vec!["AWS".into(), "GCP".into()],
+            ..AppSettings::default()
+        };
+        s.forget_library("aws");
+        assert_eq!(s.library_order, ["uml"]);
+        assert_eq!(s.disabled_libraries, ["gcp"]);
+        s.forget_icon_set("AWS");
+        assert_eq!(s.hidden_icon_sets, ["GCP"]);
+    }
+
+    #[test]
+    fn icon_sets_show_and_hide() {
+        let mut s = AppSettings::default();
+        assert!(s.icon_set_shown("AWS"));
+        s.set_icon_set_shown("AWS", false);
+        s.set_icon_set_shown("AWS", false);
+        assert_eq!(s.hidden_icon_sets, ["AWS"]);
+        s.set_icon_set_shown("AWS", true);
+        assert!(s.icon_set_shown("AWS"));
+    }
+
+    #[test]
+    fn library_and_icon_settings_round_trip_and_old_files_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        let s = AppSettings {
+            disabled_libraries: vec!["uml".into()],
+            library_order: vec!["wireframe".into(), "flowchart".into()],
+            hidden_icon_sets: vec!["AWS".into()],
+            ..AppSettings::default()
+        };
+        save_settings(&s, &p).unwrap();
+        assert_eq!(load_settings(&p), s);
+        let old: AppSettings = serde_json::from_str(r#"{"theme": "X"}"#).unwrap();
+        assert!(old.disabled_libraries.is_empty());
+        assert!(old.library_order.is_empty());
+        assert!(old.hidden_icon_sets.is_empty());
     }
 
     #[test]

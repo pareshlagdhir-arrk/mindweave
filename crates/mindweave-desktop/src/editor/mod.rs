@@ -358,6 +358,17 @@ impl EditorWindow {
         &self.session
     }
 
+    /// Hands the document the libraries loaded again after an install or
+    /// uninstall, and redraws.
+    pub fn set_libraries(
+        &mut self,
+        libs: std::sync::Arc<mindweave_core::LibraryRegistry>,
+        cx: &mut Context<Self>,
+    ) {
+        self.session.set_libraries(libs);
+        cx.notify();
+    }
+
     /// Applies `f` to the session, redraws, and refreshes the window title
     /// (on the next render). The selection is cleared when the active page
     /// or layer changes, and otherwise loses shapes no longer there. Any

@@ -23,6 +23,9 @@ actions!(
         ZoomOut,
         ZoomReset,
         ShowDashboard,
+        /// Mindweave > Settings…: opens the Settings window, or brings it
+        /// to the front.
+        ShowSettings,
         ToolPointer,
         ToolHand,
         ToolRectangle,
@@ -188,6 +191,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-s", Save, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-,", ShowSettings, None),
+        KeyBinding::new("ctrl-,", ShowSettings, None),
         KeyBinding::new("cmd-k cmd-t", ToggleThemePicker, None),
         // Cmd+B is bold while editing text.
         KeyBinding::new("cmd-b", ToggleLeftSidebar, Some(NOT_EDITING_TEXT)),
@@ -314,6 +319,8 @@ mod tests {
             ("cmd-s", "mindweave::Save"),
             ("cmd-w", "mindweave::CloseWindow"),
             ("cmd-q", "mindweave::Quit"),
+            ("cmd-,", "mindweave::ShowSettings"),
+            ("ctrl-,", "mindweave::ShowSettings"),
             ("cmd-k cmd-t", "mindweave::ToggleThemePicker"),
             ("cmd-b", "mindweave::ToggleLeftSidebar"),
             // `unparse` writes modifiers in gpui order.

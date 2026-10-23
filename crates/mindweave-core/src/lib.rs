@@ -12,6 +12,7 @@ pub mod history;
 pub mod icons;
 pub mod image;
 pub mod library;
+pub mod library_install;
 pub mod line;
 pub mod mindmap;
 pub mod path_shape;
@@ -44,8 +45,8 @@ pub use document::{BackgroundPattern, CanvasSettings, Document, Layer, Page, Vie
 pub use files::{rename_document, validate_new_stem, RenameError, MAX_STEM_LEN};
 pub use format::{load, save, FormatError, FORMAT_VERSION};
 pub use icons::{
-    import_icon_folder, import_icon_zip, load_icon_sets, search_icons, user_icons_dir, IconEntry,
-    IconImportError, IconSet,
+    import_icon_folder, import_icon_zip, load_icon_sets, search_icons, shown_icon_sets,
+    user_icons_dir, IconEntry, IconImportError, IconSet,
 };
 pub use image::{
     collect_images, image_id, placed_size, resolve_images, ImageData, ImageFormat, ImageStore,
@@ -56,6 +57,10 @@ pub use library::{
     Library, LibraryError, LibraryFiles, LibraryItem, LibraryRegistry, LoadReport, ParamDef,
     ShapeDef, ShapeSource, StyleDefaults, LIBRARY_FORMAT, MAX_FILE_BYTES, MAX_LIBRARY_BYTES,
     MAX_SHAPES, MAX_USER_LIBRARIES,
+};
+pub use library_install::{
+    apply_order, install_library_folder, install_library_zip, ordered_libraries, shown_libraries,
+    uninstall_folder, validate_library, InstallError, MAX_INSTALL_FILES,
 };
 pub use line::{
     bend_through, double_outline, edge_point, line_frame, line_geometry, line_geometry_min_ring,

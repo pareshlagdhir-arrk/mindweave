@@ -11,8 +11,9 @@ use gpui_kit::*;
 use crate::actions::{
     self, BringForward, BringToFront, CloseWindow, ConvertToShapes, Cut, Delete, Duplicate, Group,
     ImportSvgShapes, NewFile, NotImplemented, OpenFile, Paste, Quit, Redo, Save, SelectAll,
-    SendBackward, SendToBack, ShowDashboard, ToggleIcons, ToggleLayers, ToggleLeftSidebar,
-    ToggleProperties, ToggleThemePicker, Undo, Ungroup, ZoomIn, ZoomOut, ZoomReset,
+    SendBackward, SendToBack, ShowDashboard, ShowSettings, ToggleIcons, ToggleLayers,
+    ToggleLeftSidebar, ToggleProperties, ToggleThemePicker, Undo, Ungroup, ZoomIn, ZoomOut,
+    ZoomReset,
 };
 use crate::app_state::AppState;
 
@@ -101,8 +102,8 @@ fn later(label: &'static str) -> MenuEntry {
 
 /// The File, Edit, View, Arrange and Help menus for `kind`.
 ///
-/// `include_quit` adds Quit to the end of File; the native menu leaves it out
-/// because macOS puts Quit in the application menu.
+/// `include_quit` adds Settings… and Quit to the end of File; the native
+/// menu leaves them out because macOS puts them in the application menu.
 pub(crate) fn menus(kind: WindowKind, panels: PanelState, include_quit: bool) -> Vec<MenuSpec> {
     use MenuEntry::Separator;
     let editor = kind == WindowKind::Editor;
@@ -118,7 +119,11 @@ pub(crate) fn menus(kind: WindowKind, panels: PanelState, include_quit: bool) ->
         item("Show Dashboard", ShowDashboard, true),
     ];
     if include_quit {
-        file.extend([Separator, item("Quit Mindweave", Quit, true)]);
+        file.extend([
+            Separator,
+            item("Settings…", ShowSettings, true),
+            item("Quit Mindweave", Quit, true),
+        ]);
     }
 
     vec![
@@ -201,7 +206,11 @@ pub fn native_menus(cx: &App) -> Vec<Menu> {
 }
 
 fn native_menus_for(panels: PanelState) -> Vec<Menu> {
-    let mut native = vec![Menu::new("Mindweave").items([MenuItem::action("Quit Mindweave", Quit)])];
+    let mut native = vec![Menu::new("Mindweave").items([
+        MenuItem::action("Settings…", ShowSettings),
+        MenuItem::separator(),
+        MenuItem::action("Quit Mindweave", Quit),
+    ])];
     native.extend(
         menus(WindowKind::Editor, panels, false)
             .into_iter()
@@ -507,6 +516,35 @@ mod tests {
             .map(|(menu, _)| menu)
             .collect();
         assert_eq!(quits, ["Mindweave"]);
+    }
+
+    #[test]
+    fn settings_sit_in_the_app_menu_or_at_the_end_of_file() {
+        let native = native_menus_for(PANELS);
+        let app: Vec<_> = native[0]
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MenuItem::Action { name, action, .. } => Some((name.to_string(), action.name())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            app,
+            [
+                ("Settings…".to_string(), "mindweave::ShowSettings"),
+                ("Quit Mindweave".to_string(), "mindweave::Quit"),
+            ]
+        );
+        let has_settings = |include| {
+            items(WindowKind::Dashboard, include)
+                .iter()
+                .any(|(menu, label, enabled, _)| {
+                    *menu == "File" && *label == "Settings…" && *enabled
+                })
+        };
+        assert!(has_settings(true));
+        assert!(!has_settings(false));
     }
 
     #[test]

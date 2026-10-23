@@ -269,6 +269,16 @@ pub fn load_icon_sets(root: &Path) -> Vec<IconSet> {
     sets
 }
 
+/// The icon sets shown in the Icons pane: those of `sets` not named in
+/// `hidden`. Hidden sets stay on disk, so icons placed from them still
+/// draw.
+pub fn shown_icon_sets(sets: &[IconSet], hidden: &[String]) -> Vec<IconSet> {
+    sets.iter()
+        .filter(|s| !hidden.contains(&s.name))
+        .cloned()
+        .collect()
+}
+
 /// The icons of `sets` (all, or only the set named `only`) whose names
 /// hold every word of `query`, ignoring case; the set each comes from.
 pub fn search_icons<'a>(
@@ -771,6 +781,20 @@ mod tests {
             import_icon_zip(&not_zip, root.path()),
             Err(IconImportError::Zip(_))
         ));
+    }
+
+    #[test]
+    fn hidden_sets_leave_the_shown_list() {
+        let root = tempfile::tempdir().unwrap();
+        put(&root.path().join("AWS"), "a.svg", SVG);
+        put(&root.path().join("GCP"), "b.svg", SVG);
+        let sets = load_icon_sets(root.path());
+        let names = |sets: Vec<IconSet>| sets.into_iter().map(|s| s.name).collect::<Vec<_>>();
+        assert_eq!(names(shown_icon_sets(&sets, &[])), ["AWS", "GCP"]);
+        assert_eq!(
+            names(shown_icon_sets(&sets, &["AWS".into(), "gone".into()])),
+            ["GCP"]
+        );
     }
 
     #[test]

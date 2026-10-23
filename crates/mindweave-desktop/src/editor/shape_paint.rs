@@ -258,6 +258,10 @@ pub struct GeometryCache {
     /// Parsed path shape outlines by [`path_key`], and the frame each was
     /// last used in.
     units: HashMap<u64, (Arc<Geometry>, u64)>,
+    /// The address of the libraries the outlines were built from; when
+    /// they are loaded again (a library installed or uninstalled) every
+    /// outline is built afresh.
+    registry: usize,
 }
 
 impl GeometryCache {
@@ -297,6 +301,11 @@ impl GeometryCache {
     }
 
     fn entry(&mut self, shape: &Shape, libs: &LibraryRegistry) -> &mut CacheEntry {
+        let registry = libs as *const LibraryRegistry as usize;
+        if registry != self.registry {
+            self.entries.clear();
+            self.registry = registry;
+        }
         let frame = self.frame;
         let (path, unit) = self.unit(shape).unzip();
         let jumps = self.jumps.get(&shape.id).map_or(&[][..], Vec::as_slice);

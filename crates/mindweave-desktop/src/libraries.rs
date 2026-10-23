@@ -1,12 +1,21 @@
 //! The shape libraries: the built-in ones plus those in the user's library
-//! folder, loaded once at startup.
+//! folder, loaded at startup and again after an install or uninstall.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use gpui_kit::{App, Global, SharedString};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::{App, AppContext as _, Global, SharedString, Window};
 use mindweave_core::library::{quote, shorten_notice};
-use mindweave_core::{builtin_libraries, user_libraries_dir, Icon, LibraryRegistry};
+use mindweave_core::{
+    builtin_libraries, install_library_folder, install_library_zip, shown_libraries,
+    uninstall_folder, user_libraries_dir, Icon, Library, LibraryRegistry,
+};
+
+use crate::app_state::AppState;
+use crate::icon_library::ImportSource;
 
 /// The icon shown for a Lucide name that is not bundled.
 pub const FALLBACK_ICON: &str = "shapes";
@@ -30,6 +39,140 @@ pub fn init(cx: &mut App) -> Vec<String> {
     notices.extend(unbundled_icon_notices(&registry, bundled_icons(cx)));
     cx.set_global(Libraries(Arc::new(registry)));
     notices
+}
+
+/// Loads the libraries again, hands them to every open document (shapes
+/// of a library that is gone draw as placeholders) and redraws every
+/// window. Returns the notices, as [`init`] does.
+pub fn reload(cx: &mut App) -> Vec<String> {
+    let notices = init(cx);
+    let registry = cx.global::<Libraries>().0.clone();
+    AppState::set_libraries(registry, cx);
+    cx.refresh_windows();
+    notices
+}
+
+/// The libraries shown in the ribbon and the More gallery: the enabled
+/// ones, in the user's order (see [`shown_libraries`]).
+pub fn shown<'a>(registry: &'a LibraryRegistry, cx: &App) -> Vec<&'a Library> {
+    match cx.try_global::<AppState>() {
+        Some(state) => shown_libraries(
+            registry.libraries(),
+            &state.settings.library_order,
+            &state.settings.disabled_libraries,
+        ),
+        None => registry.libraries().iter().collect(),
+    }
+}
+
+/// Asks for a library folder or `.zip` and installs it, in the
+/// background. The result, and any notices from loading the libraries
+/// again, show as notifications in `window`.
+pub fn install(source: ImportSource, window: &mut Window, cx: &mut App) {
+    let dialog = rfd::AsyncFileDialog::new().set_title("Install Shape Library");
+    let handle = window.window_handle();
+    cx.spawn(async move |cx| {
+        let picked = match source {
+            ImportSource::Folder => dialog.pick_folder().await,
+            ImportSource::Zip => dialog.add_filter("Zip archive", &["zip"]).pick_file().await,
+        };
+        let Some(picked) = picked else {
+            return;
+        };
+        let path: PathBuf = picked.path().to_path_buf();
+        let registry = cx.update(|cx| cx.global::<Libraries>().0.clone());
+        let result = cx
+            .background_spawn(async move {
+                let user_dir = user_libraries_dir();
+                match source {
+                    ImportSource::Folder => install_library_folder(&path, &registry, &user_dir),
+                    ImportSource::Zip => install_library_zip(&path, &registry, &user_dir),
+                }
+            })
+            .await;
+        cx.update(|cx| {
+            let (note, notices) = match result {
+                Ok(library) => (
+                    Notification::success(format!(
+                        "Installed the \"{}\" library.",
+                        quote(&library.name)
+                    )),
+                    reload(cx),
+                ),
+                Err(err) => (Notification::error(err.to_string()), Vec::new()),
+            };
+            handle
+                .update(cx, |_, window, cx| {
+                    window.push_notification(note, cx);
+                    show_notices(&notices, window, cx);
+                })
+                .ok();
+        });
+    })
+    .detach();
+}
+
+/// Asks whether to uninstall user library `id`; on a yes moves its folder
+/// to the Trash, forgets its order and disabled state, and loads the
+/// libraries again.
+pub fn confirm_uninstall(id: &str, window: &mut Window, cx: &mut App) {
+    let Some(library) = cx.global::<Libraries>().0.library(id) else {
+        return;
+    };
+    let name = quote(&library.name);
+    let answer = window.prompt(
+        gpui_kit::PromptLevel::Warning,
+        &format!("Move \"{name}\" to the Trash?"),
+        Some("Shapes from it in documents will show as placeholders."),
+        &["Move to Trash", "Cancel"],
+        cx,
+    );
+    let handle = window.window_handle();
+    let id = id.to_string();
+    cx.spawn(async move |cx| {
+        if answer.await != Ok(0) {
+            return;
+        }
+        handle
+            .update(cx, |_, window, cx| uninstall(&id, &name, window, cx))
+            .ok();
+    })
+    .detach();
+}
+
+/// Moves user library `id` (named `name`) to the Trash and loads the
+/// libraries again.
+fn uninstall(id: &str, name: &str, window: &mut Window, cx: &mut App) {
+    let registry = cx.global::<Libraries>().0.clone();
+    let trashed = uninstall_folder(&registry, id, &user_libraries_dir())
+        .map_err(|e| e.to_string())
+        .and_then(|folder| crate::app_state::move_to_trash(&folder).map_err(|e| e.to_string()));
+    match trashed {
+        Ok(()) => {
+            AppState::update_settings(cx, |settings| settings.forget_library(id));
+            let notices = reload(cx);
+            window.push_notification(
+                Notification::info(format!("Moved the \"{name}\" library to the Trash.")),
+                cx,
+            );
+            show_notices(&notices, window, cx);
+        }
+        Err(err) => window.push_notification(
+            Notification::error(format!("Could not uninstall \"{name}\": {err}")),
+            cx,
+        ),
+    }
+}
+
+/// Shows notices from loading the libraries as warnings in `window`, as
+/// at start-up.
+pub fn show_notices(notices: &[String], window: &mut Window, cx: &mut App) {
+    for notice in notices {
+        window.push_notification(
+            Notification::warning(notice.clone()).title("Shape library"),
+            cx,
+        );
+    }
 }
 
 /// The asset paths of the bundled icons.

@@ -112,10 +112,14 @@ impl ButtonIcon {
     }
 }
 
-/// Outline icons built once, by library and shape id; the libraries do not
-/// change while the app runs.
+/// Outline icons built once, by library and shape id, for the libraries
+/// as loaded (the address of the registry they came from); loading the
+/// libraries again starts afresh.
 #[derive(Default)]
-struct OutlineIcons(HashMap<(String, String), Option<Rc<Path<Pixels>>>>);
+struct OutlineIcons {
+    registry: usize,
+    paths: HashMap<(String, String), Option<Rc<Path<Pixels>>>>,
+}
 
 impl Global for OutlineIcons {}
 
@@ -209,13 +213,16 @@ impl EditorWindow {
 /// Row 1: the tabs, scrolling sideways when they do not fit, and a menu of
 /// every tab at the right end.
 fn tab_row(editor: &mut EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoElement {
-    let libraries = &cx.global::<Libraries>().0;
+    let libraries = cx.global::<Libraries>().0.clone();
     let tabs = tab_order(
-        libraries
-            .libraries()
+        crate::libraries::shown(&libraries, cx)
             .iter()
             .map(|l| (l.id.clone().into(), l.name.clone().into())),
     );
+    // A library hidden in Settings takes its tab away: show Home instead.
+    if !tabs.iter().any(|(id, _)| **id == editor.tools.tab) {
+        editor.tools.tab = HOME_TAB.to_string();
+    }
     let active = editor.tools.tab.clone();
     // Bring a tab chosen from the menu or by a tool key into view.
     if editor.ribbon.scrolled_to != active {
@@ -277,7 +284,8 @@ fn tab_row(editor: &mut EditorWindow, cx: &mut Context<EditorWindow>) -> impl In
 }
 
 /// The tabs, as `(id, name)`: Home first, then Basic Shapes, Mind Map,
-/// Artboard and the other libraries in `libraries`' order.
+/// Artboard and the other libraries in `libraries`' order (the user's
+/// order from Settings, which leaves Basic Shapes after Home).
 fn tab_order(
     libraries: impl IntoIterator<Item = (SharedString, SharedString)>,
 ) -> Vec<(SharedString, SharedString)> {
@@ -298,9 +306,8 @@ fn tab_order(
 /// a gallery strip, as many as fit, ending in the gallery's expander.
 fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoElement {
     let libraries = cx.global::<Libraries>().0.clone();
-    let library = libraries
-        .libraries()
-        .iter()
+    let library = crate::libraries::shown(&libraries, cx)
+        .into_iter()
         .find(|l| l.id == editor.tools.tab);
     let content: Vec<AnyElement> = match library {
         Some(library) => {
@@ -775,13 +782,23 @@ pub(super) fn item_button(
         tool: item.tool.clone(),
         icon: match item.icon {
             Icon::Lucide(name) => ButtonIcon::lucide_or_fallback(name, cx),
-            Icon::Outline(geometry) => ButtonIcon::Outline(
-                cx.default_global::<OutlineIcons>()
-                    .0
-                    .entry((library.to_string(), item.id.to_string()))
-                    .or_insert_with(|| outline_icon_path(geometry).map(Rc::new))
-                    .clone(),
-            ),
+            Icon::Outline(geometry) => {
+                let registry = cx
+                    .try_global::<Libraries>()
+                    .map_or(0, |l| std::sync::Arc::as_ptr(&l.0) as usize);
+                let icons = cx.default_global::<OutlineIcons>();
+                if icons.registry != registry {
+                    icons.paths.clear();
+                    icons.registry = registry;
+                }
+                ButtonIcon::Outline(
+                    icons
+                        .paths
+                        .entry((library.to_string(), item.id.to_string()))
+                        .or_insert_with(|| outline_icon_path(geometry).map(Rc::new))
+                        .clone(),
+                )
+            }
         },
         name: item.name.to_string().into(),
         tooltip: match key {

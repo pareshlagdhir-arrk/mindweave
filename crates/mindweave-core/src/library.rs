@@ -1177,6 +1177,8 @@ pub fn user_libraries_dir() -> PathBuf {
 #[derive(Clone, Debug, Default)]
 pub struct LibraryRegistry {
     libraries: Vec<Library>,
+    /// The folder each user library was loaded from, by library id.
+    folders: HashMap<String, PathBuf>,
 }
 
 impl LibraryRegistry {
@@ -1203,11 +1205,12 @@ impl LibraryRegistry {
         }
 
         let mut user = Vec::new();
+        let mut folders = HashMap::new();
         for folder in user_dir.map_or_else(Vec::new, |dir| library_folders(dir, &mut notices)) {
             let label = folder
                 .file_name()
                 .map_or_else(String::new, |n| quote(&n.to_string_lossy()));
-            match load_library(&DirFiles(folder), false) {
+            match load_library(&DirFiles(folder.clone()), false) {
                 Err(e) => notices.push(format!("{label}: {e}")),
                 Ok((library, _)) if ids.contains(&library.id) => notices.push(format!(
                     "{label}: the library id `{}` is already in use; skipped",
@@ -1219,6 +1222,7 @@ impl LibraryRegistry {
                     }
                     log.extend(report.log.iter().map(|line| format!("{label}: {line}")));
                     ids.insert(library.id.clone());
+                    folders.insert(library.id.clone(), folder);
                     user.push(library);
                 }
             }
@@ -1235,7 +1239,18 @@ impl LibraryRegistry {
             notices: short(notices),
             log: short(log),
         };
-        (LibraryRegistry { libraries }, report)
+        (LibraryRegistry { libraries, folders }, report)
+    }
+
+    /// The folder user library `id` was loaded from; `None` for built-in
+    /// and unknown libraries.
+    pub fn folder(&self, id: &str) -> Option<&Path> {
+        self.folders.get(id).map(PathBuf::as_path)
+    }
+
+    /// The library with id `id`, if installed.
+    pub fn library(&self, id: &str) -> Option<&Library> {
+        self.libraries.iter().find(|l| l.id == id)
     }
 
     /// Built-in libraries first, then user libraries by `order`, then name.
