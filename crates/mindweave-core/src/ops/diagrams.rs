@@ -13,7 +13,7 @@ use super::{
 use crate::arrange::Arrange;
 use crate::color::{normalize_hex_color, normalize_style_color};
 use crate::geometry::{Frame, Primitive};
-use crate::library::{LibraryItem, ShapeSource};
+use crate::library::{LibraryItem, LibraryRegistry, ShapeSource};
 use crate::line::{
     line_frame, ArrowHead, LineDash, LineProps, LineRoute, LINE_LIBRARY, LINE_SHAPE,
 };
@@ -326,43 +326,47 @@ impl TextChanges {
     }
 }
 
+/// The libraries of `libs` with their shapes and templates.
+pub fn list_libraries(libs: &LibraryRegistry) -> Vec<LibraryInfo> {
+    libs.libraries()
+        .iter()
+        .map(|lib| LibraryInfo {
+            id: lib.id.clone(),
+            name: lib.name.clone(),
+            builtin: lib.builtin,
+            description: lib.description.clone(),
+            items: lib
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    LibraryItem::Shape(i) => lib.shapes.get(*i).map(|d| LibraryItemInfo {
+                        id: d.id.clone(),
+                        name: d.name.clone(),
+                        kind: "shape",
+                        default_size: d.default_size,
+                        params: d
+                            .params
+                            .iter()
+                            .map(|p| format!("{} ({}..{})", p.key, p.min, p.max))
+                            .collect(),
+                    }),
+                    LibraryItem::Template(t) => Some(LibraryItemInfo {
+                        id: t.id.clone(),
+                        name: t.name.clone(),
+                        kind: "template",
+                        default_size: t.default_size,
+                        params: Vec::new(),
+                    }),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 impl Workspace {
     /// The installed libraries with their shapes and templates.
     pub fn list_libraries(&self) -> Vec<LibraryInfo> {
-        self.libraries()
-            .libraries()
-            .iter()
-            .map(|lib| LibraryInfo {
-                id: lib.id.clone(),
-                name: lib.name.clone(),
-                builtin: lib.builtin,
-                description: lib.description.clone(),
-                items: lib
-                    .items
-                    .iter()
-                    .filter_map(|item| match item {
-                        LibraryItem::Shape(i) => lib.shapes.get(*i).map(|d| LibraryItemInfo {
-                            id: d.id.clone(),
-                            name: d.name.clone(),
-                            kind: "shape",
-                            default_size: d.default_size,
-                            params: d
-                                .params
-                                .iter()
-                                .map(|p| format!("{} ({}..{})", p.key, p.min, p.max))
-                                .collect(),
-                        }),
-                        LibraryItem::Template(t) => Some(LibraryItemInfo {
-                            id: t.id.clone(),
-                            name: t.name.clone(),
-                            kind: "template",
-                            default_size: t.default_size,
-                            params: Vec::new(),
-                        }),
-                    })
-                    .collect(),
-            })
-            .collect()
+        list_libraries(self.libraries())
     }
 
     /// Places shape or template `item` of library `library` with its

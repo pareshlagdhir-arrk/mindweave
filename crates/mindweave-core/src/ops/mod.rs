@@ -36,7 +36,7 @@ use crate::text_measure::measure;
 
 pub use artboards::{artboard_presets, ArtboardPresetInfo, ArtboardSize};
 pub use diagrams::{
-    ArrangeHow, ConnectOptions, LibraryInfo, LibraryItemInfo, StyleInput, TextInput,
+    list_libraries, ArrangeHow, ConnectOptions, LibraryInfo, LibraryItemInfo, StyleInput, TextInput,
 };
 pub use docs::{DocumentSummary, LayerSummary, PageSummary};
 pub use error::{OpError, OpResult};

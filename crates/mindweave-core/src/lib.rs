@@ -5,6 +5,7 @@ pub mod artboard;
 pub mod clipboard;
 pub mod color;
 pub mod document;
+pub mod export;
 pub mod files;
 pub mod format;
 pub mod geometry;
