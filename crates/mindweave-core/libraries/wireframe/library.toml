@@ -1,0 +1,7 @@
+format = 1
+id = "wireframe"
+name = "Wireframe"
+version = "1.0.0"
+author = "Mindweave"
+description = "Low-fidelity web and mobile interface elements: controls, layout blocks and placeholders."
+icon = "layout-dashboard"

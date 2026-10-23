@@ -1075,8 +1075,121 @@ const FLOWCHART_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The Wireframe library files, compiled in.
+const WIREFRAME_FILES: &[(&str, &str)] = &[
+    (
+        "library.toml",
+        include_str!("../libraries/wireframe/library.toml"),
+    ),
+    (
+        "shapes.toml",
+        include_str!("../libraries/wireframe/shapes.toml"),
+    ),
+    (
+        "shapes/avatar.svg",
+        include_str!("../libraries/wireframe/shapes/avatar.svg"),
+    ),
+    (
+        "shapes/browser-window.svg",
+        include_str!("../libraries/wireframe/shapes/browser-window.svg"),
+    ),
+    (
+        "shapes/checkbox-checked.svg",
+        include_str!("../libraries/wireframe/shapes/checkbox-checked.svg"),
+    ),
+    (
+        "shapes/checkbox.svg",
+        include_str!("../libraries/wireframe/shapes/checkbox.svg"),
+    ),
+    (
+        "shapes/divider.svg",
+        include_str!("../libraries/wireframe/shapes/divider.svg"),
+    ),
+    (
+        "shapes/dropdown.svg",
+        include_str!("../libraries/wireframe/shapes/dropdown.svg"),
+    ),
+    (
+        "shapes/hamburger-menu.svg",
+        include_str!("../libraries/wireframe/shapes/hamburger-menu.svg"),
+    ),
+    (
+        "shapes/icon-placeholder.svg",
+        include_str!("../libraries/wireframe/shapes/icon-placeholder.svg"),
+    ),
+    (
+        "shapes/image-placeholder.svg",
+        include_str!("../libraries/wireframe/shapes/image-placeholder.svg"),
+    ),
+    (
+        "shapes/keyboard.svg",
+        include_str!("../libraries/wireframe/shapes/keyboard.svg"),
+    ),
+    (
+        "shapes/list-item.svg",
+        include_str!("../libraries/wireframe/shapes/list-item.svg"),
+    ),
+    (
+        "shapes/mobile-nav-bar.svg",
+        include_str!("../libraries/wireframe/shapes/mobile-nav-bar.svg"),
+    ),
+    (
+        "shapes/modal.svg",
+        include_str!("../libraries/wireframe/shapes/modal.svg"),
+    ),
+    (
+        "shapes/paragraph.svg",
+        include_str!("../libraries/wireframe/shapes/paragraph.svg"),
+    ),
+    (
+        "shapes/progress-bar.svg",
+        include_str!("../libraries/wireframe/shapes/progress-bar.svg"),
+    ),
+    (
+        "shapes/radio-selected.svg",
+        include_str!("../libraries/wireframe/shapes/radio-selected.svg"),
+    ),
+    (
+        "shapes/radio.svg",
+        include_str!("../libraries/wireframe/shapes/radio.svg"),
+    ),
+    (
+        "shapes/search-field.svg",
+        include_str!("../libraries/wireframe/shapes/search-field.svg"),
+    ),
+    (
+        "shapes/slider.svg",
+        include_str!("../libraries/wireframe/shapes/slider.svg"),
+    ),
+    (
+        "shapes/tab-bar.svg",
+        include_str!("../libraries/wireframe/shapes/tab-bar.svg"),
+    ),
+    (
+        "shapes/table.svg",
+        include_str!("../libraries/wireframe/shapes/table.svg"),
+    ),
+    (
+        "shapes/toggle.svg",
+        include_str!("../libraries/wireframe/shapes/toggle.svg"),
+    ),
+    (
+        "shapes/tooltip.svg",
+        include_str!("../libraries/wireframe/shapes/tooltip.svg"),
+    ),
+    (
+        "shapes/video-placeholder.svg",
+        include_str!("../libraries/wireframe/shapes/video-placeholder.svg"),
+    ),
+    (
+        "shapes/web-header.svg",
+        include_str!("../libraries/wireframe/shapes/web-header.svg"),
+    ),
+];
+
 /// Every built-in library's files, in toolbar order.
-const BUILTIN_LIBRARY_FILES: &[&[(&str, &str)]] = &[BASIC_SHAPES_FILES, FLOWCHART_FILES];
+const BUILTIN_LIBRARY_FILES: &[&[(&str, &str)]] =
+    &[BASIC_SHAPES_FILES, FLOWCHART_FILES, WIREFRAME_FILES];
 
 /// The libraries compiled into the app. Panics only if a built-in library
 /// is invalid, which the tests rule out.
@@ -1350,7 +1463,7 @@ version = "1.0.0"
     fn builtin_libraries_come_in_toolbar_order() {
         let libs = builtin_libraries();
         let ids: Vec<&str> = libs.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, ["basic-shapes", "flowchart"]);
+        assert_eq!(ids, ["basic-shapes", "flowchart", "wireframe"]);
         assert_eq!(libs[0].shapes.len(), 6);
     }
 
@@ -1364,12 +1477,40 @@ version = "1.0.0"
     }
 
     #[test]
+    fn wireframe_has_web_and_mobile_elements() {
+        let libs = builtin_libraries();
+        let wire = libs.iter().find(|l| l.id == "wireframe").unwrap();
+        assert_eq!(wire.name, "Wireframe");
+        assert_eq!(wire.shapes.len(), 32);
+        for id in [
+            "button",
+            "text-field",
+            "checkbox",
+            "toggle",
+            "image-placeholder",
+            "tab-bar",
+            "browser-window",
+        ] {
+            assert!(wire.shape(id).is_some(), "{id}");
+        }
+        // Buttons keep an adjustable corner radius.
+        assert_eq!(wire.shape("button").unwrap().params[0].default, 8.0);
+    }
+
+    #[test]
     fn flowchart_has_the_standard_symbols() {
         let libs = builtin_libraries();
         let flow = libs.iter().find(|l| l.id == "flowchart").unwrap();
         assert_eq!(flow.name, "Flowchart");
         assert_eq!(flow.shapes.len(), 28);
-        for id in ["process", "decision", "terminator", "data", "document", "database"] {
+        for id in [
+            "process",
+            "decision",
+            "terminator",
+            "data",
+            "document",
+            "database",
+        ] {
             assert!(flow.shape(id).is_some(), "{id}");
         }
         // Inner lines are strokes only, so the annotation bracket has no fill.
@@ -1917,7 +2058,17 @@ max = 8
         let (registry, report) = LibraryRegistry::new(builtin_libraries(), Some(user));
         let notices = report.notices;
         let ids: Vec<_> = registry.libraries().iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, ["basic-shapes", "flowchart", "first", "alpha", "zeta"]);
+        assert_eq!(
+            ids,
+            [
+                "basic-shapes",
+                "flowchart",
+                "wireframe",
+                "first",
+                "alpha",
+                "zeta"
+            ]
+        );
         assert!(registry.libraries()[0].builtin);
         assert_eq!(registry.libraries()[0].name, "Basic Shapes");
         assert_eq!(notices.len(), 2, "{notices:?}");
@@ -1962,7 +2113,10 @@ max = 8
         let (registry, report) = LibraryRegistry::new(builtin_libraries(), Some(user));
         let notices = report.notices;
         let ids: Vec<_> = registry.libraries().iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, ["basic-shapes", "flowchart", "good", "warns"]);
+        assert_eq!(
+            ids,
+            ["basic-shapes", "flowchart", "wireframe", "good", "warns"]
+        );
         assert_eq!(notices.len(), 4, "{notices:?}");
         assert!(notices
             .iter()

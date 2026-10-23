@@ -1,0 +1,286 @@
+[[shape]]
+id = "button"
+name = "Button"
+icon = "rectangle-horizontal"
+default_size = [120, 40]
+primitive = "rect"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "corner_radius"
+label = "Corner radius"
+min = 0
+max = 1000
+step = 1
+default = 8
+
+[[shape]]
+id = "pill-button"
+name = "Pill Button"
+icon = "pill"
+default_size = [120, 40]
+primitive = "rect"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "corner_radius"
+label = "Corner radius"
+min = 0
+max = 1000
+step = 1
+default = 20
+
+[[shape]]
+id = "text-field"
+name = "Text Field"
+icon = "text-cursor-input"
+default_size = [200, 40]
+primitive = "rect"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "corner_radius"
+label = "Corner radius"
+min = 0
+max = 1000
+step = 1
+default = 4
+
+[[shape]]
+id = "text-area"
+name = "Text Area"
+icon = "notepad-text"
+default_size = [240, 100]
+primitive = "rect"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "corner_radius"
+label = "Corner radius"
+min = 0
+max = 1000
+step = 1
+default = 4
+
+[[shape]]
+id = "search-field"
+name = "Search Field"
+default_size = [200, 40]
+svg = "shapes/search-field.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "dropdown"
+name = "Dropdown"
+default_size = [200, 40]
+svg = "shapes/dropdown.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "checkbox"
+name = "Checkbox"
+default_size = [24, 24]
+svg = "shapes/checkbox.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "checkbox-checked"
+name = "Checkbox (Checked)"
+default_size = [24, 24]
+svg = "shapes/checkbox-checked.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "radio"
+name = "Radio Button"
+default_size = [24, 24]
+svg = "shapes/radio.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "radio-selected"
+name = "Radio Button (Selected)"
+default_size = [24, 24]
+svg = "shapes/radio-selected.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "toggle"
+name = "Toggle"
+default_size = [52, 32]
+svg = "shapes/toggle.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "slider"
+name = "Slider"
+default_size = [200, 24]
+svg = "shapes/slider.svg"
+style = { fill = "none", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "progress-bar"
+name = "Progress Bar"
+default_size = [200, 12]
+svg = "shapes/progress-bar.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "badge"
+name = "Badge"
+icon = "badge"
+default_size = [64, 24]
+primitive = "rect"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "corner_radius"
+label = "Corner radius"
+min = 0
+max = 1000
+step = 1
+default = 12
+
+[[shape]]
+id = "tooltip"
+name = "Tooltip"
+default_size = [160, 56]
+svg = "shapes/tooltip.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "card"
+name = "Card"
+icon = "square"
+default_size = [240, 160]
+primitive = "rect"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "corner_radius"
+label = "Corner radius"
+min = 0
+max = 1000
+step = 1
+default = 12
+
+[[shape]]
+id = "container"
+name = "Container"
+icon = "square-dashed"
+default_size = [400, 240]
+primitive = "rect"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "corner_radius"
+label = "Corner radius"
+min = 0
+max = 1000
+step = 1
+default = 0
+
+[[shape]]
+id = "list-item"
+name = "List Item"
+default_size = [360, 64]
+svg = "shapes/list-item.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "table"
+name = "Table"
+default_size = [360, 160]
+svg = "shapes/table.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "image-placeholder"
+name = "Image"
+default_size = [200, 140]
+svg = "shapes/image-placeholder.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "video-placeholder"
+name = "Video"
+default_size = [200, 120]
+svg = "shapes/video-placeholder.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "avatar"
+name = "Avatar"
+default_size = [48, 48]
+svg = "shapes/avatar.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "icon-placeholder"
+name = "Icon"
+default_size = [24, 24]
+svg = "shapes/icon-placeholder.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "paragraph"
+name = "Paragraph Text"
+default_size = [240, 80]
+svg = "shapes/paragraph.svg"
+style = { fill = "none", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "divider"
+name = "Divider"
+default_size = [240, 8]
+svg = "shapes/divider.svg"
+style = { fill = "none", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "hamburger-menu"
+name = "Menu Icon"
+default_size = [24, 24]
+svg = "shapes/hamburger-menu.svg"
+style = { fill = "none", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "mobile-nav-bar"
+name = "Mobile Navigation Bar"
+default_size = [393, 56]
+svg = "shapes/mobile-nav-bar.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "tab-bar"
+name = "Mobile Tab Bar"
+default_size = [393, 64]
+svg = "shapes/tab-bar.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "keyboard"
+name = "Mobile Keyboard"
+default_size = [393, 216]
+svg = "shapes/keyboard.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "web-header"
+name = "Web Header"
+default_size = [1200, 64]
+svg = "shapes/web-header.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "browser-window"
+name = "Browser Window"
+default_size = [640, 400]
+svg = "shapes/browser-window.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "modal"
+name = "Dialog"
+default_size = [400, 260]
+svg = "shapes/modal.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
