@@ -409,7 +409,10 @@ fn tool_row(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> impl IntoE
                 .into_iter()
                 .map(|b| tool_button(editor, b, cx).into_any_element())
                 .collect();
-            let insert = vec![image_button(cx).into_any_element()];
+            let insert = vec![
+                image_button(cx).into_any_element(),
+                svg_shapes_button(cx).into_any_element(),
+            ];
             with_dividers(vec![tools, insert], cx)
         }
     };
@@ -734,6 +737,23 @@ fn image_button(cx: &mut Context<EditorWindow>) -> impl IntoElement {
     })
     .on_click(cx.listener(|this, _, window, cx| {
         this.import_images(window, cx);
+        this.focus_handle.focus(window, cx);
+    }))
+}
+
+/// Import SVG as Shapes: each element of an SVG file an editable shape.
+fn svg_shapes_button(cx: &mut Context<EditorWindow>) -> impl IntoElement {
+    ribbon_button(
+        "import-svg-shapes",
+        ButtonIcon::lucide_or_fallback("file-input", cx),
+        false,
+        cx,
+    )
+    .tooltip(|window, cx| {
+        Tooltip::new("Import SVG as Shapes (each element editable)").build(window, cx)
+    })
+    .on_click(cx.listener(|this, _, window, cx| {
+        this.import_svg_shapes(window, cx);
         this.focus_handle.focus(window, cx);
     }))
 }

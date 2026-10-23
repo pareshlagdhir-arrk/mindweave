@@ -14,10 +14,12 @@ pub mod image;
 pub mod library;
 pub mod line;
 pub mod mindmap;
+pub mod path_shape;
 pub mod session;
 pub mod settings;
 pub mod shape;
 pub mod svg;
+pub mod svg_import;
 pub mod template;
 pub mod text;
 pub mod text_history;
@@ -66,12 +68,16 @@ pub use mindmap::{
     BOUNDARY_SHAPE, BRANCH_COLORS, TOPIC_ICON_SIZE, TOPIC_IMAGE_SIZE, TOPIC_PADDING, TOPIC_SHAPE,
     TOPIC_TEXT_MAX,
 };
+pub use path_shape::{PathProps, PATH_SHAPE};
 pub use session::DocumentSession;
 pub use settings::{
     load_settings, save_settings, settings_path, AppSettings, RecentFile, WindowSize, MAX_RECENT,
     MAX_RECENT_COLORS, MAX_RECENT_FONTS,
 };
 pub use shape::{Label, Shape, Style, TextBoxProps, VAlign, TEXT_LIBRARY, TEXT_SHAPE};
+pub use svg_import::{
+    import_svg, place_import, SvgImport, SvgImportError, MAX_IMPORT_BYTES, MAX_IMPORT_OBJECTS,
+};
 pub use template::{
     instantiate_line_template, instantiate_template, PartKind, PartLabel, TemplateDef,
     TemplatePart, MAX_TEMPLATE_PARTS,

@@ -8,6 +8,8 @@ actions!(
         NewFile,
         OpenFile,
         Save,
+        /// File > Import SVG as Shapes…: each SVG element an editable shape.
+        ImportSvgShapes,
         CloseWindow,
         Quit,
         ToggleThemePicker,

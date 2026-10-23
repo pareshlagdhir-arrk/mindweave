@@ -101,7 +101,7 @@ pub fn parse_outline(src: &str) -> Result<Geometry, SvgError> {
 /// byte scan that runs before the recursive XML parser. Comments, CDATA,
 /// processing instructions and quoted attribute values are skipped; any
 /// miscount can only over-count, which merely rejects the file.
-fn nesting_exceeds(src: &str, max: usize) -> bool {
+pub(crate) fn nesting_exceeds(src: &str, max: usize) -> bool {
     let b = src.as_bytes();
     let skip_past = |from: usize, end: &[u8]| {
         b[from..]
@@ -158,7 +158,7 @@ fn nesting_exceeds(src: &str, max: usize) -> bool {
 /// most [`MAX_PATH_VALUE`] in size, and no arc spans more than twice that
 /// (radii grow to fit the chord). Only the part before any syntax error
 /// is checked, as only that part is used.
-fn path_is_reasonable(d: &str) -> bool {
+pub(crate) fn path_is_reasonable(d: &str) -> bool {
     let ok = |v: f64| v.is_finite() && v.abs() <= MAX_PATH_VALUE;
     let (mut cur, mut start) = ((0.0f64, 0.0f64), (0.0f64, 0.0f64));
     for seg in PathParser::from(d).map_while(Result::ok) {
@@ -403,7 +403,7 @@ fn element_cmds(node: Node) -> Option<(Vec<PathCmd>, FillRole)> {
 
 /// Path data as commands; parsing stops at the first error, keeping what
 /// came before it (as SVG renderers do).
-fn path_cmds(d: &str) -> Vec<PathCmd> {
+pub(crate) fn path_cmds(d: &str) -> Vec<PathCmd> {
     let p = |x: f64, y: f64| (x as f32, y as f32);
     SimplifyingPathParser::from(d)
         .map_while(Result::ok)

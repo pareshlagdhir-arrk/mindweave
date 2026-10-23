@@ -9,9 +9,9 @@ use gpui_kit::component::{h_flex, ActiveTheme as _, Sizable as _, TitleBar};
 use gpui_kit::*;
 
 use crate::actions::{
-    self, BringForward, BringToFront, CloseWindow, Cut, Delete, Duplicate, Group, NewFile,
-    NotImplemented, OpenFile, Paste, Quit, Redo, Save, SelectAll, SendBackward, SendToBack,
-    ShowDashboard, ToggleIcons, ToggleLayers, ToggleLeftSidebar, ToggleProperties,
+    self, BringForward, BringToFront, CloseWindow, Cut, Delete, Duplicate, Group, ImportSvgShapes,
+    NewFile, NotImplemented, OpenFile, Paste, Quit, Redo, Save, SelectAll, SendBackward,
+    SendToBack, ShowDashboard, ToggleIcons, ToggleLayers, ToggleLeftSidebar, ToggleProperties,
     ToggleThemePicker, Undo, Ungroup, ZoomIn, ZoomOut, ZoomReset,
 };
 use crate::app_state::AppState;
@@ -112,6 +112,7 @@ pub(crate) fn menus(kind: WindowKind, panels: PanelState, include_quit: bool) ->
         item("Open…", OpenFile, true),
         Separator,
         item("Save", Save, editor),
+        item("Import SVG as Shapes…", ImportSvgShapes, editor),
         item("Close Window", CloseWindow, true),
         Separator,
         item("Show Dashboard", ShowDashboard, true),
@@ -455,6 +456,7 @@ mod tests {
     fn dashboard_disables_document_items() {
         for label in [
             "Save",
+            "Import SVG as Shapes…",
             "Zoom In",
             "Zoom Out",
             "Actual Size",

@@ -213,6 +213,7 @@ fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
         boundary,
         artboard_props,
         artboard,
+        path,
         extra,
     } = a;
     let auto = a.auto_width();
@@ -241,6 +242,7 @@ fn shape_content_eq(a: &Shape, b: &Shape) -> bool {
         && *boundary == b.boundary
         && *artboard_props == b.artboard_props
         && *artboard == b.artboard
+        && *path == b.path
         && *extra == b.extra
 }
 

@@ -123,10 +123,15 @@ impl AppSettings {
 
     /// Gives a new `shape` the style last set on its kind: lines take the
     /// remembered line style and properties, other library shapes the
-    /// remembered shape style. Text boxes, images, topics and artboards keep
-    /// their own.
+    /// remembered shape style. Text boxes, images, topics, artboards and
+    /// path shapes keep their own.
     pub fn apply_remembered_style(&self, shape: &mut Shape) {
-        if shape.is_text_box() || shape.is_image() || shape.is_topic() || shape.is_artboard() {
+        if shape.is_text_box()
+            || shape.is_image()
+            || shape.is_topic()
+            || shape.is_artboard()
+            || shape.is_path()
+        {
             return;
         }
         if shape.is_line() {
@@ -151,7 +156,12 @@ impl AppSettings {
     /// Remembers `shape`'s style for new shapes of its kind (see
     /// [`Self::apply_remembered_style`]). Returns whether anything changed.
     pub fn remember_style(&mut self, shape: &Shape) -> bool {
-        if shape.is_text_box() || shape.is_image() || shape.is_topic() || shape.is_artboard() {
+        if shape.is_text_box()
+            || shape.is_image()
+            || shape.is_topic()
+            || shape.is_artboard()
+            || shape.is_path()
+        {
             return false;
         }
         let before = (

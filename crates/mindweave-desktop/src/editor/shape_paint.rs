@@ -94,6 +94,8 @@ pub fn shape_geometry_with(
     } else if shape.is_artboard() {
         let g = primitive_geometry(Primitive::Rect, f.w, f.h, &|k| shape.param(k));
         (g, false)
+    } else if let Some(p) = shape.path.as_ref().filter(|_| shape.is_path()) {
+        (p.local_geometry(f.w, f.h), false)
     } else if let Some(t) = &shape.topic {
         let radius = if t.is_central() { 12. } else { 6. };
         let g = primitive_geometry(Primitive::Rect, f.w, f.h, &|k| {
@@ -215,7 +217,8 @@ fn geom_key(s: &Shape, jumps: &[f32], ring_floor: f32) -> GeomKey {
 }
 
 /// Canvas outlines of shapes, by shape id, reused across frames while the
-/// shape's frame, parameters and library shape stay the same.
+/// shape's frame, parameters and library shape stay the same. A path
+/// shape's outline is never edited, so its path data is not compared.
 #[derive(Default)]
 pub struct GeometryCache {
     entries: HashMap<Uuid, CacheEntry>,
@@ -945,7 +948,7 @@ impl<'a> ShapePainter<'a> {
         );
         for sub in &outline.geometry.paths {
             let color = match sub.fill {
-                FillRole::Shape | FillRole::FillOnly => fill,
+                FillRole::Shape | FillRole::FillOnly | FillRole::NonZero => fill,
                 FillRole::StrokeColor => stroke_color,
                 // Inside a hollow arrowhead: hides the line beneath it.
                 FillRole::Canvas => Some(self.auto.fill.opacity(opacity)),
@@ -953,6 +956,9 @@ impl<'a> ShapePainter<'a> {
             };
             if let Some(color) = color {
                 let mut builder = PathBuilder::fill();
+                if sub.fill == FillRole::NonZero {
+                    builder = builder.with_style(PathStyle::Fill(FillOptions::non_zero()));
+                }
                 self.append(&mut builder, &sub.cmds);
                 push_built(builder, color, &mut paths);
             }

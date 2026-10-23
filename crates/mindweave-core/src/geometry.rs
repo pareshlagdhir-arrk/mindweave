@@ -35,10 +35,14 @@ pub enum FillRole {
     /// Filled with the canvas colour and not stroked (the inside of a
     /// hollow arrowhead, hiding the line beneath it).
     Canvas,
+    /// Like [`FillRole::Shape`], but filled by the non-zero winding rule
+    /// (imported SVG paths that ask for it).
+    NonZero,
 }
 
 /// A run of commands painted the same way. It may hold several contours
-/// (each starting with `MoveTo`); fills use the even-odd rule.
+/// (each starting with `MoveTo`); fills use the even-odd rule, except
+/// [`FillRole::NonZero`].
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct SubPath {
     pub cmds: Vec<PathCmd>,
@@ -618,8 +622,9 @@ fn segment_distance(p: Pt, a: Pt, b: Pt) -> f32 {
     len((p.0 - (a.0 + t * abx), p.1 - (a.1 + t * aby)))
 }
 
-/// Whether `p` is inside a filled sub-path (even-odd rule, contours closed
-/// implicitly) or within `stroke_tolerance` of any segment of `g`.
+/// Whether `p` is inside a filled sub-path (even-odd rule, or non-zero for
+/// [`FillRole::NonZero`]; contours closed implicitly) or within
+/// `stroke_tolerance` of any segment of `g`.
 pub fn hit_test(g: &Geometry, p: Pt, stroke_tolerance: f32) -> bool {
     g.paths.iter().any(|sp| {
         let contours = flatten_subpath(sp, HIT_TOLERANCE);
@@ -628,8 +633,31 @@ pub fn hit_test(g: &Geometry, p: Pt, stroke_tolerance: f32) -> bool {
                 .any(|s| segment_distance(p, s[0], s[1]) <= stroke_tolerance)
                 || (c.len() == 1 && segment_distance(p, c[0], c[0]) <= stroke_tolerance)
         });
-        near_stroke || (sp.fill != FillRole::None && inside_even_odd(&contours, p))
+        near_stroke
+            || match sp.fill {
+                FillRole::None => false,
+                FillRole::NonZero => winding_number(&contours, p) != 0,
+                _ => inside_even_odd(&contours, p),
+            }
     })
+}
+
+/// How many times `contours` wind round `p` (non-zero rule).
+fn winding_number(contours: &[Vec<Pt>], p: Pt) -> i32 {
+    let mut winding = 0;
+    for c in contours {
+        let n = c.len();
+        for i in 0..n {
+            let (a, b) = (c[i], c[(i + 1) % n]);
+            if (a.1 > p.1) != (b.1 > p.1) {
+                let x = a.0 + (p.1 - a.1) / (b.1 - a.1) * (b.0 - a.0);
+                if p.0 < x {
+                    winding += if b.1 > a.1 { 1 } else { -1 };
+                }
+            }
+        }
+    }
+    winding
 }
 
 /// Even-odd point-in-polygon test over all `contours`.
@@ -865,6 +893,31 @@ mod tests {
         assert!(hit_test(&g, (10.0, 10.0), 0.0));
         assert!(!hit_test(&g, (50.0, 50.0), 0.0));
         assert!(hit_test(&g, (50.0, 26.0), 2.0), "near the hole's edge");
+    }
+
+    #[test]
+    fn hit_test_non_zero_fills_same_direction_overlaps() {
+        let square = |a: f32, b: f32| {
+            vec![
+                PathCmd::MoveTo((a, a)),
+                PathCmd::LineTo((b, a)),
+                PathCmd::LineTo((b, b)),
+                PathCmd::LineTo((a, b)),
+                PathCmd::Close,
+            ]
+        };
+        let mut cmds = square(0.0, 100.0);
+        cmds.extend(square(25.0, 75.0));
+        let g = Geometry {
+            paths: vec![SubPath {
+                cmds,
+                fill: FillRole::NonZero,
+            }],
+        };
+        // Both contours wind the same way: no hole.
+        assert!(hit_test(&g, (50.0, 50.0), 0.0));
+        assert!(hit_test(&g, (10.0, 10.0), 0.0));
+        assert!(!hit_test(&g, (150.0, 50.0), 0.0));
     }
 
     #[test]

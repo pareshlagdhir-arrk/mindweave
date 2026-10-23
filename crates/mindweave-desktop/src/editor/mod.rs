@@ -22,6 +22,7 @@ mod shape_gallery;
 mod shape_paint;
 mod shape_properties;
 mod status_bar;
+mod svg_shapes;
 mod text_edit;
 mod text_layout;
 mod text_paint;
@@ -53,11 +54,11 @@ use mindweave_core::{
 use crate::actions::{
     self, AddCentralTopic, AddSiblingBefore, AddSubtopic, AddSummary, BringForward, BringToFront,
     Cancel, CloseWindow, Cut, Delete, Duplicate, EditEquation, EditLabel, EditNote, EditText,
-    Group, NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight, NudgeRightFar, NudgeUp,
-    NudgeUpFar, Paste, Redo, Save, SelectAll, SendBackward, SendToBack, ToggleBoundary,
-    ToggleIcons, ToggleLayers, ToggleLeftSidebar, ToggleProperties, ToolArtboard, ToolEllipse,
-    ToolHand, ToolLine, ToolPointer, ToolRectangle, ToolRelationship, ToolText, Undo, Ungroup,
-    EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
+    Group, ImportSvgShapes, NudgeDown, NudgeDownFar, NudgeLeft, NudgeLeftFar, NudgeRight,
+    NudgeRightFar, NudgeUp, NudgeUpFar, Paste, Redo, Save, SelectAll, SendBackward, SendToBack,
+    ToggleBoundary, ToggleIcons, ToggleLayers, ToggleLeftSidebar, ToggleProperties, ToolArtboard,
+    ToolEllipse, ToolHand, ToolLine, ToolPointer, ToolRectangle, ToolRelationship, ToolText, Undo,
+    Ungroup, EDITOR_CONTEXT, TEXT_EDITING_CONTEXT,
 };
 use crate::app_state::AppState;
 use crate::menu_bar::{menu_bar, WindowKind};
@@ -676,6 +677,16 @@ impl EditorWindow {
             },
             cx,
         );
+    }
+
+    /// File > Import SVG as Shapes….
+    fn on_import_svg_shapes(
+        &mut self,
+        _: &ImportSvgShapes,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.import_svg_shapes(window, cx);
     }
 
     fn on_ungroup(&mut self, _: &Ungroup, window: &mut Window, cx: &mut Context<Self>) {
@@ -1495,6 +1506,7 @@ impl Render for EditorWindow {
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_close_window))
             .on_action(cx.listener(Self::on_group))
+            .on_action(cx.listener(Self::on_import_svg_shapes))
             .on_action(cx.listener(Self::on_ungroup))
             .on_action(cx.listener(Self::on_bring_to_front))
             .on_action(cx.listener(Self::on_bring_forward))

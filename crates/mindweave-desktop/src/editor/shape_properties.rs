@@ -221,6 +221,9 @@ pub(super) fn summarize(shapes: &[&Shape], libs: &LibraryRegistry) -> Option<Sum
         "Text".to_string()
     } else if first.is_image() {
         "Image".to_string()
+    } else if first.is_path() {
+        // Imported outlines belong to no shape library.
+        "Path".to_string()
     } else if first.is_boundary() {
         "Boundary".to_string()
     } else if first.is_artboard() {

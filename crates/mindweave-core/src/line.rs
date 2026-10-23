@@ -1132,7 +1132,7 @@ pub fn double_outline(g: &Geometry, width: f32) -> Geometry {
             paths.push(sub.clone());
             continue;
         }
-        if sub.fill == FillRole::Shape {
+        if matches!(sub.fill, FillRole::Shape | FillRole::NonZero) {
             paths.push(SubPath {
                 cmds: sub.cmds.clone(),
                 fill: FillRole::FillOnly,

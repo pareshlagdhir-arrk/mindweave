@@ -24,6 +24,7 @@ use crate::image::{ImageData, IMAGE_SHAPE};
 use crate::library::ShapeDef;
 use crate::line::{ArrowHead, LineDash, LineProps, LINE_LIBRARY, LINE_SHAPE, OLD_ARROW_SHAPE};
 use crate::mindmap::{BoundaryProps, TopicProps, BOUNDARY_SHAPE, TOPIC_SHAPE};
+use crate::path_shape::{PathProps, PATH_SHAPE};
 use crate::text::{HAlign, RichText, RunStyle, DEFAULT_FONT_SIZE, LABEL_FONT_SIZE};
 
 /// Library id reserved for Mindweave's built-in objects.
@@ -174,6 +175,9 @@ pub struct Shape {
     /// always on artboards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artboard: Option<Uuid>,
+    /// Set on path shapes only: their outline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathProps>,
     /// Fields this version does not know, written back unchanged.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -212,6 +216,7 @@ impl Shape {
             boundary: None,
             artboard_props: None,
             artboard: None,
+            path: None,
             extra: serde_json::Map::new(),
         }
         .normalized()
@@ -259,6 +264,7 @@ impl Shape {
             boundary: None,
             artboard_props: None,
             artboard: None,
+            path: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -344,6 +350,23 @@ impl Shape {
         };
         s.artboard_props = Some(ArtboardProps::default());
         s.normalized()
+    }
+
+    /// A new path shape outlined by `path` in `frame`, painted in `style`.
+    pub fn new_path(path: PathProps, frame: Frame, style: Style) -> Shape {
+        let mut s = Shape::new_text_box((frame.x, frame.y));
+        s.shape = PATH_SHAPE.to_string();
+        s.frame = frame;
+        s.label = None;
+        s.text_box = None;
+        s.style = style;
+        s.path = Some(path);
+        s.normalized()
+    }
+
+    /// Whether this is a path shape.
+    pub fn is_path(&self) -> bool {
+        self.library == TEXT_LIBRARY && self.shape == PATH_SHAPE
     }
 
     /// Whether this is an artboard.
@@ -496,6 +519,11 @@ impl Shape {
             self.artboard = None;
         } else {
             self.artboard_props = None;
+        }
+        if self.is_path() {
+            self.path.get_or_insert_with(PathProps::default);
+        } else {
+            self.path = None;
         }
         if self.is_image() {
             // Pictures are drawn upright and unmirrored.
