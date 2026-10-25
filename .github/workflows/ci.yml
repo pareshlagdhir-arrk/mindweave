@@ -26,6 +26,24 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo build -p mindweave-desktop -p mindweave-mcp --release
+      # The install scripts, into a temporary folder (the build is reused).
+      - if: runner.os != 'Windows'
+        run: scripts/install.sh
+        env:
+          MINDWEAVE_APP_DIR: ${{ runner.temp }}/apps
+          MINDWEAVE_BIN_DIR: ${{ runner.temp }}/bin
+      - if: runner.os != 'Windows'
+        run: test -x "$RUNNER_TEMP/bin/mindweave-mcp" && ls -R "$RUNNER_TEMP/apps"
+      - if: runner.os == 'Windows'
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+          if (-not (Test-Path "$env:RUNNER_TEMP\apps\mindweave.exe")) { exit 1 }
+          if (-not (Test-Path "$env:RUNNER_TEMP\bin\mindweave-mcp.exe")) { exit 1 }
+        shell: pwsh
+        env:
+          MINDWEAVE_APP_DIR: ${{ runner.temp }}/apps
+          MINDWEAVE_BIN_DIR: ${{ runner.temp }}/bin
+          MINDWEAVE_NO_SHORTCUT: '1'
       - uses: actions/upload-artifact@v4
         with:
           name: mindweave-unsigned-${{ runner.os }}-${{ runner.arch }}
