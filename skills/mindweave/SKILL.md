@@ -58,6 +58,12 @@ returns the ids of what it created.
   `end_head` `triangle` or `arrow` for flow, `route` `angular` for tidy
   orthogonal lines, and `text` for labels on decisions.
 - `group` things that belong together; `arrange` changes stacking.
+- Pictures: `add_image` places an image file (`file`, an absolute path) or
+  an icon (`icon`) on the page; `set_topic_picture` puts one above a
+  topic's text (icons 32 units, images 160 by default). Find icons with
+  `list_icons` (only sets the user imported in the app; if none, use
+  files). Icons suit architecture and flow diagrams, such as cloud service
+  icons on topics or shapes.
 
 ## Artboards
 

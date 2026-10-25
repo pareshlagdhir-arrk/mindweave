@@ -6,6 +6,7 @@
 //! `mindweave-core`, one file operation per call.
 
 pub mod args;
+pub mod pictures;
 pub mod render;
 pub mod server;
 pub mod tools;

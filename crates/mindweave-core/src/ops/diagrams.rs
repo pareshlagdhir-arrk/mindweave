@@ -859,7 +859,7 @@ fn shape_is_artboard(s: &crate::session::DocumentSession, id: Uuid) -> bool {
 }
 
 /// Checks a width or height.
-fn check_size_arg(v: f32) -> OpResult<f32> {
+pub(super) fn check_size_arg(v: f32) -> OpResult<f32> {
     if v.is_finite() && (1.0..=super::MAX_COORD).contains(&v) {
         Ok(v)
     } else {

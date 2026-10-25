@@ -11,10 +11,14 @@ use mindweave_core::ops::{
     artboard_presets, ArrangeHow, ArtboardSize, ConnectOptions, ObjectFilter, ObjectKind,
     StyleInput, TextInput, TopicEdit, TopicNode, TopicPosition, Workspace,
 };
-use mindweave_core::{builtin_libraries, user_libraries_dir, LibraryRegistry};
+use mindweave_core::{
+    builtin_libraries, search_icons, user_icons_dir, user_libraries_dir, LibraryRegistry,
+    TOPIC_ICON_SIZE, TOPIC_IMAGE_SIZE,
+};
 use serde_json::{json, Map, Value};
 
 use crate::args::{check_folder, expand, write_atomic, Args};
+use crate::pictures;
 use crate::render;
 
 /// Why a tool call failed.
@@ -34,6 +38,8 @@ type ToolResult = Result<Content, String>;
 /// What the tools share: the libraries shapes come from.
 pub struct Context {
     libs: Arc<LibraryRegistry>,
+    /// Where the icon sets imported in the app are.
+    icons_dir: std::path::PathBuf,
 }
 
 /// One tool.
@@ -303,6 +309,18 @@ const TOOLS: &[Tool] = &[
         run: list_artboard_presets,
     },
     Tool {
+        name: "list_icons",
+        description: "Find icons in the icon sets imported in the Mindweave app, for add_image and set_topic_picture. Returns the sets and up to `limit` icons whose names hold every word of `query`, each as \"Set/name\". `path` is optional.",
+        props: || vec![
+            ("query", s("Words the icon name must hold, such as \"arrow left\" (default: all icons)")),
+            ("set", s("Only this icon set")),
+            ("limit", json!({"type": "integer", "minimum": 1, "maximum": 500, "description": "Most icons returned (default 50)"})),
+        ],
+        required: &[],
+        needs_path: false,
+        run: list_icons,
+    },
+    Tool {
         name: "add_mind_map",
         description: "Add a mind map: a central topic, optionally with a whole tree of topics under it in one call. Returns the map id (the central topic's id) and the ids of the topics added, depth first. Topics are laid out automatically.",
         props: || vec![
@@ -401,6 +419,37 @@ const TOOLS: &[Tool] = &[
         required: &["shape", "x", "y"],
         needs_path: true,
         run: add_shape,
+    },
+    Tool {
+        name: "add_image",
+        description: "Place a picture on the page: an image file (PNG, JPEG, GIF, WebP, BMP, TIFF or SVG, at most 20 MB) or an icon from list_icons. `x`, `y` is the top-left corner. Give `w` or `h` (the other keeps the proportions), both, or `longest`; by default it keeps its own size up to 600 units (icons: 64). Inside an artboard it joins it. Returns its id.",
+        props: || vec![
+            page(),
+            ("file", s("Absolute path of the image file")),
+            ("icon", s("An icon, as list_icons names it: \"Set/name\"")),
+            ("x", num("Left edge")),
+            ("y", num("Top edge")),
+            ("w", num("Width")),
+            ("h", num("Height")),
+            ("longest", num("Size of the longest side, proportions kept")),
+        ],
+        required: &["x", "y"],
+        needs_path: true,
+        run: add_image,
+    },
+    Tool {
+        name: "set_topic_picture",
+        description: "Show a picture above a topic's text, as the app's topic picture: an icon from list_icons or an image file. `size` is its longest side (default 32 for icons, 160 for files). `remove: true` takes the picture away. The topic grows to fit.",
+        props: || vec![
+            ("id", id("The topic")),
+            ("file", s("Absolute path of the image file")),
+            ("icon", s("An icon, as list_icons names it: \"Set/name\"")),
+            ("size", num("Longest side of the picture (12 to 800)")),
+            ("remove", boolean("true: remove the topic's picture")),
+        ],
+        required: &["id"],
+        needs_path: true,
+        run: set_topic_picture,
     },
     Tool {
         name: "add_text",
@@ -574,12 +623,22 @@ impl Context {
     /// (the app's user libraries folder when `None`); also returns the
     /// libraries' load notices.
     pub fn new(libraries_dir: Option<&Path>) -> (Context, Vec<String>) {
+        Self::with_icons(libraries_dir, None)
+    }
+
+    /// [`Self::new`], with the icon sets in `icons_dir` (the app's icons
+    /// folder when `None`).
+    pub fn with_icons(
+        libraries_dir: Option<&Path>,
+        icons_dir: Option<&Path>,
+    ) -> (Context, Vec<String>) {
         let default_dir = user_libraries_dir();
         let dir = libraries_dir.unwrap_or(&default_dir);
         let (libs, report) = LibraryRegistry::new(builtin_libraries(), Some(dir));
         (
             Context {
                 libs: Arc::new(libs),
+                icons_dir: icons_dir.map_or_else(user_icons_dir, Path::to_path_buf),
             },
             report.notices,
         )
@@ -968,6 +1027,80 @@ fn add_shape(ctx: &Context, a: &Args) -> ToolResult {
         format!("Added {} shape(s).", ids.len()),
         json!({"ids": ids}),
     )
+}
+
+fn list_icons(ctx: &Context, a: &Args) -> ToolResult {
+    if a.get("path").is_some() {
+        a.doc_path()?;
+    }
+    let query = a.str_opt("query")?.unwrap_or("");
+    let set = a.str_opt("set")?;
+    let limit = a.usize_opt("limit")?.unwrap_or(50).clamp(1, 500);
+    let sets = pictures::icon_sets(&ctx.icons_dir);
+    if sets.is_empty() {
+        return reply(
+            format!(
+                "No icon sets are installed (in {}). Import one in the Mindweave app (Icons pane, +), or use pictures from files.",
+                ctx.icons_dir.display()
+            ),
+            json!({"sets": [], "icons": []}),
+        );
+    }
+    let found = search_icons(&sets, set, query);
+    let icons: Vec<Value> = found
+        .iter()
+        .take(limit)
+        .map(|(s, i)| json!({"icon": format!("{}/{}", s.name, i.name), "group": i.group}))
+        .collect();
+    let set_list: Vec<Value> = sets
+        .iter()
+        .map(|s| json!({"name": s.name, "icons": s.icons.len()}))
+        .collect();
+    reply(
+        format!("{} matching icon(s); showing {}.", found.len(), icons.len()),
+        json!({"sets": set_list, "icons": icons}),
+    )
+}
+
+/// The picture `a` names with `file` or `icon` (exactly one), and whether
+/// it is an icon.
+fn picture_arg(ctx: &Context, a: &Args) -> Result<(mindweave_core::ops::Picture, bool), String> {
+    match (a.str_opt("file")?, a.str_opt("icon")?) {
+        (Some(file), None) => Ok((pictures::read_file(file)?, false)),
+        (None, Some(icon)) => Ok((pictures::read_icon(&ctx.icons_dir, icon)?, true)),
+        (Some(_), Some(_)) => Err("Pass either `file` or `icon`, not both.".into()),
+        (None, None) => Err("Pass `file` (an image file) or `icon` (see list_icons).".into()),
+    }
+}
+
+fn add_image(ctx: &Context, a: &Args) -> ToolResult {
+    let at = (a.f32_req("x")?, a.f32_req("y")?);
+    let size = (a.f32_opt("w")?, a.f32_opt("h")?);
+    let (picture, icon) = picture_arg(ctx, a)?;
+    // Icons are placed as the Icons pane places them.
+    let longest = a.f32_opt("longest")?.or(icon.then_some(64.0));
+    let page = a.usize_opt("page")?;
+    let id = ctx.edit(a, |ws| ws.add_image(page, picture, at, size, longest))?;
+    reply("Added a picture.", json!({"id": id}))
+}
+
+fn set_topic_picture(ctx: &Context, a: &Args) -> ToolResult {
+    let id = a.id_req("id")?;
+    if a.bool_opt("remove")? == Some(true) {
+        if a.get("file").is_some() || a.get("icon").is_some() {
+            return Err("`remove` takes no `file` or `icon`.".into());
+        }
+        ctx.edit(a, |ws| ws.set_topic_picture(id, None, TOPIC_ICON_SIZE))?;
+        return reply("Removed the topic's picture.", json!({"id": id}));
+    }
+    let (picture, icon) = picture_arg(ctx, a)?;
+    let size = a.f32_opt("size")?.unwrap_or(if icon {
+        TOPIC_ICON_SIZE
+    } else {
+        TOPIC_IMAGE_SIZE
+    });
+    ctx.edit(a, |ws| ws.set_topic_picture(id, Some(picture), size))?;
+    reply("Set the topic's picture.", json!({"id": id}))
 }
 
 fn add_text(ctx: &Context, a: &Args) -> ToolResult {

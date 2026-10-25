@@ -13,6 +13,8 @@ path = "src/main.rs"
 mindweave-core = { path = "../mindweave-core" }
 base64.workspace = true
 dirs.workspace = true
+# Measures placed pictures (formats the app opens).
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 ratex-layout.workspace = true
 ratex-parser.workspace = true
 ratex-svg.workspace = true

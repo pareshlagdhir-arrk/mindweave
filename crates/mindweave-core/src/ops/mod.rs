@@ -18,6 +18,7 @@ mod docs;
 mod error;
 mod mindmaps;
 mod notes;
+mod pictures;
 mod read;
 mod validate;
 
@@ -42,6 +43,7 @@ pub use docs::{DocumentSummary, LayerSummary, PageSummary};
 pub use error::{OpError, OpResult};
 pub use mindmaps::{TaskEdit, TopicEdit, TopicNode, TopicPosition};
 pub use notes::{rich_text_from_markdown, rich_text_plain};
+pub use pictures::Picture;
 pub use read::{
     FrameInfo, LineInfo, ObjectFilter, ObjectInfo, ObjectKind, StyleInfo, TaskInfo, TextStyleInfo,
     TopicInfo,

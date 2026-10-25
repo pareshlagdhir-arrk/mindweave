@@ -23,9 +23,12 @@ tells agents how to use it well.
   `add_relationship`, `set_structure`. Diagrams: `add_shape`, `add_text`,
   `connect`, `add_line`, `group`, `ungroup`, `set_style`, `set_text`,
   `set_name`, `move_objects`, `set_frame`, `delete_objects`, `arrange`.
-  Artboards: `add_artboard`. Pictures: `export_png` (returned as an image
-  of at most 2048 px a side, optionally written to a `.png` at full size),
-  `export_svg`.
+  Images and icons: `list_icons` (searches the icon sets imported in the
+  app), `add_image` (an image file or an icon on the page),
+  `set_topic_picture` (an icon or image above a topic's text, or
+  `remove`). Artboards: `add_artboard`. Seeing the result: `export_png`
+  (returned as an image of at most 2048 px a side, optionally written to a
+  `.png` at full size), `export_svg`.
 - **Same rules as the app.** Edits go through the same document model:
   mind maps are laid out automatically, connectors stay attached to the
   shapes they join, objects placed inside an artboard join it, and the file
@@ -38,7 +41,9 @@ tells agents how to use it well.
   LaTeX engine, task badges are drawn but link and note badges are not,
   and fonts come from the system.
 - **Safety.** The server only touches the paths it is given, reads and
-  writes only files ending in `.mindweave` (exports only `.png` or `.svg`;
+  writes only files ending in `.mindweave` (also reads picture files named
+  in `add_image` and `set_topic_picture`, only with a picture's extension
+  and at most 20 MB, and the app's icon sets; exports only `.png` or `.svg`;
   an existing file at an export's `out_path` is replaced, written through a
   temporary file), requires absolute paths, never replaces an existing document with
   `create_document` and never deletes files. Texts, batches and picture
@@ -58,6 +63,7 @@ Options:
 | Option | Meaning |
 |---|---|
 | `--libraries-dir DIR` | Folder of user shape libraries. Default: the app's (`~/Library/Application Support/Mindweave/libraries` on macOS), or `$MINDWEAVE_LIBRARIES_DIR`. |
+| `--icons-dir DIR` | Folder of icon sets, as imported in the app. Default: the app's (`~/Library/Application Support/Mindweave/icons` on macOS), or `$MINDWEAVE_ICONS_DIR`. |
 | `--help`, `--version` | Show help or the version. |
 
 In the snippets below, replace `/path/to/mindweave-mcp` with the installed

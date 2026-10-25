@@ -324,3 +324,104 @@ fn inline_pngs_are_capped_and_files_get_full_size() {
         "{names:?}"
     );
 }
+
+#[test]
+fn pictures_from_files_and_icons_go_on_the_page_and_in_topics() {
+    let dir = tempfile::tempdir().unwrap();
+    // One icon set with one icon, as the app imports them.
+    let icons = dir.path().join("icons");
+    std::fs::create_dir_all(icons.join("Office")).unwrap();
+    std::fs::write(
+        icons.join("Office").join("rocket.svg"),
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="12"><rect width="24" height="12"/></svg>"#,
+    )
+    .unwrap();
+    // A 40 × 20 PNG.
+    let png = dir.path().join("photo.png");
+    image::RgbaImage::new(40, 20).save(&png).unwrap();
+    let (ctx, _) = Context::with_icons(Some(&dir.path().join("no-libraries")), Some(&icons));
+    let mut s = Server::new(ctx);
+    let doc = dir.path().join("p.mindweave");
+    let doc = doc.to_str().unwrap();
+    call(&mut s, "create_document", json!({"path": doc}));
+
+    let found = data(&call(&mut s, "list_icons", json!({"query": "rock"})));
+    assert_eq!(found["icons"][0]["icon"], "Office/rocket");
+
+    // A file keeps its proportions: 40 × 20 at width 100 is 100 × 50.
+    let r = call(
+        &mut s,
+        "add_image",
+        json!({"path": doc, "file": png, "x": 10, "y": 20, "w": 100}),
+    );
+    let pic = data(&r)["id"].as_str().unwrap().to_string();
+    let obj = data(&call(&mut s, "get_object", json!({"path": doc, "id": pic})));
+    assert_eq!(obj["object"]["frame"]["w"], 100.0);
+    assert_eq!(obj["object"]["frame"]["h"], 50.0);
+    // An icon is placed 64 units on its longest side.
+    let r = call(
+        &mut s,
+        "add_image",
+        json!({"path": doc, "icon": "rocket", "x": 0, "y": 0}),
+    );
+    let ic = data(&r)["id"].as_str().unwrap().to_string();
+    let obj = data(&call(&mut s, "get_object", json!({"path": doc, "id": ic})));
+    assert_eq!(obj["object"]["frame"]["w"], 64.0);
+    assert_eq!(obj["object"]["frame"]["h"], 32.0);
+
+    // A topic shows an icon above its text, and grows for it.
+    let map = data(&call(
+        &mut s,
+        "add_mind_map",
+        json!({"path": doc, "central_text": "Launch"}),
+    ))["map_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let before = data(&call(&mut s, "get_object", json!({"path": doc, "id": map})))["object"]
+        ["frame"]["h"]
+        .as_f64()
+        .unwrap();
+    call(
+        &mut s,
+        "set_topic_picture",
+        json!({"path": doc, "id": map, "icon": "Office/rocket"}),
+    );
+    let after = data(&call(&mut s, "get_object", json!({"path": doc, "id": map})))["object"]
+        ["frame"]["h"]
+        .as_f64()
+        .unwrap();
+    assert!(after > before, "{before} -> {after}");
+    let saved = std::fs::read_to_string(doc).unwrap();
+    assert!(saved.contains("\"picture\""));
+    call(
+        &mut s,
+        "set_topic_picture",
+        json!({"path": doc, "id": map, "remove": true}),
+    );
+    assert!(!std::fs::read_to_string(doc)
+        .unwrap()
+        .contains("\"picture_size\""));
+
+    // Refused: a file that is not a picture, both sources, an unknown icon.
+    let text = dir.path().join("notes.txt");
+    std::fs::write(&text, "hello").unwrap();
+    let r = call(
+        &mut s,
+        "add_image",
+        json!({"path": doc, "file": text, "x": 0, "y": 0}),
+    );
+    assert!(failure(&r).contains("is not a picture"));
+    let r = call(
+        &mut s,
+        "add_image",
+        json!({"path": doc, "file": png, "icon": "rocket", "x": 0, "y": 0}),
+    );
+    assert!(failure(&r).contains("either `file` or `icon`"));
+    let r = call(
+        &mut s,
+        "add_image",
+        json!({"path": doc, "icon": "rockt", "x": 0, "y": 0}),
+    );
+    assert!(failure(&r).contains("No icon"));
+}

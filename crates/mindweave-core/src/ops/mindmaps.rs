@@ -166,7 +166,7 @@ fn replace_label_text(shape: &mut Shape, text: &str) {
 
 impl Workspace {
     /// The topic `id` with its page and layer; `what` names the command.
-    fn topic_at(&self, id: Uuid, what: &str) -> OpResult<(usize, usize)> {
+    pub(super) fn topic_at(&self, id: Uuid, what: &str) -> OpResult<(usize, usize)> {
         let (p, l, s) = self.locate(id)?;
         if s.topic.is_none() {
             return Err(OpError::WrongKind {

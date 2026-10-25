@@ -58,7 +58,7 @@ The [user guide](docs/user-guide.md) covers everything else, including the keybo
 
 ## AI agents
 
-`mindweave-mcp` lets an agent build and edit `.mindweave` files (topics, notes, equations, tasks, shapes, artboards) and look at the result as a picture. Register it once with your client, then ask in plain words, for example "Create ~/notes/plan.mindweave with a launch plan as tasks":
+`mindweave-mcp` lets an agent build and edit `.mindweave` files (topics, notes, equations, tasks, shapes, images and icons, artboards) and look at the result as a picture. Register it once with your client, then ask in plain words, for example "Create ~/notes/plan.mindweave with a launch plan as tasks":
 
 ```sh
 claude mcp add --scope user mindweave -- ~/.cargo/bin/mindweave-mcp   # Claude Code (run in a terminal)
