@@ -247,6 +247,49 @@ pub fn clipboard_pictures(item: &ClipboardItem) -> Option<Vec<Vec<u8>>> {
     None
 }
 
+/// Whether a picture on the clipboard wins over its text `text`: when there
+/// is no text, or the text is only a web address, a path or a file name
+/// (one line without spaces), as browsers and Preview add to a copied
+/// picture. Longer text (a spreadsheet's or a document's, which add a
+/// picture of themselves) is pasted as text.
+pub fn picture_wins_over(text: Option<&str>) -> bool {
+    match text.map(str::trim) {
+        None | Some("") => true,
+        Some(t) => !t.contains(char::is_whitespace),
+    }
+}
+
+/// The picture data on the system clipboard, read directly: gpui reports
+/// text before image data, so a picture copied with text would otherwise
+/// paste as its text. PNG first, then the other formats Mindweave opens.
+#[cfg(target_os = "macos")]
+pub fn native_clipboard_picture() -> Option<Vec<u8>> {
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::NSString;
+    let pasteboard = NSPasteboard::generalPasteboard();
+    [
+        "public.png",
+        "public.jpeg",
+        "com.compuserve.gif",
+        "org.webmproject.webp",
+        "public.svg-image",
+        "public.tiff",
+        "com.microsoft.bmp",
+    ]
+    .into_iter()
+    .find_map(|uti| {
+        let data = pasteboard.dataForType(&NSString::from_str(uti))?;
+        let bytes = data.to_vec();
+        (!bytes.is_empty()).then_some(bytes)
+    })
+}
+
+/// No direct clipboard reading elsewhere yet: gpui's entries only.
+#[cfg(not(target_os = "macos"))]
+pub fn native_clipboard_picture() -> Option<Vec<u8>> {
+    None
+}
+
 impl EditorWindow {
     /// The Image button: asks for picture files and places them.
     pub(super) fn import_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -322,7 +365,7 @@ impl EditorWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_picture_path, svg_scale};
+    use super::{is_picture_path, picture_wins_over, svg_scale};
 
     use std::path::Path;
 
@@ -359,5 +402,17 @@ mod tests {
         assert!(is_picture_path(Path::new("logo.svg")));
         assert!(!is_picture_path(Path::new("notes.txt")));
         assert!(!is_picture_path(Path::new("noext")));
+    }
+
+    #[test]
+    fn a_picture_wins_over_an_address_but_not_over_text() {
+        assert!(picture_wins_over(None));
+        assert!(picture_wins_over(Some("  ")));
+        assert!(picture_wins_over(Some("https://example.com/logo.png")));
+        assert!(picture_wins_over(Some("/Users/me/Pictures/cat.jpg")));
+        assert!(picture_wins_over(Some("cat.jpg")));
+        // Copied from a spreadsheet or a document, with a picture of it.
+        assert!(!picture_wins_over(Some("Q3 revenue")));
+        assert!(!picture_wins_over(Some("a\tb\nc\td")));
     }
 }

@@ -1107,12 +1107,20 @@ impl EditorWindow {
             return;
         };
         // A Mindweave payload is text; anything else that is a picture,
-        // or picture files, is placed as images.
+        // or picture files, is placed as images. A picture copied with a
+        // web address or file name (browsers, Preview) is placed as the
+        // picture, not as that text.
         let payload = item.text().filter(|t| is_mindweave_payload(t));
         if payload.is_none() {
             if let Some(files) = images::clipboard_pictures(&item) {
                 self.place_pictures(files, window, cx);
                 return;
+            }
+            if images::picture_wins_over(item.text().as_deref()) {
+                if let Some(bytes) = images::native_clipboard_picture() {
+                    self.place_pictures(vec![bytes], window, cx);
+                    return;
+                }
             }
         }
         let Some(text) = item.text() else {
