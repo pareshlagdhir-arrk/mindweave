@@ -1116,6 +1116,11 @@ impl EditorWindow {
                 self.place_pictures(files, window, cx);
                 return;
             }
+            // SVG source copied as text (Chromium browsers, icon sites).
+            if let Some(svg) = item.text().filter(|t| images::is_svg_markup(t)) {
+                self.place_pictures(vec![svg.into_bytes()], window, cx);
+                return;
+            }
             if images::picture_wins_over(item.text().as_deref()) {
                 if let Some(bytes) = images::native_clipboard_picture() {
                     self.place_pictures(vec![bytes], window, cx);

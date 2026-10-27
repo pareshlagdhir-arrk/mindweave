@@ -247,6 +247,21 @@ pub fn clipboard_pictures(item: &ClipboardItem) -> Option<Vec<Vec<u8>>> {
     None
 }
 
+/// Whether clipboard text `text` is an SVG picture's source, as
+/// Chromium-based browsers copy an inline SVG (and as icon sites copy
+/// their icons).
+pub fn is_svg_markup(text: &str) -> bool {
+    let t = text.trim();
+    let head = &t[..t.len().min(1024)];
+    let starts_svg = head.starts_with("<svg")
+        || ((head.starts_with("<?xml")
+            || head.starts_with("<!DOCTYPE svg")
+            || head.starts_with("<!--"))
+            && head.contains("<svg"));
+    starts_svg && t.ends_with('>') && t.contains("</svg>")
+        || starts_svg && t.ends_with("/>") && !t.contains("</svg>")
+}
+
 /// Whether a picture on the clipboard wins over its text `text`: when there
 /// is no text, or the text is only a web address, a path or a file name
 /// (one line without spaces), as browsers and Preview add to a copied
@@ -365,7 +380,7 @@ impl EditorWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_picture_path, picture_wins_over, svg_scale};
+    use super::{is_picture_path, is_svg_markup, picture_wins_over, svg_scale};
 
     use std::path::Path;
 
@@ -414,5 +429,21 @@ mod tests {
         // Copied from a spreadsheet or a document, with a picture of it.
         assert!(!picture_wins_over(Some("Q3 revenue")));
         assert!(!picture_wins_over(Some("a\tb\nc\td")));
+    }
+
+    #[test]
+    fn svg_source_text_is_recognised() {
+        let svg = r#"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+ <path d="M3 5h18"/>
+</svg>"#;
+        assert!(is_svg_markup(svg));
+        assert!(is_svg_markup(&format!("  \n{svg}\n")));
+        assert!(is_svg_markup(&format!("<?xml version=\"1.0\"?>\n{svg}")));
+        assert!(is_svg_markup(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"/>"#
+        ));
+        assert!(!is_svg_markup("Use an <svg> element for icons."));
+        assert!(!is_svg_markup("<div><svg></svg></div>"));
+        assert!(!is_svg_markup("hello"));
     }
 }
