@@ -20,7 +20,7 @@ use super::interaction::{
 use super::shape_gallery;
 use super::shape_paint::{
     paint_artboard_names, paint_highlight, paint_line_ends, paint_marquee, paint_preview,
-    paint_selection, paint_shapes, AutoColors,
+    paint_selection, paint_shapes, rgb_to_hsla, AutoColors,
 };
 use super::text_paint::{
     auto_color, backdrop, equation_color, link_color, text_background, text_box_wrap, Backdrop,
@@ -139,10 +139,15 @@ fn paint_background(
     cx: &mut App,
 ) {
     let theme = cx.theme();
+    // The page's colours (light, dark or its own background), else the
+    // app theme's.
+    let palette = settings.palette();
+    let background = palette.background.map_or(theme.background, rgb_to_hsla);
+    let grid_color = palette.grid.map_or(theme.border, rgb_to_hsla);
     let color = |hex: &Option<String>, theme_color: Hsla| {
         hex.as_deref().and_then(hex_to_hsla).unwrap_or(theme_color)
     };
-    window.paint_quad(fill(bounds, color(&settings.background, theme.background)));
+    window.paint_quad(fill(bounds, background));
     let pattern = settings.pattern;
     if pattern == BackgroundPattern::None {
         return;
@@ -152,7 +157,7 @@ fn paint_background(
     let origin = bounds.origin;
     window.with_content_mask(Some(ContentMask { bounds }), |window| match pattern {
         BackgroundPattern::Lines => {
-            let base = color(&settings.line_color, theme.border);
+            let base = color(&settings.line_color, grid_color);
             let minor = base.opacity(grid.alpha);
             // Major lines: full opacity and wider, centred on the grid line.
             let line = |ix: i64| {
@@ -180,7 +185,7 @@ fn paint_background(
             }
         }
         BackgroundPattern::Dots => {
-            let color = color(&settings.dot_color, theme.border).opacity(grid.alpha);
+            let color = color(&settings.dot_color, grid_color).opacity(grid.alpha);
             let stride = dot_stride(grid.xs.len(), grid.ys.len(), MAX_DOTS);
             // Anchor the thinning to canvas grid indices so the kept dots
             // stay on the same canvas points while panning.
@@ -457,7 +462,7 @@ impl EditorWindow {
     ) {
         let libs = cx.global::<Libraries>().0.clone();
         let canvas = backdrop(
-            self.session.page().canvas.background.as_deref(),
+            &self.session.page().canvas,
             cx.theme().background,
             cx.theme().foreground,
         );
@@ -468,7 +473,7 @@ impl EditorWindow {
         self.layout_text_boxes(window, canvas, cx);
         let page = self.session.page();
         let viewport = page.viewport;
-        let auto = AutoColors::new(page.canvas.background.as_deref(), cx);
+        let auto = AutoColors::new(&page.canvas, cx);
         let mut text = TextPaint {
             layouts: &mut self.text_layouts,
             glyphs: &mut self.glyph_outlines,

@@ -912,14 +912,12 @@ pub fn export_svg(
     }
     let (theme_bg, theme_fg) = opts.theme.colors();
     let parse = |c: &str| parse_hex_color(c).unwrap_or((255, 255, 255));
+    // A light or dark page, or one with its own background, keeps its
+    // colours; otherwise the export's theme applies.
+    let page_palette = p.canvas.palette();
     let palette = Palette {
-        canvas: p
-            .canvas
-            .background
-            .as_deref()
-            .and_then(parse_hex_color)
-            .unwrap_or_else(|| parse(theme_bg)),
-        ink: parse(theme_fg),
+        canvas: page_palette.background.unwrap_or_else(|| parse(theme_bg)),
+        ink: page_palette.ink.unwrap_or_else(|| parse(theme_fg)),
     };
     let mut w = Writer {
         out: String::new(),

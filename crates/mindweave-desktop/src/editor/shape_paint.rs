@@ -13,8 +13,9 @@ use mindweave_core::geometry::{
 use mindweave_core::{
     double_outline, frame_aabb, handle_positions, is_auto_color, is_ink_color,
     line_geometry_min_ring, line_jumps, map_decor, rotate_handle_position, rounded_polygon,
-    scale_unit, task_pie, task_tick, task_views, ArrowHead, Handle, LibraryRegistry, LineDash,
-    LineProps, Page, PathProps, Shape, Style, TaskStatus, TaskView, Viewport,
+    scale_unit, task_pie, task_tick, task_views, ArrowHead, CanvasSettings, Handle,
+    LibraryRegistry, LineDash, LineProps, Page, PathProps, Shape, Style, TaskStatus, TaskView,
+    Viewport,
 };
 use uuid::Uuid;
 
@@ -490,19 +491,34 @@ pub struct AutoColors {
 }
 
 impl AutoColors {
-    pub fn new(page_background: Option<&str>, cx: &App) -> Self {
+    pub fn new(canvas: &CanvasSettings, cx: &App) -> Self {
         let theme = cx.theme();
-        Self::from_theme(page_background, theme.background, theme.foreground)
+        Self::from_theme(canvas, theme.background, theme.foreground)
     }
 
-    /// The colours for a theme with `background` and text `foreground`.
-    pub fn from_theme(page_background: Option<&str>, background: Hsla, foreground: Hsla) -> Self {
+    /// The colours on a page with canvas settings `canvas` in an app theme
+    /// with `background` and text `foreground`: the page's own colours
+    /// (see [`CanvasSettings::palette`]), else the theme's.
+    pub fn from_theme(canvas: &CanvasSettings, background: Hsla, foreground: Hsla) -> Self {
+        let palette = canvas.palette();
+        let ink = palette.ink.map_or(foreground, rgb_to_hsla);
         AutoColors {
-            fill: page_background.and_then(hex_to_hsla).unwrap_or(background),
-            stroke: foreground,
-            ink: foreground,
+            fill: palette.background.map_or(background, rgb_to_hsla),
+            stroke: ink,
+            ink,
         }
     }
+}
+
+/// 8-bit RGB as a colour.
+pub fn rgb_to_hsla((r, g, b): (u8, u8, u8)) -> Hsla {
+    Rgba {
+        r: f32::from(r) / 255.,
+        g: f32::from(g) / 255.,
+        b: f32::from(b) / 255.,
+        a: 1.,
+    }
+    .into()
 }
 
 /// Paints the visible layers of `page`, bottom layer first and each
@@ -521,7 +537,7 @@ pub fn paint_shapes(
     equations: &mut EquationCache,
     text: &mut TextPaint,
 ) {
-    let auto = AutoColors::new(page.canvas.background.as_deref(), cx);
+    let auto = AutoColors::new(&page.canvas, cx);
     let painter = ShapePainter::new(bounds, vp, 1., auto, cx);
     cache.begin_frame();
     cache.set_zoom(vp.zoom);
@@ -1400,7 +1416,8 @@ mod tests {
             ),
         ];
         for (background, foreground) in themes {
-            let auto = super::AutoColors::from_theme(None, background, foreground);
+            let app = mindweave_core::CanvasSettings::default();
+            let auto = super::AutoColors::from_theme(&app, background, foreground);
             assert_eq!(auto.ink, foreground);
             // Ink is the foreground for fills and strokes alike, never the
             // canvas colour an Auto fill takes.
@@ -1409,9 +1426,14 @@ mod tests {
             assert_eq!(fill, Some(foreground));
             assert_eq!(stroke, Some(foreground.opacity(0.5)));
             assert_ne!(fill, Some(auto.fill));
-            // A page background changes the canvas colour, not the ink.
-            let paged = super::AutoColors::from_theme(Some("#336699"), background, foreground);
-            assert_eq!(paged.ink, foreground);
+            // A page background of its own changes the canvas colour, and
+            // the ink stands out against it: light on this dark blue.
+            let paged = mindweave_core::CanvasSettings {
+                background: Some("#336699".into()),
+                ..app
+            };
+            let paged = super::AutoColors::from_theme(&paged, background, foreground);
+            assert_eq!(paged.ink, super::rgb_to_hsla((0xE6, 0xE6, 0xE6)));
             assert_ne!(paged.fill, background);
         }
     }

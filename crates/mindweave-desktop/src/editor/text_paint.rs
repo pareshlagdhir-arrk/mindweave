@@ -18,8 +18,8 @@ use super::text_layout::{
 use gpui_kit::*;
 use mindweave_core::geometry::{line_label_placement, Pt, Rect};
 use mindweave_core::{
-    auto_text_color, is_ink_color, parse_hex_color, Mixed, RichText, RunStyle, Shape, VAlign,
-    Viewport,
+    auto_text_color, is_ink_color, parse_hex_color, CanvasSettings, Mixed, RichText, RunStyle,
+    Shape, VAlign, Viewport,
 };
 use uuid::Uuid;
 
@@ -858,34 +858,30 @@ fn load_face(font: &Font) -> Option<font_kit::font::Font> {
     faces.into_iter().nth(ix)
 }
 
-/// The canvas background as RGB: the page's `background` colour, else the
-/// theme's.
-pub fn canvas_background(page_background: Option<&str>, theme_background: Hsla) -> (u8, u8, u8) {
-    page_background
-        .and_then(parse_hex_color)
-        .unwrap_or_else(|| hsla_to_rgb(theme_background))
-}
-
 /// What Auto text is drawn against: the canvas background, and the ink
 /// colour an `"ink"` fill is painted in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Backdrop {
-    /// The canvas background (see [`canvas_background`]).
+    /// The canvas background (see [`backdrop`]).
     pub canvas: (u8, u8, u8),
     /// The theme's text colour, which `"ink"` stands for.
     pub ink: (u8, u8, u8),
 }
 
-/// The backdrop of a page with background `page_background` in a theme
-/// with `theme_background` and text `theme_foreground`.
+/// The backdrop of a page with canvas settings `canvas` in an app theme
+/// with `theme_background` and text `theme_foreground`: the page's own
+/// colours (see [`CanvasSettings::palette`]), else the theme's.
 pub fn backdrop(
-    page_background: Option<&str>,
+    canvas: &CanvasSettings,
     theme_background: Hsla,
     theme_foreground: Hsla,
 ) -> Backdrop {
+    let palette = canvas.palette();
     Backdrop {
-        canvas: canvas_background(page_background, theme_background),
-        ink: hsla_to_rgb(theme_foreground),
+        canvas: palette
+            .background
+            .unwrap_or_else(|| hsla_to_rgb(theme_background)),
+        ink: palette.ink.unwrap_or_else(|| hsla_to_rgb(theme_foreground)),
     }
 }
 
@@ -924,8 +920,8 @@ pub fn label_origin(w: f32, h: f32, padding: f32, text_height: f32, valign: VAli
 mod tests {
     // Not `super::*`: the gpui glob import would shadow `#[test]`.
     use super::{
-        backdrop, canvas_background, equation_color, label_origin, text_background, text_color,
-        text_frame, text_wrap, Backdrop,
+        backdrop, equation_color, label_origin, text_background, text_color, text_frame, text_wrap,
+        Backdrop,
     };
     use crate::editor::hex_to_hsla;
     use mindweave_core::geometry::Frame;
@@ -963,15 +959,36 @@ mod tests {
 
     #[test]
     fn auto_colour_backgrounds() {
-        let theme = gpui_kit::white();
+        use mindweave_core::{CanvasSettings, CanvasTheme};
+        let (white, black) = (gpui_kit::white(), gpui_kit::black());
+        let page = |background: Option<&str>, theme| CanvasSettings {
+            background: background.map(Into::into),
+            theme,
+            ..CanvasSettings::default()
+        };
+        // The app's theme, unless the page has colours of its own.
+        let app = backdrop(&page(None, CanvasTheme::App), white, black);
+        assert_eq!((app.canvas, app.ink), ((255, 255, 255), (0, 0, 0)));
+        let bogus = backdrop(&page(Some("bogus"), CanvasTheme::App), white, black);
+        assert_eq!(bogus, app);
+        // A dark page in a light app: dark canvas, light ink.
+        let dark = backdrop(&page(None, CanvasTheme::Dark), white, black);
         assert_eq!(
-            canvas_background(Some("#102030"), theme),
-            (0x10, 0x20, 0x30)
+            (dark.canvas, dark.ink),
+            ((0x1E, 0x22, 0x27), (0xE6, 0xE6, 0xE6))
         );
-        assert_eq!(canvas_background(None, theme), (255, 255, 255));
-        assert_eq!(canvas_background(Some("bogus"), theme), (255, 255, 255));
-        let dark = canvas_background(None, gpui_kit::black());
-        assert_eq!(dark, (0, 0, 0));
+        // A light page in a dark app: the other way round.
+        let light = backdrop(&page(None, CanvasTheme::Light), black, white);
+        assert_eq!(
+            (light.canvas, light.ink),
+            ((255, 255, 255), (0x1F, 0x23, 0x28))
+        );
+        // A background of its own wins, with ink that stands out on it.
+        let own = backdrop(&page(Some("#102030"), CanvasTheme::Light), white, black);
+        assert_eq!(
+            (own.canvas, own.ink),
+            ((0x10, 0x20, 0x30), (0xE6, 0xE6, 0xE6))
+        );
 
         // A label on a dark fill is white even on a light canvas.
         let canvas = Backdrop {
@@ -994,7 +1011,8 @@ mod tests {
     #[test]
     fn text_on_an_ink_fill_contrasts_with_the_ink() {
         // Dark theme: ink is the bright foreground, so its text is black.
-        let dark = backdrop(None, gpui_kit::black(), gpui_kit::white());
+        let app = mindweave_core::CanvasSettings::default();
+        let dark = backdrop(&app, gpui_kit::black(), gpui_kit::white());
         assert_eq!((dark.canvas, dark.ink), ((0, 0, 0), (255, 255, 255)));
         assert_eq!(text_background(Some("ink"), dark), (255, 255, 255));
         assert_eq!(
@@ -1002,7 +1020,7 @@ mod tests {
             (0, 0, 0)
         );
         // Light theme: the other way round.
-        let light = backdrop(Some("#FFFFFF"), gpui_kit::white(), gpui_kit::black());
+        let light = backdrop(&app, gpui_kit::white(), gpui_kit::black());
         assert_eq!(text_background(Some("ink"), light), (0, 0, 0));
         assert_eq!(
             auto_text_color(text_background(Some("ink"), light)),

@@ -575,6 +575,23 @@ impl DocumentSession {
         *field(&mut self.page_mut().canvas) = value;
     }
 
+    /// Sets the page's colour theme, as one undo step. A light or dark
+    /// theme brings its own background, so a background colour set
+    /// earlier is cleared.
+    pub fn set_canvas_theme(&mut self, theme: crate::document::CanvasTheme) {
+        let canvas = &self.page().canvas;
+        let cleared = theme != crate::document::CanvasTheme::App;
+        if canvas.theme == theme && (!cleared || canvas.background.is_none()) {
+            return;
+        }
+        self.checkpoint();
+        let canvas = &mut self.page_mut().canvas;
+        canvas.theme = theme;
+        if cleared {
+            canvas.background = None;
+        }
+    }
+
     pub fn set_pattern(&mut self, p: BackgroundPattern) {
         self.set_canvas(p, |c| &mut c.pattern);
     }

@@ -1700,7 +1700,7 @@ impl EditorWindow {
         let theme = cx.theme();
         let (selection_color, caret_color) = (theme.selection, theme.caret);
         let canvas = backdrop(
-            self.session.page().canvas.background.as_deref(),
+            &self.session.page().canvas,
             theme.background,
             theme.foreground,
         );

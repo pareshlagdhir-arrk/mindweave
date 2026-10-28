@@ -1,6 +1,7 @@
 //! The Properties panel: the active page's canvas settings, and the
 //! (always empty) selection.
 
+use super::shape_paint::rgb_to_hsla;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -11,7 +12,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use mindweave_core::{BackgroundPattern, CanvasSettings, DocumentSession};
+use mindweave_core::{BackgroundPattern, CanvasSettings, CanvasTheme, DocumentSession};
 
 use super::shape_properties::{self, ShapeFields};
 use super::text_properties::TextFields;
@@ -143,12 +144,13 @@ impl ColorSetting {
         }
     }
 
-    /// The colour used while the page sets none (the canvas paints the
-    /// same theme colours).
-    fn theme_color(self, theme: &Theme) -> Hsla {
+    /// The colour used while the page sets none: the page theme's, else
+    /// the app theme's (the canvas paints the same colours).
+    fn theme_color(self, canvas: &CanvasSettings, theme: &Theme) -> Hsla {
+        let palette = canvas.palette();
         match self {
-            Self::Background => theme.background,
-            Self::Line | Self::Dot => theme.border,
+            Self::Background => palette.background.map_or(theme.background, rgb_to_hsla),
+            Self::Line | Self::Dot => palette.grid.map_or(theme.border, rgb_to_hsla),
         }
     }
 
@@ -471,7 +473,7 @@ impl EditorWindow {
                 .setting
                 .value(&canvas)
                 .and_then(hex_to_hsla)
-                .unwrap_or_else(|| field.setting.theme_color(&theme));
+                .unwrap_or_else(|| field.setting.theme_color(&canvas, &theme));
             // An open picker owns its colour until it closes.
             if field.shows != Some(color) && !field.state.read(cx).is_open() {
                 field
@@ -485,6 +487,26 @@ impl EditorWindow {
         self.sync_text_properties(window, cx);
         self.finish_closed_color_edit(cx);
     }
+}
+
+/// The page's colour theme: the app's, light or dark. Shapes' Auto
+/// colours follow it.
+fn theme_row(current: CanvasTheme, cx: &mut Context<EditorWindow>) -> Div {
+    field_row(
+        "Theme",
+        Some("Light or dark for this page, or the same as the app. Shapes, text and lines in Auto colours follow it; a light or dark theme replaces the background colour."),
+        super::topic_properties::dropdown(
+            "canvas-theme",
+            Some(current.name().to_string()),
+            CanvasTheme::ALL.map(|t| t.name().to_string()).to_vec(),
+            |this, choice, cx| {
+                if let Some(t) = CanvasTheme::ALL.into_iter().find(|t| t.name() == choice) {
+                    this.update_session(|s| s.set_canvas_theme(t), cx);
+                }
+            },
+            cx,
+        ),
+    )
 }
 
 /// The shape panel while shapes are selected, else the canvas settings.
@@ -522,6 +544,7 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> A
         .gap(px(4.))
         .text_size(px(SMALL_TEXT_SIZE))
         .child(section_label("Canvas", cx))
+        .child(theme_row(canvas.theme, cx))
         .child(color_row(editor, ColorSetting::Background, cx))
         .child(pattern.mt(px(4.)))
         .children(rows)

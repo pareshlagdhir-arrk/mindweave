@@ -1147,7 +1147,7 @@ impl EditorWindow {
             PastePlan::TextBox(mut shape) => {
                 if let Some(label) = &shape.label {
                     let canvas = backdrop(
-                        self.session.page().canvas.background.as_deref(),
+                        &self.session.page().canvas,
                         cx.theme().background,
                         cx.theme().foreground,
                     );
