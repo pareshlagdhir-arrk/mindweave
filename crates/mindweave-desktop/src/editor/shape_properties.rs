@@ -433,12 +433,33 @@ pub(super) fn apply_number(
                 .filter(|s| s.artboard.is_some_and(|a| shifts.contains_key(&a)))
                 .map(|s| s.id)
                 .collect();
-            let touched: Vec<Uuid> = ids.iter().copied().chain(members).collect();
+            // So do a container's contents.
+            let shapes = session.shapes_on_active_layer();
+            let mut carried: HashMap<Uuid, (f32, f32)> = HashMap::new();
+            for s in shapes.iter().filter(|s| s.container_header().is_some()) {
+                let Some(f) = edited.get(&s.id) else { continue };
+                let d = (f.x - s.frame.x, f.y - s.frame.y);
+                if d == (0., 0.) {
+                    continue;
+                }
+                for id in mindweave_core::with_contents(shapes, &[s.id]) {
+                    if !edited.contains_key(&id) {
+                        carried.entry(id).or_insert(d);
+                    }
+                }
+            }
+            let touched: Vec<Uuid> = ids
+                .iter()
+                .copied()
+                .chain(members)
+                .chain(carried.keys().copied())
+                .collect();
             session.update_shapes(&touched, |s| {
                 if let Some((dx, dy)) = s
                     .artboard
                     .filter(|_| !edited.contains_key(&s.id))
                     .and_then(|a| shifts.get(&a))
+                    .or_else(|| carried.get(&s.id))
                 {
                     s.frame.x += dx;
                     s.frame.y += dy;
@@ -653,6 +674,29 @@ fn show_text(field: &mut NumberField, text: Option<String>, window: &mut Window,
         input.set_placeholder(placeholder, window, cx);
     });
     field.shows = Some(text);
+}
+
+impl EditorWindow {
+    /// Shows or hides the title bar of the selected containers, as one
+    /// undo step: off is a header height of 0; on gives the default height.
+    fn set_container_title_bar(&mut self, on: bool, cx: &mut Context<Self>) {
+        let ids = self.selection.clone();
+        let header = if on {
+            mindweave_core::geometry::CONTAINER_HEADER
+        } else {
+            0.0
+        };
+        self.update_session(
+            |s| {
+                s.update_shapes(&ids, |shape| {
+                    if shape.container_header().is_some() {
+                        shape.set_param("header", header);
+                    }
+                })
+            },
+            cx,
+        );
+    }
 }
 
 impl EditorWindow {
@@ -880,18 +924,39 @@ pub(super) fn render(editor: &EditorWindow, cx: &mut Context<EditorWindow>) -> i
     };
     let number =
         |kind: NumberKind, suffix: Option<&'static str>| number_input(fields, &kind, suffix, muted);
-    let params: Vec<AnyElement> = summary
-        .params
-        .iter()
-        .map(|(p, _)| {
+    let mut params: Vec<AnyElement> = Vec::new();
+    for (p, value) in &summary.params {
+        // A container's title bar: a switch, and its height while on.
+        if p.key == "header" {
+            let on = !matches!(value, Value::Same(v) if *v <= 0.0);
+            let this = cx.entity().downgrade();
+            params.push(
+                field_row(
+                    "Title bar",
+                    Some("A band at the top of the container that holds its title"),
+                    gpui_kit::component::switch::Switch::new("container-title-bar")
+                        .checked(on)
+                        .small()
+                        .on_click(move |on, _, cx| {
+                            this.update(cx, |this, cx| this.set_container_title_bar(*on, cx))
+                                .ok();
+                        }),
+                )
+                .into_any_element(),
+            );
+            if !on {
+                continue;
+            }
+        }
+        params.push(
             field_row(
                 p.label.clone(),
                 None,
                 number(NumberKind::Param(p.key.clone()), None),
             )
-            .into_any_element()
-        })
-        .collect();
+            .into_any_element(),
+        );
+    }
 
     let lines = line_properties::all_lines(&editor.shapes_among(&editor.selection));
     let line_section = line_properties::render(editor, cx);
@@ -1398,6 +1463,36 @@ mod tests {
             keep_proportions(&old, frame(0., 0., 30., 30.)),
             frame(0., 0., 30., 30.)
         );
+    }
+
+    #[test]
+    fn typing_a_containers_position_carries_what_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = DocumentSession::create(dir.path().join("c.mindweave")).unwrap();
+        let libs = libs();
+        let def = |id: &str| libs.shape("basic-shapes", id).unwrap().clone();
+        let container = Shape::new(&def("container"), "basic-shapes", frame(0., 0., 240., 160.));
+        let inside = Shape::new(&def("rectangle"), "basic-shapes", frame(60., 80., 40., 40.));
+        let (cid, iid) = (container.id, inside.id);
+        s.add_shapes(vec![container, inside]);
+        apply_number(
+            &mut s,
+            &[cid],
+            &NumberKind::Bounds(BoundsField::X),
+            100.,
+            &libs,
+        );
+        assert_eq!(s.find_shape(cid).unwrap().frame.x, 100.);
+        assert_eq!(s.find_shape(iid).unwrap().frame.x, 160.);
+        // A width leaves what it holds where it is.
+        apply_number(
+            &mut s,
+            &[cid],
+            &NumberKind::Bounds(BoundsField::W),
+            300.,
+            &libs,
+        );
+        assert_eq!(s.find_shape(iid).unwrap().frame.x, 160.);
     }
 
     #[test]

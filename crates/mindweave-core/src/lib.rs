@@ -33,8 +33,8 @@ pub mod viewport;
 
 pub use arrange::{expand_to_units, unit_members, unit_of, whole_units_only, Arrange};
 pub use artboard::{
-    artboard_placement, membership, with_members, ArtboardPreset, ArtboardProps, PresetCategory,
-    ARTBOARD_GAP, ARTBOARD_PRESETS, ARTBOARD_SHAPE,
+    artboard_placement, membership, with_contents, with_members, ArtboardPreset, ArtboardProps,
+    PresetCategory, ARTBOARD_GAP, ARTBOARD_PRESETS, ARTBOARD_SHAPE,
 };
 pub use clipboard::{
     duplicate, from_clipboard, is_mindweave_payload, is_newer_payload, plain_text_box,
@@ -100,8 +100,8 @@ pub use text::{
 pub use text_history::{EditKind, EditSnapshot, TextHistory};
 pub use transform::{
     drag_create, frame_aabb, handle_positions, marquee_selects, resize, resize_with_text_boxes,
-    rotate, rotate_handle_position, selection_bounds, translate, Handle, CLICK_DRAG_THRESHOLD,
-    DUPLICATE_OFFSET, MIN_SIZE,
+    rotate, rotate_handle_position, selection_bounds, text_box_scale, translate, Handle,
+    CLICK_DRAG_THRESHOLD, DUPLICATE_OFFSET, MIN_SIZE,
 };
 pub use viewport::{
     dot_stride, grid_lines, is_major_line, pinch_zoom_factor, scroll_zoom_factor, stride_offset,

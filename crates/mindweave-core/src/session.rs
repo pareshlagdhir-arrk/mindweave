@@ -785,10 +785,13 @@ impl DocumentSession {
     }
 
     /// Moves the shapes with `ids` on the active layer by `(dx, dy)`, with
-    /// the members of the artboards among them, each once, as one undo
-    /// step. Membership is left as it is (see [`Self::assign_membership`]).
+    /// the members of the artboards and the contents of the containers
+    /// among them, each once, as one undo step. Membership is left as it
+    /// is (see [`Self::assign_membership`]).
     pub fn move_shapes(&mut self, ids: &[Uuid], dx: f32, dy: f32) {
-        let ids = crate::artboard::with_members(self.shapes_on_active_layer(), ids);
+        let shapes = self.shapes_on_active_layer();
+        let ids =
+            crate::artboard::with_contents(shapes, &crate::artboard::with_members(shapes, ids));
         self.update_shapes(&ids, |s| {
             s.frame.x += dx;
             s.frame.y += dy;

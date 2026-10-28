@@ -9,6 +9,7 @@ name = "mindweave"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 gpui-kit.workspace = true
 image.workspace = true

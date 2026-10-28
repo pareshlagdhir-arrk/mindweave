@@ -64,6 +64,9 @@ pub enum Primitive {
     Arrow,
     Polygon,
     Star,
+    /// A box with a title band at the top. Clicks inside it reach the
+    /// shapes it holds; only its border and title band are the container.
+    Container,
 }
 
 impl Primitive {
@@ -76,6 +79,7 @@ impl Primitive {
             "arrow" => Some(Primitive::Arrow),
             "polygon" => Some(Primitive::Polygon),
             "star" => Some(Primitive::Star),
+            "container" => Some(Primitive::Container),
             _ => None,
         }
     }
@@ -87,6 +91,7 @@ impl Primitive {
             Primitive::Arrow => &["head_size"],
             Primitive::Polygon => &["sides"],
             Primitive::Star => &["points", "inner_ratio"],
+            Primitive::Container => &["corner_radius", "header"],
             Primitive::Ellipse | Primitive::Line => &[],
         }
     }
@@ -95,9 +100,9 @@ impl Primitive {
     /// anything outside. `None` when the primitive has no such parameter.
     pub fn param_range(self, key: &str) -> Option<(f32, f32)> {
         match (self, key) {
-            (Primitive::Rect, "corner_radius") | (Primitive::Arrow, "head_size") => {
-                Some((0.0, f32::MAX))
-            }
+            (Primitive::Rect | Primitive::Container, "corner_radius")
+            | (Primitive::Arrow, "head_size")
+            | (Primitive::Container, "header") => Some((0.0, f32::MAX)),
             (Primitive::Polygon, "sides") => Some(SIDES_RANGE),
             (Primitive::Star, "points") => Some(POINTS_RANGE),
             (Primitive::Star, "inner_ratio") => Some(INNER_RATIO_RANGE),
@@ -110,6 +115,49 @@ impl Primitive {
 const SIDES_RANGE: (f32, f32) = (3.0, 12.0);
 const POINTS_RANGE: (f32, f32) = (3.0, 20.0);
 const INNER_RATIO_RANGE: (f32, f32) = (0.1, 0.9);
+
+/// Default height of a container's title band.
+pub const CONTAINER_HEADER: f32 = 28.0;
+
+/// The title band of a container `w × h` whose `header` parameter is
+/// `header` (non-finite: the default), in its local box: at most the
+/// whole box.
+pub fn container_band(w: f32, h: f32, header: Option<f32>) -> Rect {
+    let header = header
+        .filter(|v| v.is_finite())
+        .unwrap_or(CONTAINER_HEADER)
+        .clamp(0.0, h.max(0.0));
+    Rect {
+        x: 0.0,
+        y: 0.0,
+        w,
+        h: header,
+    }
+}
+
+/// Whether canvas point `p` is on container frame `f` itself, within
+/// `tolerance`: on its border or in its title band (see
+/// [`container_band`]). Its inside belongs to the shapes it holds.
+pub fn container_hit(f: &Frame, header: Option<f32>, p: Pt, tolerance: f32) -> bool {
+    // Into the box's local coordinates: undo the rotation, then the flips.
+    let (sin, cos) = (-f.rotation).to_radians().sin_cos();
+    let (cx, cy) = (f.x + f.w / 2.0, f.y + f.h / 2.0);
+    let (dx, dy) = (p.0 - cx, p.1 - cy);
+    let (lx, ly) = (
+        cx + dx * cos - dy * sin - f.x,
+        cy + dx * sin + dy * cos - f.y,
+    );
+    let lx = if f.flip_x { f.w - lx } else { lx };
+    let ly = if f.flip_y { f.h - ly } else { ly };
+    let t = tolerance.max(0.0);
+    let near_box = lx >= -t && lx <= f.w + t && ly >= -t && ly <= f.h + t;
+    if !near_box {
+        return false;
+    }
+    let on_border = lx <= t || lx >= f.w - t || ly <= t || ly >= f.h - t;
+    let band = container_band(f.w, f.h, header);
+    on_border || ly <= band.h
+}
 
 /// Default arrowhead length.
 const DEFAULT_HEAD_SIZE: f32 = 12.0;
@@ -187,6 +235,23 @@ pub fn primitive_geometry(
             Geometry {
                 paths: vec![radial_polygon(w, h, sides, |_| (rx, ry))],
             }
+        }
+        Primitive::Container => {
+            let radius = param("corner_radius")
+                .unwrap_or(0.0)
+                .clamp(0.0, (w.min(h) / 2.0).max(0.0));
+            let band = container_band(w, h, param("header"));
+            let mut paths = vec![SubPath {
+                cmds: rounded_rect_cmds(0.0, 0.0, w, h, radius, radius),
+                fill: FillRole::Shape,
+            }];
+            if band.h > 0.0 && band.h < h {
+                paths.push(SubPath {
+                    cmds: vec![PathCmd::MoveTo((0.0, band.h)), PathCmd::LineTo((w, band.h))],
+                    fill: FillRole::None,
+                });
+            }
+            Geometry { paths }
         }
         Primitive::Star => {
             let points = param("points")
@@ -1142,5 +1207,46 @@ mod tests {
             ..Frame::default()
         };
         assert!((angle(down) - 90.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_container_is_its_border_and_title_band_only() {
+        let f = Frame {
+            x: 100.0,
+            y: 100.0,
+            w: 200.0,
+            h: 100.0,
+            ..Frame::default()
+        };
+        let hit = |p: Pt| container_hit(&f, Some(30.0), p, 3.0);
+        assert!(hit((200.0, 110.0)), "title band");
+        assert!(hit((101.0, 170.0)), "left border");
+        assert!(hit((200.0, 199.0)), "bottom border");
+        assert!(!hit((200.0, 170.0)), "inside");
+        assert!(!hit((350.0, 150.0)), "outside");
+        // Turned half round, the title band is at the bottom.
+        let turned = Frame {
+            rotation: 180.0,
+            ..f
+        };
+        assert!(container_hit(&turned, Some(30.0), (200.0, 190.0), 3.0));
+        assert!(!container_hit(&turned, Some(30.0), (200.0, 110.0), 3.0));
+        // The band is at most the whole box.
+        assert_eq!(container_band(50.0, 20.0, Some(80.0)).h, 20.0);
+        assert_eq!(container_band(50.0, 80.0, None).h, CONTAINER_HEADER);
+    }
+
+    #[test]
+    fn a_container_draws_its_box_and_band_line() {
+        let g = primitive_geometry(Primitive::Container, 200.0, 100.0, &|k| {
+            (k == "header").then_some(30.0)
+        });
+        assert_eq!(g.paths.len(), 2);
+        assert_eq!(g.paths[0].fill, FillRole::Shape);
+        assert_eq!(g.paths[1].fill, FillRole::None);
+        let no_band = primitive_geometry(Primitive::Container, 200.0, 100.0, &|k| {
+            (k == "header").then_some(0.0)
+        });
+        assert_eq!(no_band.paths.len(), 1);
     }
 }

@@ -423,6 +423,50 @@ impl Shape {
         self.params.get(key)?.as_f64().map(|v| v as f32)
     }
 
+    /// The part of the shape's box (local coordinates) its label goes in:
+    /// a topic's beside its picture and badges, a container's title band,
+    /// else all of it.
+    pub fn label_area(&self) -> crate::geometry::Rect {
+        let f = &self.frame;
+        if let Some(t) = &self.topic {
+            return t.parts(f.w, f.h).text;
+        }
+        if let Some(header) = self.container_header() {
+            let band = crate::geometry::container_band(f.w, f.h, Some(header));
+            if band.h > 0.0 {
+                return band;
+            }
+        }
+        crate::geometry::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: f.w,
+            h: f.h,
+        }
+    }
+
+    /// Whether canvas point `p` is on this shape as a container, within
+    /// `tolerance` (see [`crate::geometry::container_hit`]); `None` for
+    /// other shapes.
+    pub fn container_hit(&self, p: crate::geometry::Pt, tolerance: f32) -> Option<bool> {
+        let header = self.container_header()?;
+        Some(crate::geometry::container_hit(
+            &self.frame,
+            Some(header),
+            p,
+            tolerance,
+        ))
+    }
+
+    /// For a container (the only primitive with a `header` parameter):
+    /// the height of its title band, as stored. `None` for other shapes.
+    pub fn container_header(&self) -> Option<f32> {
+        self.params.contains_key("header").then(|| {
+            self.param("header")
+                .unwrap_or(crate::geometry::CONTAINER_HEADER)
+        })
+    }
+
     /// Sets parameter `key`. Non-finite values are ignored.
     pub fn set_param(&mut self, key: &str, v: f32) {
         if v.is_finite() {

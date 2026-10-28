@@ -177,6 +177,7 @@ no parameters in format 1.
 | `arrow`   | `head_size` (12; at least 0) | A line like `line`, with a filled arrowhead at its end in the stroke colour. |
 | `polygon` | `sides` (3; whole numbers from 3 to 12) | A regular polygon with a vertex at the top centre. |
 | `star`    | `points` (5; whole numbers from 3 to 20), `inner_ratio` (0.5; from 0.1 to 0.9) | A star; `inner_ratio` is the inner radius relative to the outer radius. |
+| `container` | `header` (28; at least 0), `corner_radius` (0) | A box with a title band `header` units tall. Only its border and title band are the shape: clicks inside it reach the shapes it holds, a double click inside adds a text box, and moving, copying or duplicating it takes along the shapes wholly inside it. A `header` of 0 gives no title band. Its label sits in the title band. A container always has a `header` parameter; one is added if the library declares none. |
 
 Mindweave also clamps every value to these limits, whatever a document
 says, and narrows a parameter declaration's range to them.
@@ -392,8 +393,11 @@ style = { stroke = "ink", dash = "dashed" }
 ## Worked example: Basic Shapes
 
 The built-in Basic Shapes library is written in this format. Its files are
-in `crates/mindweave-core/libraries/basic-shapes/`, together with
-`shapes/diamond.svg`.
+in `crates/mindweave-core/libraries/basic-shapes/`. The logic gates show
+how an SVG outline mixes filled parts (the gate bodies and their output
+bubbles, drawn in the shape's fill colour) with stroke-only `line` and
+`polyline` parts (the input and output leads, and the extra curve of XOR
+and XNOR).
 
 <!-- basic-shapes-file: library.toml -->
 ```toml
@@ -402,7 +406,7 @@ id = "basic-shapes"
 name = "Basic Shapes"
 version = "1.0.0"
 author = "Mindweave"
-description = "Rectangles, ellipses, lines, arrows and other simple shapes."
+description = "Rectangles, ellipses, polygons, containers, logic gates and other simple shapes."
 icon = "shapes"
 order = 0
 ```
@@ -466,6 +470,30 @@ svg = "shapes/diamond.svg"
 style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 
 [[shape]]
+id = "pentagon"
+name = "Pentagon"
+icon = "pentagon"
+default_size = [120, 80]
+primitive = "polygon"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "sides"
+label = "Sides"
+min = 3
+max = 12
+step = 1
+default = 5
+
+[[shape]]
+id = "hexagon"
+name = "Hexagon"
+icon = "hexagon"
+default_size = [120, 80]
+svg = "shapes/hexagon.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
 id = "star"
 name = "Star"
 icon = "star"
@@ -488,11 +516,190 @@ min = 0.1
 max = 0.9
 step = 0.05
 default = 0.5
+
+[[shape]]
+id = "container"
+name = "Container"
+icon = "panel-top"
+default_size = [240, 160]
+primitive = "container"
+style = { fill = "none", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape.param]]
+key = "header"
+label = "Header height"
+min = 0
+max = 1000
+step = 1
+default = 28
+
+[[shape.param]]
+key = "corner_radius"
+label = "Corner radius"
+min = 0
+max = 1000
+step = 1
+default = 6
+
+[[shape]]
+id = "gate-and"
+name = "AND Gate"
+icon = "shapes/gate-and.svg"
+default_size = [100, 60]
+svg = "shapes/gate-and.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "gate-or"
+name = "OR Gate"
+icon = "shapes/gate-or.svg"
+default_size = [100, 60]
+svg = "shapes/gate-or.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "gate-not"
+name = "NOT Gate"
+icon = "shapes/gate-not.svg"
+default_size = [100, 60]
+svg = "shapes/gate-not.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "gate-nand"
+name = "NAND Gate"
+icon = "shapes/gate-nand.svg"
+default_size = [100, 60]
+svg = "shapes/gate-nand.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "gate-nor"
+name = "NOR Gate"
+icon = "shapes/gate-nor.svg"
+default_size = [100, 60]
+svg = "shapes/gate-nor.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "gate-xor"
+name = "XOR Gate"
+icon = "shapes/gate-xor.svg"
+default_size = [100, 60]
+svg = "shapes/gate-xor.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "gate-xnor"
+name = "XNOR Gate"
+icon = "shapes/gate-xnor.svg"
+default_size = [100, 60]
+svg = "shapes/gate-xnor.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
+
+[[shape]]
+id = "gate-buffer"
+name = "Buffer"
+icon = "shapes/gate-buffer.svg"
+default_size = [100, 60]
+svg = "shapes/gate-buffer.svg"
+style = { fill = "auto", stroke = "auto", stroke_width = 1.5, opacity = 1.0 }
 ```
 
 <!-- basic-shapes-file: shapes/diamond.svg -->
 ```xml
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <path d="M 50 0 L 100 50 L 50 100 L 0 50 Z"/>
+</svg>
+```
+
+<!-- basic-shapes-file: shapes/hexagon.svg -->
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <path d="M 25 0 H 75 L 100 50 L 75 100 H 25 L 0 50 Z"/>
+</svg>
+```
+
+<!-- basic-shapes-file: shapes/gate-and.svg -->
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">
+  <path d="M 20 5 H 55 C 69 5 80 16 80 30 C 80 44 69 55 55 55 H 20 Z"/>
+  <line x1="0" y1="20" x2="20" y2="20"/>
+  <line x1="0" y1="40" x2="20" y2="40"/>
+  <line x1="80" y1="30" x2="100" y2="30"/>
+</svg>
+```
+
+<!-- basic-shapes-file: shapes/gate-or.svg -->
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">
+  <path d="M 20 5 Q 50 5 80 30 Q 50 55 20 55 Q 32 30 20 5 Z"/>
+  <line x1="0" y1="20" x2="25" y2="20"/>
+  <line x1="0" y1="40" x2="25" y2="40"/>
+  <line x1="80" y1="30" x2="100" y2="30"/>
+</svg>
+```
+
+<!-- basic-shapes-file: shapes/gate-not.svg -->
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">
+  <path d="M 20 8 L 70 30 L 20 52 Z"/>
+  <circle cx="75" cy="30" r="5"/>
+  <line x1="0" y1="30" x2="20" y2="30"/>
+  <line x1="80" y1="30" x2="100" y2="30"/>
+</svg>
+```
+
+<!-- basic-shapes-file: shapes/gate-nand.svg -->
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">
+  <path d="M 20 5 H 45 C 59 5 70 16 70 30 C 70 44 59 55 45 55 H 20 Z"/>
+  <circle cx="75" cy="30" r="5"/>
+  <line x1="0" y1="20" x2="20" y2="20"/>
+  <line x1="0" y1="40" x2="20" y2="40"/>
+  <line x1="80" y1="30" x2="100" y2="30"/>
+</svg>
+```
+
+<!-- basic-shapes-file: shapes/gate-nor.svg -->
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">
+  <path d="M 20 5 Q 50 5 70 30 Q 50 55 20 55 Q 32 30 20 5 Z"/>
+  <circle cx="75" cy="30" r="5"/>
+  <line x1="0" y1="20" x2="25" y2="20"/>
+  <line x1="0" y1="40" x2="25" y2="40"/>
+  <line x1="80" y1="30" x2="100" y2="30"/>
+</svg>
+```
+
+<!-- basic-shapes-file: shapes/gate-xor.svg -->
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">
+  <path d="M 26 5 Q 56 5 80 30 Q 56 55 26 55 Q 38 30 26 5 Z"/>
+  <polyline points="14,5 16.625,11.25 18.5,17.5 19.625,23.75 20,30 19.625,36.25 18.5,42.5 16.625,48.75 14,55"/>
+  <line x1="0" y1="20" x2="19" y2="20"/>
+  <line x1="0" y1="40" x2="19" y2="40"/>
+  <line x1="80" y1="30" x2="100" y2="30"/>
+</svg>
+```
+
+<!-- basic-shapes-file: shapes/gate-xnor.svg -->
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">
+  <path d="M 26 5 Q 56 5 72 30 Q 56 55 26 55 Q 38 30 26 5 Z"/>
+  <circle cx="77" cy="30" r="5"/>
+  <polyline points="14,5 16.625,11.25 18.5,17.5 19.625,23.75 20,30 19.625,36.25 18.5,42.5 16.625,48.75 14,55"/>
+  <line x1="0" y1="20" x2="19" y2="20"/>
+  <line x1="0" y1="40" x2="19" y2="40"/>
+  <line x1="82" y1="30" x2="100" y2="30"/>
+</svg>
+```
+
+<!-- basic-shapes-file: shapes/gate-buffer.svg -->
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">
+  <path d="M 20 8 L 80 30 L 20 52 Z"/>
+  <line x1="0" y1="30" x2="20" y2="30"/>
+  <line x1="80" y1="30" x2="100" y2="30"/>
 </svg>
 ```

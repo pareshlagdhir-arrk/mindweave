@@ -266,6 +266,24 @@ fn is_word(segment: &str) -> bool {
 }
 
 impl RichText {
+    /// The text with every font size multiplied by `k` (rounded to a
+    /// tenth, within [`MIN_FONT_SIZE`] and [`MAX_FONT_SIZE`]): what scaling
+    /// a text box by a corner handle does to its text.
+    pub fn scaled(&self, k: f32) -> RichText {
+        let k = if k.is_finite() && k > 0.0 { k } else { 1.0 };
+        let size = |s: f32| ((s * k * 10.0).round() / 10.0).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        let mut out = self.clone();
+        for p in &mut out.paragraphs {
+            p.style.size = size(p.style.size);
+            for run in &mut p.runs {
+                run.style.size = size(run.style.size);
+            }
+        }
+        out
+    }
+}
+
+impl RichText {
     /// Empty text that types in `style`.
     pub fn new(style: RunStyle, align: HAlign) -> Self {
         let mut text = RichText {
@@ -1286,5 +1304,26 @@ mod tests {
         let style: RunStyle = serde_json::from_str("{}").unwrap();
         assert_eq!(style, RunStyle::default());
         assert_eq!(style.size, DEFAULT_FONT_SIZE);
+    }
+
+    #[test]
+    fn scaling_text_scales_every_size() {
+        let mut t = RichText::new(RunStyle::default(), HAlign::Left);
+        t.insert(0, "ab", &RunStyle::default());
+        let big = RunStyle {
+            size: 40.0,
+            ..RunStyle::default()
+        };
+        t.insert(2, "cd", &big);
+        let s = t.scaled(1.5);
+        let sizes: Vec<f32> = s.paragraphs[0].runs.iter().map(|r| r.style.size).collect();
+        assert_eq!(sizes, vec![24.0, 60.0]);
+        assert_eq!(s.paragraphs[0].style.size, 24.0);
+        assert_eq!(s.plain(), "abcd");
+        assert_eq!(
+            t.scaled(0.0001).paragraphs[0].runs[0].style.size,
+            MIN_FONT_SIZE
+        );
+        assert_eq!(t.scaled(f32::NAN), t);
     }
 }

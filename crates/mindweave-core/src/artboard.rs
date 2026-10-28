@@ -244,6 +244,49 @@ pub fn with_members(shapes: &[Shape], ids: &[Uuid]) -> Vec<Uuid> {
         .collect()
 }
 
+/// `ids` with the shapes inside the containers among them (and inside
+/// those, and so on), in layer order: what moving, copying or duplicating
+/// a container takes along. A shape is inside when its box lies within the
+/// container's; artboards, mind map parts and locked shapes are never
+/// taken along.
+pub fn with_contents(shapes: &[Shape], ids: &[Uuid]) -> Vec<Uuid> {
+    let mut taken: HashSet<Uuid> = ids.iter().copied().collect();
+    let mut boxes: Vec<crate::geometry::Rect> = shapes
+        .iter()
+        .filter(|s| taken.contains(&s.id) && s.container_header().is_some())
+        .map(|s| frame_aabb(&s.frame))
+        .collect();
+    // Each round takes what the new containers hold; nesting ends it.
+    while !boxes.is_empty() {
+        let inside = |r: &crate::geometry::Rect| {
+            boxes.iter().any(|b| {
+                const SLACK: f32 = 0.5;
+                r.x >= b.x - SLACK
+                    && r.y >= b.y - SLACK
+                    && r.x + r.w <= b.x + b.w + SLACK
+                    && r.y + r.h <= b.y + b.h + SLACK
+            })
+        };
+        let found: Vec<&Shape> = shapes
+            .iter()
+            .filter(|s| !taken.contains(&s.id) && !s.locked)
+            .filter(|s| !s.is_artboard() && s.topic.is_none() && !s.is_boundary())
+            .filter(|s| inside(&frame_aabb(&s.frame)))
+            .collect();
+        boxes = found
+            .iter()
+            .filter(|s| s.container_header().is_some())
+            .map(|s| frame_aabb(&s.frame))
+            .collect();
+        taken.extend(found.iter().map(|s| s.id));
+    }
+    shapes
+        .iter()
+        .filter(|s| taken.contains(&s.id))
+        .map(|s| s.id)
+        .collect()
+}
+
 /// The top-left corner of a new artboard of `size`: [`ARTBOARD_GAP`] right
 /// of the artboard reaching furthest right among `shapes` (tops aligned),
 /// else centred on `view_center`.
@@ -491,5 +534,45 @@ mod tests {
             .filter(|w| w[0].category != w[1].category)
             .count();
         assert_eq!(runs, 3);
+    }
+
+    /// A container at `(x, y)` sized `w × h`.
+    fn container(x: f32, y: f32, w: f32, h: f32) -> Shape {
+        let mut s = rect(x, y, w, h);
+        s.shape = "container".into();
+        s.set_param("header", 28.0);
+        s
+    }
+
+    #[test]
+    fn a_container_takes_what_lies_inside_it_and_inside_that() {
+        let outer = container(0.0, 0.0, 400.0, 300.0);
+        let inner = container(20.0, 40.0, 200.0, 150.0);
+        let in_inner = rect(40.0, 80.0, 50.0, 50.0);
+        let in_outer = rect(250.0, 50.0, 100.0, 50.0);
+        let half_out = rect(350.0, 250.0, 100.0, 100.0);
+        let mut locked = rect(300.0, 200.0, 20.0, 20.0);
+        locked.locked = true;
+        let mut topic = rect(260.0, 150.0, 40.0, 20.0);
+        topic.topic = Some(TopicProps::central(topic.id));
+        let shapes = vec![
+            outer.clone(),
+            inner.clone(),
+            in_inner.clone(),
+            in_outer.clone(),
+            half_out,
+            locked,
+            topic,
+        ];
+        assert_eq!(
+            with_contents(&shapes, &[outer.id]),
+            vec![outer.id, inner.id, in_inner.id, in_outer.id]
+        );
+        assert_eq!(
+            with_contents(&shapes, &[inner.id]),
+            vec![inner.id, in_inner.id]
+        );
+        // A plain shape takes nothing along.
+        assert_eq!(with_contents(&shapes, &[in_outer.id]), vec![in_outer.id]);
     }
 }

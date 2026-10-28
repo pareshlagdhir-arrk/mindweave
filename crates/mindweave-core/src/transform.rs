@@ -42,7 +42,7 @@ impl Handle {
 
     /// Which sides the handle drags: `-1` left/top, `1` right/bottom,
     /// `0` neither, per axis of the box.
-    fn sides(self) -> (f32, f32) {
+    pub fn sides(self) -> (f32, f32) {
         match self {
             Handle::N => (0.0, -1.0),
             Handle::NE => (1.0, -1.0),
@@ -253,12 +253,14 @@ pub fn resize(
 /// [`resize`] where `text_boxes[i]` marks `start[i]` as a text box (a
 /// missing entry means `false`).
 ///
-/// A text box only reflows: its height, rotation and flips never change.
-/// Alone, only its width changes, along its own x axis: side and corner
-/// handles move its left or right edge with the opposite edge fixed (with
-/// `from_center`, both edges), `keep_aspect` is ignored, top and bottom
-/// handles change nothing, and dragging past the opposite edge does not
-/// flip it. In a group resize it scales its position and width like the
+/// A text box reflows: its rotation and flips never change. Alone, a side
+/// handle changes only its width, along its own x axis, moving its left or
+/// right edge with the opposite edge fixed (with `from_center`, both
+/// edges); top and bottom handles change nothing; dragging past the
+/// opposite edge does not flip it. A corner handle scales it whole,
+/// keeping its proportions, with the opposite corner fixed (with
+/// `from_center`, its centre): the caller scales its text by the same
+/// factor (see [`text_box_scale`]). In a group resize it scales its position and width like the
 /// other frames but keeps its height and is never mirrored. The caller
 /// turns `auto_width` off and lays the text out again for the new width.
 pub fn resize_with_text_boxes(
@@ -289,6 +291,9 @@ pub fn resize_with_text_boxes(
     };
     if let [f] = start {
         if is_text_box(0) {
+            if hx != 0.0 && hy != 0.0 {
+                return vec![scale_text_box(f, handle, d, from_center)];
+            }
             return vec![resize_text_box(f, hx, d, from_center)];
         }
         let (affects_x, affects_y) = affected(f.w, f.h);
@@ -359,6 +364,35 @@ pub fn resize_with_text_boxes(
             out
         })
         .collect()
+}
+
+/// How much a corner resize scaled a text box from `start` to `now` (see
+/// [`resize_with_text_boxes`]): its text is scaled by as much.
+pub fn text_box_scale(start: &Frame, now: &Frame) -> f32 {
+    if start.w > 0.0 {
+        now.w / start.w
+    } else {
+        1.0
+    }
+}
+
+/// A text box after corner `handle` moved by canvas `d`: scaled whole,
+/// proportions kept, never flipped.
+fn scale_text_box(f: &Frame, handle: Handle, d: Pt, from_center: bool) -> Frame {
+    let (hx, hy) = handle.sides();
+    let (u, v) = axes(f);
+    let local = (d.0 * u.0 + d.1 * u.1, d.0 * v.0 + d.1 * v.1);
+    let (sw, _) = resized_size(f.w, f.h, handle, local, true, from_center);
+    let k = (sw.abs() / f.w.max(MIN_SIZE)).max(MIN_SIZE / f.w.max(MIN_SIZE));
+    let (w, h) = (f.w * k, f.h * k);
+    let c = frame_center(f);
+    let center = if from_center {
+        c
+    } else {
+        let anchor = along(c, u, -hx * f.w / 2.0, v, -hy * f.h / 2.0);
+        along(anchor, u, hx * w / 2.0, v, hy * h / 2.0)
+    };
+    recentred(f, center, w, h)
 }
 
 /// A text box after its handle on side `hx` (`-1` left, `1` right, `0`
@@ -987,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn text_box_resize_changes_width_only() {
+    fn text_box_sides_change_width_and_corners_scale() {
         let tb = frame(100.0, 100.0, 80.0, 20.0);
         let one = |handle, d: Pt, shift, alt| {
             let p0 = corner(&tb, handle);
@@ -996,14 +1030,19 @@ mod tests {
             assert_eq!(out.len(), 1);
             out[0]
         };
-        // Corner drag, with and without Shift/Alt: width only.
+        // A corner drag scales the box whole, proportions kept, with the
+        // opposite corner fixed (with Alt, the centre); Shift changes
+        // nothing more.
         for (shift, alt) in [(false, false), (true, false), (false, true), (true, true)] {
             let f = one(Handle::SE, (40.0, 30.0), shift, alt);
-            assert_eq!(f.h, 20.0);
-            assert_eq!(f.y, 100.0);
-            let w = if alt { 160.0 } else { 120.0 };
-            let x = if alt { 60.0 } else { 100.0 };
-            assert_frame(&f, x, 100.0, w, 20.0);
+            assert!((f.w / f.h - 4.0).abs() < 1e-3, "{f:?}");
+            assert!(text_box_scale(&tb, &f) > 1.0);
+            if alt {
+                assert!((f.x + f.w / 2.0 - 140.0).abs() < 1e-3);
+                assert!((f.y + f.h / 2.0 - 110.0).abs() < 1e-3);
+            } else {
+                assert_eq!((f.x, f.y), (100.0, 100.0));
+            }
             assert!(!f.flip_x && !f.flip_y);
         }
         // Left edge keeps the right edge fixed.
@@ -1014,13 +1053,13 @@ mod tests {
             50.0,
             20.0,
         );
-        assert_frame(
-            &one(Handle::NW, (-10.0, -50.0), true, false),
-            90.0,
-            100.0,
-            90.0,
-            20.0,
-        );
+        // Shrinking from the top-left keeps the bottom-right corner, and
+        // dragging past it never flips the text.
+        let f = one(Handle::NW, (40.0, 10.0), false, false);
+        assert!(text_box_scale(&tb, &f) < 1.0);
+        assert!((f.x + f.w - 180.0).abs() < 1e-3 && (f.y + f.h - 120.0).abs() < 1e-3);
+        let f = one(Handle::NW, (300.0, 300.0), false, false);
+        assert!(!f.flip_x && !f.flip_y && f.w >= MIN_SIZE);
         // Top and bottom handles change nothing.
         assert_eq!(one(Handle::N, (5.0, -40.0), true, true), tb);
         assert_eq!(one(Handle::S, (5.0, 40.0), false, false), tb);

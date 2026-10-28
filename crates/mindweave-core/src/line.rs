@@ -153,7 +153,8 @@ pub enum LineJump {
     None,
     /// A half-circle hop.
     Arc,
-    /// A break in the line.
+    /// A break in the line, closed by a short wall across each cut end,
+    /// so the line crossed seems to pass through between them.
     Gap,
     /// A pointed hop.
     Sharp,
@@ -798,7 +799,9 @@ const ARC_SEGMENTS: usize = 10;
 /// `pts` with a jump of `kind` and reach `r` at each of `at` (lengths
 /// along it, ascending), hopping towards `up(dir)` for a jump heading
 /// along unit `dir`. Jumps too near an end or overlapping the previous
-/// jump are left out. A gap splits the line, so this returns its pieces.
+/// jump are left out. A gap splits the line, so this returns its pieces;
+/// it also adds a wall across each cut end, as pieces of their own, as
+/// long as the gap is wide.
 fn with_jumps(
     pts: &[Pt],
     at: &[f32],
@@ -812,6 +815,7 @@ fn with_jumps(
     let cum = cumulative(pts);
     let total = *cum.last().unwrap_or(&0.0);
     let mut pieces = Vec::new();
+    let mut walls = Vec::new();
     let mut cur = vec![pts[0]];
     let mut next = 1;
     let mut done = 0.0_f32;
@@ -838,6 +842,12 @@ fn with_jumps(
             LineJump::None => {}
             LineJump::Gap => {
                 pieces.push(std::mem::take(&mut cur));
+                for p in [pa, pb] {
+                    walls.push(vec![
+                        (p.0 - n.0 * h, p.1 - n.1 * h),
+                        (p.0 + n.0 * h, p.1 + n.1 * h),
+                    ]);
+                }
             }
             LineJump::Arc => {
                 for k in 1..ARC_SEGMENTS {
@@ -863,6 +873,7 @@ fn with_jumps(
     }
     cur.extend_from_slice(&pts[next.min(pts.len())..]);
     pieces.push(cur);
+    pieces.extend(walls);
     pieces.retain(|p| p.len() >= 2);
     pieces
 }
@@ -1570,7 +1581,12 @@ mod tests {
                 .fold(0.0_f32, f32::min);
             match kind {
                 LineJump::None => assert_eq!((pieces, lowest_y), (1, 0.0)),
-                LineJump::Gap => assert_eq!((pieces, lowest_y), (3, 0.0)),
+                // Three pieces, and a wall across each of the four cut ends,
+                // reaching as far either side as the gap is wide.
+                LineJump::Gap => {
+                    assert_eq!(pieces, 7);
+                    assert!((lowest_y + 4.0).abs() < 1e-3, "{lowest_y}");
+                }
                 // Hops go up the canvas, as far as the jump's reach.
                 _ => {
                     assert_eq!(pieces, 1, "{kind:?}");
@@ -1609,7 +1625,8 @@ mod tests {
             false,
             &[1.0, 50.0, 52.0, 99.0],
         );
-        assert_eq!(g.paths.len(), 2);
+        // One gap kept: two pieces and its two walls.
+        assert_eq!(g.paths.len(), 4);
     }
 
     #[test]

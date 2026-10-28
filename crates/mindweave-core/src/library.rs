@@ -893,7 +893,7 @@ fn load_shape(
             StyleDefaults::default()
         }
     };
-    let params = match (&source, table.get("param")) {
+    let mut params = match (&source, table.get("param")) {
         (_, None) => Vec::new(),
         (ShapeSource::Outline(_), Some(_)) => {
             report.notices.push(format!(
@@ -912,6 +912,19 @@ fn load_shape(
         }
     };
 
+    // A container is known by its `header` parameter, so it always has one.
+    if source == ShapeSource::Primitive(Primitive::Container)
+        && !params.iter().any(|p| p.key == "header")
+    {
+        params.push(ParamDef {
+            key: "header".into(),
+            label: "Header height".into(),
+            min: 0.0,
+            max: 1000.0,
+            step: 1.0,
+            default: crate::geometry::CONTAINER_HEADER,
+        });
+    }
     Ok(ShapeDef {
         id: id.to_owned(),
         name: name.to_owned(),
@@ -1146,6 +1159,42 @@ const BASIC_SHAPES_FILES: &[(&str, &str)] = &[
         "shapes/diamond.svg",
         include_str!("../libraries/basic-shapes/shapes/diamond.svg"),
     ),
+    (
+        "shapes/hexagon.svg",
+        include_str!("../libraries/basic-shapes/shapes/hexagon.svg"),
+    ),
+    (
+        "shapes/gate-and.svg",
+        include_str!("../libraries/basic-shapes/shapes/gate-and.svg"),
+    ),
+    (
+        "shapes/gate-or.svg",
+        include_str!("../libraries/basic-shapes/shapes/gate-or.svg"),
+    ),
+    (
+        "shapes/gate-not.svg",
+        include_str!("../libraries/basic-shapes/shapes/gate-not.svg"),
+    ),
+    (
+        "shapes/gate-nand.svg",
+        include_str!("../libraries/basic-shapes/shapes/gate-nand.svg"),
+    ),
+    (
+        "shapes/gate-nor.svg",
+        include_str!("../libraries/basic-shapes/shapes/gate-nor.svg"),
+    ),
+    (
+        "shapes/gate-xor.svg",
+        include_str!("../libraries/basic-shapes/shapes/gate-xor.svg"),
+    ),
+    (
+        "shapes/gate-xnor.svg",
+        include_str!("../libraries/basic-shapes/shapes/gate-xnor.svg"),
+    ),
+    (
+        "shapes/gate-buffer.svg",
+        include_str!("../libraries/basic-shapes/shapes/gate-buffer.svg"),
+    ),
 ];
 
 /// Every built-in library's files, in toolbar order.
@@ -1322,7 +1371,7 @@ fn summarize(warnings: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{bounds, PathCmd};
+    use crate::geometry::{bounds, FillRole, PathCmd};
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::fs;
@@ -1376,7 +1425,18 @@ version = "1.0.0"
                 "line",
                 "triangle",
                 "diamond",
-                "star"
+                "pentagon",
+                "hexagon",
+                "star",
+                "container",
+                "gate-and",
+                "gate-or",
+                "gate-not",
+                "gate-nand",
+                "gate-nor",
+                "gate-xor",
+                "gate-xnor",
+                "gate-buffer",
             ]
         );
         let icons: Vec<_> = lib
@@ -1389,8 +1449,35 @@ version = "1.0.0"
             .collect();
         assert_eq!(
             icons,
-            ["square", "circle", "minus", "triangle", "diamond", "star"]
+            [
+                "square",
+                "circle",
+                "minus",
+                "triangle",
+                "diamond",
+                "pentagon",
+                "hexagon",
+                "star",
+                "panel-top",
+            ]
+            .into_iter()
+            .chain(["<outline>"; 8])
+            .collect::<Vec<_>>()
         );
+        let container = lib.shape("container").unwrap();
+        assert_eq!(
+            container.source,
+            ShapeSource::Primitive(Primitive::Container)
+        );
+        assert_eq!(container.style.fill, None);
+        // Each gate has filled parts and stroke-only leads.
+        for gate in ["gate-and", "gate-xor", "gate-not"] {
+            let ShapeSource::Outline(g) = &lib.shape(gate).unwrap().source else {
+                panic!("{gate} is an outline");
+            };
+            assert!(g.paths.iter().any(|p| p.fill == FillRole::Shape), "{gate}");
+            assert!(g.paths.iter().any(|p| p.fill == FillRole::None), "{gate}");
+        }
 
         let rect = lib.shape("rectangle").unwrap();
         assert_eq!(rect.source, ShapeSource::Primitive(Primitive::Rect));
@@ -1447,7 +1534,7 @@ version = "1.0.0"
         let libs = builtin_libraries();
         let ids: Vec<&str> = libs.iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["basic-shapes"]);
-        assert_eq!(libs[0].shapes.len(), 6);
+        assert_eq!(libs[0].shapes.len(), 17);
     }
 
     #[test]
@@ -2458,7 +2545,7 @@ max = 100000
     fn shape_lookup() {
         let (registry, _) = LibraryRegistry::new(builtin_libraries(), None);
         assert_eq!(registry.shape("basic-shapes", "star").unwrap().name, "Star");
-        assert!(registry.shape("basic-shapes", "hexagon").is_none());
+        assert!(registry.shape("basic-shapes", "octagon").is_none());
         assert!(registry.shape("no-such-library", "star").is_none());
         let lib = &registry.libraries()[0];
         assert_eq!(lib.shape("diamond").unwrap().name, "Diamond");

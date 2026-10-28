@@ -80,14 +80,16 @@ Mathematics and chemistry can be combined, for example `K = \frac{[\ce{NH3}]^2}{
 ## Shapes, lines and text
 
 - Pick a shape from **Basic Shapes** (or another library tab) and click or drag on the canvas. Double-click a tool to lock it for repeated placement.
-- Lines connect to shapes and follow them when they move; their outline style, arrowheads and line jumps are set in Properties.
-- **Text:** use the **Text** tool (**T**), or double-click empty canvas to create a text box. Double-click any shape to type its label. Styling (font, size, colour, bold, italic, underline, strikethrough, alignment) applies to the selected words.
+- **Basic Shapes** has rectangles, ellipses, lines, triangles, diamonds, pentagons, hexagons, stars, a container and the logic gates AND, OR, NOT, NAND, NOR, XOR, XNOR and Buffer. The polygon, star and container shapes have settings in Properties (sides, points, header height, corner radius).
+- **Containers** group a part of a diagram under a title. Only a container's border and title band belong to it: click inside it to select the shapes it holds, or drag there to select several. Double-click inside it to add a separate text box; double-click its title band to edit its title. Moving, copying or duplicating a container takes along every shape lying wholly inside it (not mind map topics or locked shapes); deleting it leaves them. Turn **Title bar** off in Properties for a plain frame. A container has no fill by default, so it never hides what is in it.
+- Lines connect to shapes and follow them when they move; their outline style, arrowheads and line jumps are set in Properties. A line jumps the lines below it that it crosses: with an arc, a pointed or square hop, or a **gap** with a short wall at each cut end, so the line crossed seems to pass between them.
+- **Text:** use the **Text** tool (**T**), or double-click empty canvas to create a text box. Drag a text box's side handle to change its width (the text wraps), or a corner handle to scale it: the box and every font size in it grow or shrink together. Double-click any shape to type its label. Styling (font, size, colour, bold, italic, underline, strikethrough, alignment) applies to the selected words.
 - New shapes remember the style you last gave a shape of their kind.
 - **Arrange:** group (**⌘G**), ungroup (**⌘⇧G**), and change stacking order (**⌘]**, **⌘[**, with Shift for front and back).
 
 ## Images and icon packs
 
-- **Images:** click **Image** on the Home tab or paste a picture. PNG, JPEG, GIF, WebP, BMP, TIFF and SVG are supported. Pictures scale in proportion.
+- **Images:** click **Image** on the Home tab or paste a picture. PNG, JPEG, GIF, WebP, BMP, TIFF and SVG are supported. Pictures scale in proportion. Paste works with picture files copied in Finder, screenshots, images copied in a browser or Preview, and SVG source copied as text. When a browser copies only a link to the picture (Chrome does this for SVG images), Mindweave downloads it from that address (https or http, at most 20 MB) using the system's `curl`; nothing is downloaded otherwise.
 - **Icon packs:** the **Icons** pane (**⌘⇧I**) lists imported icon sets. Click **+** to import a folder or a `.zip` of SVG icons; click an icon to place it, or drag it onto the canvas or onto a topic.
 
 ## Canvas, pages and layers

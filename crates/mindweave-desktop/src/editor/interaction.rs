@@ -14,9 +14,10 @@ use mindweave_core::line::target_of;
 use mindweave_core::{
     bend_through, clamp_topic_picture, drag_create, handle_positions, instantiate_line_template,
     instantiate_template, line_frame, line_midpoint, marquee_selects, resize_with_text_boxes,
-    rotate, rotate_handle_position, route_line, selection_bounds, translate, unit_members,
-    whole_units_only, with_members, DocumentSession, Handle, LibraryRegistry, LineEnd, Shape,
-    ShapeDef, ShapeSource, ARTBOARD_SHAPE, CLICK_DRAG_THRESHOLD, TEXT_LIBRARY,
+    rotate, rotate_handle_position, route_line, selection_bounds, text_box_scale, translate,
+    unit_members, whole_units_only, with_contents, with_members, DocumentSession, Handle,
+    LibraryRegistry, LineEnd, RichText, Shape, ShapeDef, ShapeSource, ARTBOARD_SHAPE,
+    CLICK_DRAG_THRESHOLD, TEXT_LIBRARY,
 };
 use uuid::Uuid;
 
@@ -91,6 +92,9 @@ pub enum Gesture {
         /// box, which only changes width and then stops growing with its
         /// text; `None` for other shapes.
         auto_widths: Vec<Option<bool>>,
+        /// For each of `originals`: its text when it is a text box, which a
+        /// corner handle scales with the box; `None` for other shapes.
+        texts: Vec<Option<RichText>>,
     },
     /// Turning the selection about `center`, pressed at `start`.
     Rotating {
@@ -305,8 +309,9 @@ fn frame_centre(f: &Frame) -> Pt {
 /// The resize handles shown on the chrome `frame`: an axis shorter than
 /// two grab radii (`grab` canvas units) has no edge-midpoint handles on it,
 /// so the middle of a flat line or a thin box is not a handle. With
-/// `width_only` (one text box, which only changes width) only the side
-/// handles are shown.
+/// `width_only` (one text box: its side handles change its width, its
+/// corners scale it with its text) the top and bottom handles are left
+/// out.
 pub fn visible_handles(frame: &Frame, grab: f32, width_only: bool) -> Vec<(Handle, Pt)> {
     let (thin_w, thin_h) = (frame.w < 2. * grab, frame.h < 2. * grab);
     handle_positions(frame)
@@ -314,7 +319,7 @@ pub fn visible_handles(frame: &Frame, grab: f32, width_only: bool) -> Vec<(Handl
         .filter(|(h, _)| match h {
             Handle::N | Handle::S => !thin_h && !width_only,
             Handle::E | Handle::W => !thin_w,
-            _ => !width_only,
+            _ => true,
         })
         .collect()
 }
@@ -399,6 +404,10 @@ pub fn transformed(gesture: &Gesture, p: Pt, shift: bool, alt: bool) -> Option<O
 /// group resized only taller or shorter keeps its text boxes' widths, so
 /// they keep growing. None for other gestures.
 pub fn text_box_widths_off(gesture: &Gesture, frames: &Originals) -> Vec<Uuid> {
+    // Scaled from a corner, a text box keeps growing (or not) as it did.
+    if scaled_text_box_text(gesture, frames).is_some() {
+        return Vec::new();
+    }
     match gesture {
         Gesture::Resizing {
             originals,
@@ -414,6 +423,31 @@ pub fn text_box_widths_off(gesture: &Gesture, frames: &Originals) -> Vec<Uuid> {
             .map(|(((id, _), _), _)| *id)
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+/// The one text box a corner resize scales, with its text scaled as much
+/// as its frame (`frames`, from [`transformed`]); `None` for any other
+/// gesture or selection.
+pub fn scaled_text_box_text(gesture: &Gesture, frames: &Originals) -> Option<(Uuid, RichText)> {
+    let Gesture::Resizing {
+        handle,
+        originals,
+        texts,
+        ..
+    } = gesture
+    else {
+        return None;
+    };
+    let (hx, hy) = handle.sides();
+    if hx == 0.0 || hy == 0.0 {
+        return None;
+    }
+    match (originals.as_slice(), frames.as_slice(), texts.as_slice()) {
+        ([(id, old)], [(_, new)], [Some(text)]) => {
+            Some((*id, text.scaled(text_box_scale(old, new))))
+        }
+        _ => None,
     }
 }
 
@@ -538,7 +572,7 @@ pub fn nudge_shapes(session: &mut DocumentSession, selection: &[Uuid], dx: f32, 
 /// attached.
 pub fn lines_to_detach(shapes: &[Shape], selection: &[Uuid]) -> (Vec<Uuid>, HashSet<Uuid>) {
     let picked: HashSet<Uuid> = selection.iter().copied().collect();
-    let moved: HashSet<Uuid> = with_members(shapes, selection).into_iter().collect();
+    let moved: HashSet<Uuid> = moved_ids(shapes, selection).into_iter().collect();
     let ids = shapes
         .iter()
         .filter(|s| picked.contains(&s.id))
@@ -555,11 +589,17 @@ pub fn lines_to_detach(shapes: &[Shape], selection: &[Uuid]) -> (Vec<Uuid>, Hash
     (ids, moved)
 }
 
+/// What moving `selection` moves among `shapes` (the active layer): the
+/// selected shapes, the members of selected artboards and the contents of
+/// selected containers, each once, back to front.
+pub fn moved_ids(shapes: &[Shape], selection: &[Uuid]) -> Vec<Uuid> {
+    with_contents(shapes, &with_members(shapes, selection))
+}
+
 /// What moving `selection` moves among `shapes` (the active layer), with
-/// its frames, back to front: the selected shapes and the members of
-/// selected artboards, each once.
+/// its frames, back to front (see [`moved_ids`]).
 pub fn moved_frames_of(shapes: &[Shape], selection: &[Uuid]) -> Originals {
-    let ids: HashSet<Uuid> = with_members(shapes, selection).into_iter().collect();
+    let ids: HashSet<Uuid> = moved_ids(shapes, selection).into_iter().collect();
     shapes
         .iter()
         .filter(|s| ids.contains(&s.id))
@@ -738,6 +778,7 @@ impl EditorWindow {
             if let Gesture::Resizing {
                 originals,
                 auto_widths,
+                texts,
                 ..
             } = &gesture
             {
@@ -747,6 +788,13 @@ impl EditorWindow {
                     .filter_map(|((id, _), w)| Some((*id, (*w)?)))
                     .collect();
                 self.set_auto_widths(&widths, cx);
+                // A text box scaled from a corner gets its text back.
+                let texts: Vec<(Uuid, RichText)> = originals
+                    .iter()
+                    .zip(texts)
+                    .filter_map(|((id, _), t)| Some((*id, t.clone()?)))
+                    .collect();
+                self.set_label_texts(texts, cx);
             }
             self.session_gesture
                 .end(&mut self.session, GestureOwner::Pointer);
@@ -928,18 +976,21 @@ impl EditorWindow {
             }
             PressKind::Resize(handle) => {
                 let originals = self.selected_frames();
+                let text_box = |id: &Uuid| self.session.find_shape(*id).filter(|s| s.is_text_box());
                 let auto_widths = originals
                     .iter()
-                    .map(|(id, _)| {
-                        let shape = self.session.find_shape(*id)?;
-                        shape.is_text_box().then(|| shape.auto_width())
-                    })
+                    .map(|(id, _)| text_box(id).map(Shape::auto_width))
+                    .collect();
+                let texts = originals
+                    .iter()
+                    .map(|(id, _)| Some(text_box(id)?.label.as_ref()?.text.clone()))
                     .collect();
                 Gesture::Resizing {
                     handle,
                     start: at,
                     originals,
                     auto_widths,
+                    texts,
                 }
             }
             PressKind::Rotate => Gesture::Rotating {
@@ -1071,6 +1122,10 @@ impl EditorWindow {
                 .map(|id| (id, false))
                 .collect();
             self.set_auto_widths(&widths, cx);
+            // A text box scaled from a corner scales its text with it.
+            if let Some(scaled) = scaled_text_box_text(&self.gesture, &frames) {
+                self.set_label_texts(vec![scaled], cx);
+            }
             self.apply_frames(frames, cx);
         }
     }
@@ -1183,6 +1238,25 @@ impl EditorWindow {
     /// Sets the frames of the shapes in `frames` (on the active layer).
     fn apply_frames(&mut self, frames: Originals, cx: &mut Context<Self>) {
         self.update_session(|s| set_frames(s, frames), cx);
+    }
+
+    /// Gives each shape of `texts` its label text.
+    fn set_label_texts(&mut self, texts: Vec<(Uuid, RichText)>, cx: &mut Context<Self>) {
+        if texts.is_empty() {
+            return;
+        }
+        let ids: Vec<Uuid> = texts.iter().map(|(id, _)| *id).collect();
+        self.update_session(
+            |s| {
+                s.update_shapes(&ids, |shape| {
+                    let text = texts.iter().find(|(id, _)| *id == shape.id);
+                    if let (Some(label), Some((_, text))) = (shape.label.as_mut(), text) {
+                        label.text = text.clone();
+                    }
+                })
+            },
+            cx,
+        );
     }
 
     /// Sets whether the text boxes in `widths` grow with their text.
@@ -1338,6 +1412,10 @@ impl EditorWindow {
             if shape.is_artboard() {
                 return artboard_body_hit(shape, at, tol);
             }
+            // A container's inside belongs to the shapes it holds.
+            if let Some(hit) = shape.container_hit(at, tol) {
+                return hit;
+            }
             if outline_hit(cache.outline(shape, &libs), at, tol) {
                 return true;
             }
@@ -1363,7 +1441,10 @@ impl EditorWindow {
         let tolerance = HIT_TOLERANCE_PX / self.session.page().viewport.zoom;
         let cache = &mut self.geometry_cache;
         hit_shape_with(&self.session, at, tolerance, |shape, tol| {
-            !except.contains(&shape.id) && outline_hit(cache.outline(shape, &libs), at, tol)
+            !except.contains(&shape.id)
+                && shape
+                    .container_hit(at, tol)
+                    .unwrap_or_else(|| outline_hit(cache.outline(shape, &libs), at, tol))
         })
     }
 
@@ -1700,6 +1781,9 @@ pub fn hit_shape(
         if shape.is_artboard() {
             return artboard_body_hit(shape, p, tol);
         }
+        if let Some(hit) = shape.container_hit(p, tol) {
+            return hit;
+        }
         outline_hit(&shape_geometry(shape, libs), p, tol)
     })
 }
@@ -1855,8 +1939,9 @@ mod tests {
         dropped_shapes, handle_at, hit_shape, is_drag, is_line_like, lines_to_detach, marquee_rect,
         marquee_selection, move_placement, moved_frames_of, nudge_shapes, placement_frame,
         placement_shape, placement_shapes, places_attached_line, press_kind, press_selection,
-        press_target, preview_shape, preview_shapes, resize_cursor, shape_geometry,
-        text_box_widths_off, transformed, visible_handles, Gesture, HandleHit, PressKind,
+        press_target, preview_shape, preview_shapes, resize_cursor, scaled_text_box_text,
+        shape_geometry, text_box_widths_off, transformed, visible_handles, Gesture, HandleHit,
+        PressKind,
     };
     use crate::editor::artboard_edit::add_with_membership;
     use gpui_kit::CursorStyle;
@@ -1864,7 +1949,8 @@ mod tests {
     use mindweave_core::geometry::{line_endpoints, Frame, Pt};
     use mindweave_core::Handle;
     use mindweave_core::{
-        builtin_libraries, DocumentSession, LibraryRegistry, Shape, ARTBOARD_SHAPE, TEXT_LIBRARY,
+        builtin_libraries, DocumentSession, HAlign, LibraryRegistry, RichText, RunStyle, Shape,
+        ARTBOARD_SHAPE, TEXT_LIBRARY,
     };
     use uuid::Uuid;
 
@@ -2324,6 +2410,78 @@ mod tests {
     }
 
     #[test]
+    fn moving_a_container_moves_what_it_holds() {
+        let libs = registry();
+        let (_dir, mut s) = session();
+        let container = add(
+            &mut s,
+            &libs,
+            "basic-shapes",
+            "container",
+            (0., 0., 240., 160.),
+        );
+        let inside = add(
+            &mut s,
+            &libs,
+            "basic-shapes",
+            "rectangle",
+            (60., 80., 40., 40.),
+        );
+        let outside = add(
+            &mut s,
+            &libs,
+            "basic-shapes",
+            "rectangle",
+            (300., 0., 40., 40.),
+        );
+        nudge_shapes(&mut s, &[container], 10., 5.);
+        let at = |s: &DocumentSession, id| {
+            let f = s.find_shape(id).unwrap().frame;
+            (f.x, f.y)
+        };
+        assert_eq!(at(&s, container), (10., 5.));
+        assert_eq!(at(&s, inside), (70., 85.));
+        assert_eq!(at(&s, outside), (300., 0.));
+        // Selecting what it holds moves only that.
+        nudge_shapes(&mut s, &[inside], 1., 0.);
+        assert_eq!(at(&s, container), (10., 5.));
+        assert_eq!(at(&s, inside), (71., 85.));
+    }
+
+    #[test]
+    fn a_container_lets_clicks_through_to_what_it_holds() {
+        let libs = registry();
+        let (_dir, mut s) = session();
+        let inside = add(
+            &mut s,
+            &libs,
+            "basic-shapes",
+            "rectangle",
+            (60., 80., 40., 40.),
+        );
+        // Placed afterwards, so on top of the rectangle.
+        let container = add(
+            &mut s,
+            &libs,
+            "basic-shapes",
+            "container",
+            (0., 0., 240., 160.),
+        );
+        assert_eq!(hit_shape(&s, &libs, (80., 100.), 1.), Some(inside));
+        assert_eq!(hit_shape(&s, &libs, (180., 120.), 1.), None, "empty inside");
+        assert_eq!(
+            hit_shape(&s, &libs, (120., 10.), 1.),
+            Some(container),
+            "title band"
+        );
+        assert_eq!(
+            hit_shape(&s, &libs, (0.5, 120.), 1.),
+            Some(container),
+            "border"
+        );
+    }
+
+    #[test]
     fn the_topmost_shape_under_the_pointer_is_hit() {
         let libs = registry();
         let (_dir, mut s) = session();
@@ -2592,6 +2750,7 @@ mod tests {
             start: (64., 16.),
             originals: vec![(a, boxed(0., 0., 64., 32.))],
             auto_widths: vec![None],
+            texts: Vec::new(),
         };
         // How an image is resized: proportions kept, so dragging the right
         // side doubles the height with the width.
@@ -2623,6 +2782,7 @@ mod tests {
             start: (30., 5.),
             originals: originals.clone(),
             auto_widths: vec![None, None],
+            texts: Vec::new(),
         };
         let resized = transformed(&resizing, (60., 5.), false, false).unwrap();
         assert_eq!(resized[1], (b, boxed(40., 0., 20., 10.)));
@@ -2694,17 +2854,34 @@ mod tests {
     }
 
     #[test]
-    fn a_text_box_resize_only_changes_its_width() {
+    fn a_text_box_side_changes_its_width_and_a_corner_scales_its_text() {
         let [a] = ids();
+        let mut text = RichText::new(RunStyle::default(), HAlign::Left);
+        text.insert(0, "Hello", &RunStyle::default());
         let resizing = |handle| Gesture::Resizing {
             handle,
             start: (100., 20.),
             originals: vec![(a, boxed(0., 0., 100., 20.))],
             auto_widths: vec![Some(true)],
+            texts: vec![Some(text.clone())],
         };
-        // A corner drag down and right: wider, the height kept.
-        let out = transformed(&resizing(Handle::SE), (150., 90.), true, false).unwrap();
+        // A side drag: wider, the height and the text size kept.
+        let g = resizing(Handle::E);
+        let out = transformed(&g, (150., 20.), false, false).unwrap();
         assert_eq!(out, vec![(a, boxed(0., 0., 150., 20.))]);
+        assert!(scaled_text_box_text(&g, &out).is_none());
+        // A corner drag to twice the size: box and text both doubled, and
+        // the box keeps growing with its text.
+        let g = resizing(Handle::SE);
+        let out = transformed(&g, (200., 40.), false, false).unwrap();
+        assert_eq!(out, vec![(a, boxed(0., 0., 200., 40.))]);
+        let (id, scaled) = scaled_text_box_text(&g, &out).unwrap();
+        assert_eq!(id, a);
+        assert_eq!(
+            scaled.paragraphs[0].runs[0].style.size,
+            2. * text.paragraphs[0].runs[0].style.size
+        );
+        assert!(text_box_widths_off(&g, &out).is_empty());
         // Top and bottom handles change nothing.
         let out = transformed(&resizing(Handle::S), (150., 90.), false, false).unwrap();
         assert_eq!(out, vec![(a, boxed(0., 0., 100., 20.))]);
@@ -2719,6 +2896,7 @@ mod tests {
             start: (0., 0.),
             originals: vec![(a, boxed(0., 0., 100., 20.))],
             auto_widths: vec![None],
+            texts: Vec::new(),
         };
         assert!(off(&shape, (50., 0.), false).is_empty());
         assert!(off(&Gesture::Idle, (50., 0.), false).is_empty());
@@ -2736,6 +2914,7 @@ mod tests {
                 (c, boxed(0., 0., 50., 20.)),
             ],
             auto_widths: vec![Some(true), None, Some(false)],
+            texts: Vec::new(),
         };
         let off = |g: &Gesture, p: Pt, shift: bool| {
             text_box_widths_off(g, &transformed(g, p, shift, false).unwrap())
@@ -2750,16 +2929,19 @@ mod tests {
     }
 
     #[test]
-    fn one_selected_text_box_shows_only_side_handles() {
+    fn one_selected_text_box_shows_sides_and_corners_only() {
         let f = boxed(0., 0., 100., 30.);
         let kept: Vec<Handle> = visible_handles(&f, 6., true)
             .iter()
             .map(|(h, _)| *h)
             .collect();
-        assert_eq!(kept.len(), 2);
-        assert!(kept.contains(&Handle::E) && kept.contains(&Handle::W));
-        // Corners are not grabbed; the sides are.
-        assert_eq!(handle_at(&f, (100., 30.), 6., Some(12.), true), None);
+        assert_eq!(kept.len(), 6);
+        assert!(!kept.contains(&Handle::N) && !kept.contains(&Handle::S));
+        // Corners scale it; the sides change its width.
+        assert_eq!(
+            handle_at(&f, (100., 30.), 6., Some(12.), true),
+            Some(HandleHit::Resize(Handle::SE))
+        );
         assert_eq!(
             handle_at(&f, (100., 15.), 6., Some(12.), true),
             Some(HandleHit::Resize(Handle::E))

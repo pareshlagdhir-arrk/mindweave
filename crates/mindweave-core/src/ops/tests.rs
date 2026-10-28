@@ -263,7 +263,7 @@ fn templates_place_grouped_parts_and_unknown_items_are_refused() {
         .add_shape(
             None,
             "basic-shapes",
-            "hexagon",
+            "octagon",
             (0.0, 0.0),
             None,
             None,

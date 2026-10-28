@@ -47,8 +47,8 @@ use gpui_kit::*;
 use mindweave_core::geometry::{Pt, Rect};
 use mindweave_core::{
     duplicate, format_hex_color, from_clipboard, is_mindweave_payload, is_newer_payload,
-    parse_hex_color, plain_text_box, prepare_paste, to_clipboard, unit_members, with_members,
-    AppSettings, Arrange, DocumentSession, Shape, Viewport, MAX_CLIPBOARD_SHAPES,
+    parse_hex_color, plain_text_box, prepare_paste, to_clipboard, unit_members, AppSettings,
+    Arrange, DocumentSession, Shape, Viewport, MAX_CLIPBOARD_SHAPES,
 };
 
 // `Copy` is used by path: importing it would hide the derivable trait.
@@ -982,10 +982,11 @@ impl EditorWindow {
         self.step_history(false, window, cx);
     }
 
-    /// The selected shapes with the members of selected artboards, back to
-    /// front: what Copy and Duplicate take.
+    /// The selected shapes with the members of selected artboards and the
+    /// contents of selected containers, back to front: what Copy and
+    /// Duplicate take.
     fn selected_shapes(&self) -> Vec<Shape> {
-        let ids = with_members(self.session.shapes_on_active_layer(), &self.selection);
+        let ids = interaction::moved_ids(self.session.shapes_on_active_layer(), &self.selection);
         self.shapes_among(&ids).into_iter().cloned().collect()
     }
 
@@ -1104,6 +1105,11 @@ impl EditorWindow {
         }
         self.begin_edit_action(window, cx);
         let Some(item) = cx.read_from_clipboard() else {
+            // Nothing gpui reads: perhaps a browser's Copy Image of an SVG,
+            // which gives only HTML naming the picture.
+            if let Some(html) = images::native_clipboard_html() {
+                self.paste_html_picture(&html, window, cx);
+            }
             return;
         };
         // A Mindweave payload is text; anything else that is a picture,
@@ -1125,6 +1131,11 @@ impl EditorWindow {
                 if let Some(bytes) = images::native_clipboard_picture() {
                     self.place_pictures(vec![bytes], window, cx);
                     return;
+                }
+                if let Some(html) = images::native_clipboard_html() {
+                    if self.paste_html_picture(&html, window, cx) {
+                        return;
+                    }
                 }
             }
         }

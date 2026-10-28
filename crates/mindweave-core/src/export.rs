@@ -25,7 +25,7 @@ use crate::geometry::{
 };
 use crate::image::{ImageData, ImageFormat};
 use crate::library::LibraryRegistry;
-use crate::line::{line_geometry, line_label_angle, line_midpoint};
+use crate::line::{line_geometry, line_jumps, line_label_angle, line_midpoint};
 use crate::mindmap::{map_decor, rounded_polygon};
 use crate::shape::{Shape, VAlign};
 use crate::text::{HAlign, RichText, RunStyle};
@@ -249,8 +249,9 @@ fn rounded_box(w: f32, h: f32, r: f32) -> Geometry {
 }
 
 /// `shape`'s outline in canvas coordinates, and whether it is a
-/// placeholder for a missing library shape.
-fn outline(shape: &Shape, libs: Option<&LibraryRegistry>) -> (Geometry, bool) {
+/// placeholder for a missing library shape. A line jumps at `jumps`
+/// (lengths along its route).
+fn outline(shape: &Shape, libs: Option<&LibraryRegistry>, jumps: &[f32]) -> (Geometry, bool) {
     let f = &shape.frame;
     let (local, placeholder) = if shape.is_text_box() || shape.is_image() {
         (box_geometry(f.w, f.h, FillRole::Shape), false)
@@ -274,7 +275,7 @@ fn outline(shape: &Shape, libs: Option<&LibraryRegistry>) -> (Geometry, bool) {
             false,
         )
     } else if let Some(l) = shape.line.as_ref().filter(|_| shape.is_line()) {
-        let g = line_geometry(f, l, shape.style.stroke_width, shape.style.double, &[]);
+        let g = line_geometry(f, l, shape.style.stroke_width, shape.style.double, jumps);
         (g, false)
     } else {
         match libs.and_then(|l| l.shape(&shape.library, &shape.shape)) {
@@ -295,6 +296,8 @@ struct Writer<'a> {
     clips: HashMap<Uuid, String>,
     /// How each task topic on the page is shown.
     tasks: HashMap<Uuid, crate::task::TaskView>,
+    /// Where each line jumps the lines it crosses (see [`line_jumps`]).
+    jumps: HashMap<Uuid, Vec<f32>>,
 }
 
 impl Writer<'_> {
@@ -370,7 +373,8 @@ impl Writer<'_> {
             let _ = write!(self.out, " clip-path=\"url(#{c})\"");
         }
         self.out.push('>');
-        let (g, placeholder) = outline(shape, self.opts.libs);
+        let jumps = self.jumps.get(&shape.id).map_or(&[][..], Vec::as_slice);
+        let (g, placeholder) = outline(shape, self.opts.libs, jumps);
         if let Some(data) = shape.image.as_ref().filter(|_| shape.is_image()) {
             let f = shape.frame;
             self.image(
@@ -594,15 +598,7 @@ impl Writer<'_> {
             self.text_block(shape, &label.text, origin, wrap, width);
             return;
         }
-        let area = match &shape.topic {
-            Some(t) => t.parts(f.w, f.h).text,
-            None => Rect {
-                x: 0.0,
-                y: 0.0,
-                w: f.w,
-                h: f.h,
-            },
-        };
+        let area = shape.label_area();
         let wrap = (area.w - 2.0 * LABEL_PADDING).max(1.0);
         let (_, th) = crate::text_measure::measure(&label.text, Some(wrap));
         let y = match label.valign {
@@ -855,7 +851,7 @@ fn selection(
 /// The box `shape` covers on the canvas.
 fn shape_bounds(shape: &Shape, libs: Option<&LibraryRegistry>) -> Rect {
     if shape.is_line() {
-        let (g, _) = outline(shape, libs);
+        let (g, _) = outline(shape, libs, &[]);
         if let Some(b) = bounds(&g) {
             return b;
         }
@@ -932,6 +928,7 @@ pub fn export_svg(
         opts,
         clips: HashMap::new(),
         tasks: crate::task::task_views(p),
+        jumps: line_jumps(p),
     };
     for (i, s) in shapes.iter().filter(|s| s.is_artboard()).enumerate() {
         if s.artboard_props.as_ref().is_some_and(|a| a.clip) {

@@ -10,7 +10,9 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use mindweave_core::geometry::Frame;
-use mindweave_core::{placed_size, ImageData, ImageFormat, Shape, DUPLICATE_OFFSET};
+use mindweave_core::{
+    placed_size, ImageData, ImageFormat, Shape, DUPLICATE_OFFSET, MAX_IMAGE_BYTES,
+};
 
 use super::EditorWindow;
 
@@ -247,6 +249,133 @@ pub fn clipboard_pictures(item: &ClipboardItem) -> Option<Vec<Vec<u8>>> {
     None
 }
 
+/// Where a picture copied as HTML (a browser's Copy Image of an SVG gives
+/// only `<img src=…>`) comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HtmlPicture {
+    /// Embedded in the HTML (`data:` address): its bytes.
+    Data(Vec<u8>),
+    /// On the web (`https:` or `http:` address).
+    Web(String),
+}
+
+/// The picture of the first `<img>` in clipboard HTML `html`, if its
+/// source is embedded or on the web.
+pub fn html_picture(html: &str) -> Option<HtmlPicture> {
+    let lower = html.to_ascii_lowercase();
+    let img = lower.find("<img")?;
+    let tag_end = lower[img..].find('>').map_or(lower.len(), |e| img + e);
+    let tag = &html[img..tag_end];
+    let tag_lower = &lower[img..tag_end];
+    // `src=` as an attribute, not inside another name such as `data-src=`.
+    let mut from = 0;
+    let at = loop {
+        let i = from + tag_lower[from..].find("src")?;
+        let before = tag_lower[..i].chars().last();
+        let after = tag_lower[i + 3..].trim_start();
+        if before.is_some_and(char::is_whitespace) && after.starts_with('=') {
+            break i;
+        }
+        from = i + 3;
+    };
+    let rest = tag[at + 3..].trim_start()[1..].trim_start();
+    let src = match rest.chars().next()? {
+        q @ ('"' | '\'') => rest[1..].split(q).next()?,
+        _ => rest.split(|c: char| c.is_whitespace() || c == '>').next()?,
+    };
+    let src = src
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    let src = src.trim();
+    if let Some(data) = src.strip_prefix("data:") {
+        let (meta, body) = data.split_once(',')?;
+        let bytes = if meta.ends_with(";base64") {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(body.trim())
+                .ok()?
+        } else {
+            percent_decode(body)
+        };
+        return Some(HtmlPicture::Data(bytes));
+    }
+    let scheme = src.split(':').next()?.to_ascii_lowercase();
+    (scheme == "https" || scheme == "http").then(|| HtmlPicture::Web(src.to_string()))
+}
+
+/// `s` with `%XX` escapes decoded.
+fn percent_decode(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Downloads the picture at web address `url` with the system's `curl`:
+/// https or http only, following redirects, at most [`MAX_IMAGE_BYTES`]
+/// and 20 seconds. Blocks; run it off the main thread.
+pub fn download_picture(url: &str) -> Result<Vec<u8>, String> {
+    let output = std::process::Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--location",
+            "--proto",
+            "=https,http",
+            "--max-time",
+            "20",
+            "--max-filesize",
+            &MAX_IMAGE_BYTES.to_string(),
+            "--",
+            url,
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("Could not download the picture (curl: {e})."))?;
+    if !output.status.success() {
+        let why = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Could not download the picture from {url}. {}",
+            why.trim()
+        ));
+    }
+    if output.stdout.len() > MAX_IMAGE_BYTES {
+        return Err("The picture is larger than 20 MB.".into());
+    }
+    Ok(output.stdout)
+}
+
+/// The HTML on the system clipboard, read directly: gpui does not report
+/// HTML, and a browser's Copy Image of an SVG gives nothing else.
+#[cfg(target_os = "macos")]
+pub fn native_clipboard_html() -> Option<String> {
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::NSString;
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let html = pasteboard.stringForType(&NSString::from_str("public.html"))?;
+    Some(html.to_string())
+}
+
+/// No direct clipboard reading elsewhere yet.
+#[cfg(not(target_os = "macos"))]
+pub fn native_clipboard_html() -> Option<String> {
+    None
+}
+
 /// Whether clipboard text `text` is an SVG picture's source, as
 /// Chromium-based browsers copy an inline SVG (and as icon sites copy
 /// their icons).
@@ -306,6 +435,38 @@ pub fn native_clipboard_picture() -> Option<Vec<u8>> {
 }
 
 impl EditorWindow {
+    /// Places the picture of clipboard HTML (see [`html_picture`]):
+    /// embedded at once, from the web once downloaded in the background.
+    /// Returns whether the HTML held one.
+    pub(super) fn paste_html_picture(
+        &mut self,
+        html: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match html_picture(html) {
+            None => false,
+            Some(HtmlPicture::Data(bytes)) => {
+                self.place_pictures(vec![bytes], window, cx);
+                true
+            }
+            Some(HtmlPicture::Web(url)) => {
+                cx.spawn_in(window, async move |this, cx| {
+                    let fetched = cx
+                        .background_spawn(async move { download_picture(&url) })
+                        .await;
+                    this.update_in(cx, |this, window, cx| match fetched {
+                        Ok(bytes) => this.place_pictures(vec![bytes], window, cx),
+                        Err(e) => window.push_notification(Notification::error(e), cx),
+                    })
+                    .ok();
+                })
+                .detach();
+                true
+            }
+        }
+    }
+
     /// The Image button: asks for picture files and places them.
     pub(super) fn import_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = rfd::AsyncFileDialog::new()
@@ -380,7 +541,9 @@ impl EditorWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_picture_path, is_svg_markup, picture_wins_over, svg_scale};
+    use super::{
+        html_picture, is_picture_path, is_svg_markup, picture_wins_over, svg_scale, HtmlPicture,
+    };
 
     use std::path::Path;
 
@@ -445,5 +608,37 @@ mod tests {
         assert!(!is_svg_markup("Use an <svg> element for icons."));
         assert!(!is_svg_markup("<div><svg></svg></div>"));
         assert!(!is_svg_markup("hello"));
+    }
+
+    #[test]
+    fn copied_html_names_its_picture() {
+        let web = r#"<meta charset='utf-8'><img src="https://www.meilisearch.com/logo.svg" alt="Meilisearch"/>"#;
+        assert_eq!(
+            html_picture(web),
+            Some(HtmlPicture::Web(
+                "https://www.meilisearch.com/logo.svg".into()
+            ))
+        );
+        assert_eq!(
+            html_picture("<IMG alt=x SRC='http://a.b/c.png?x=1&amp;y=2'>"),
+            Some(HtmlPicture::Web("http://a.b/c.png?x=1&y=2".into()))
+        );
+        // `data-src` is not the source.
+        assert_eq!(
+            html_picture(r#"<img data-src="https://a/x.png" src="https://a/y.png">"#),
+            Some(HtmlPicture::Web("https://a/y.png".into()))
+        );
+        assert_eq!(
+            html_picture(r#"<img src="data:image/png;base64,iVBORw0KGgo=">"#),
+            Some(HtmlPicture::Data(b"\x89PNG\r\n\x1a\n".to_vec()))
+        );
+        assert_eq!(
+            html_picture(r#"<img src="data:image/svg+xml,%3Csvg%2F%3E">"#),
+            Some(HtmlPicture::Data(b"<svg/>".to_vec()))
+        );
+        // Nothing to fetch: no picture, a local file, a script address.
+        assert_eq!(html_picture("<p>hello</p>"), None);
+        assert_eq!(html_picture(r#"<img src="file:///etc/passwd">"#), None);
+        assert_eq!(html_picture(r#"<img src="javascript:alert(1)">"#), None);
     }
 }

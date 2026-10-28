@@ -252,20 +252,10 @@ pub fn text_wrap(shape: &Shape) -> Option<f32> {
     }
 }
 
-/// The part of `shape`'s box (local coordinates) its label goes in: all
-/// of it, but for a topic the part beside its icon and badge and below
-/// its image.
+/// The part of `shape`'s box (local coordinates) its label goes in (see
+/// [`Shape::label_area`]).
 pub fn label_area(shape: &Shape) -> Rect {
-    let f = &shape.frame;
-    match &shape.topic {
-        Some(t) => t.parts(f.w, f.h).text,
-        None => Rect {
-            x: 0.,
-            y: 0.,
-            w: f.w,
-            h: f.h,
-        },
-    }
+    shape.label_area()
 }
 
 /// Where `shape`'s text, laid out `size` canvas units big, sits: a line
